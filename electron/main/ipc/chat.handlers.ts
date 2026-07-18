@@ -37,12 +37,6 @@ export function registerChatHandlers(): void {
           return;
         }
 
-        // Reset message hub state for new conversation
-        messageHub.reset();
-
-        // Notify that agent is thinking
-        messageHub.notifyThinking(projectId);
-
         // Run the Claude Agent SDK (directly pushes to frontend via MessageHub)
         await runAgent(message, {
           projectId,

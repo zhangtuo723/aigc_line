@@ -20,12 +20,6 @@ interface ToolCallInfo {
   error?: string;
 }
 
-let toolCallCounter = 0;
-
-function generateToolId(): string {
-  return `tool-${Date.now()}-${++toolCallCounter}`;
-}
-
 export async function runAgent(
   userMessage: ChatMessage,
   options: AgentOptions,
@@ -62,8 +56,8 @@ export async function runAgent(
         hooks: {
           PreToolUse: [{
             hooks: [async (input) => {
-              const toolInput = input as { tool_name: string; tool_input: unknown };
-              const toolId = generateToolId();
+              const toolInput = input as { tool_name: string; tool_input: unknown; tool_use_id: string };
+              const toolId = toolInput.tool_use_id;
               const toolCall: ToolCallInfo = {
                 id: toolId,
                 toolName: toolInput.tool_name,
@@ -71,7 +65,7 @@ export async function runAgent(
                 status: 'running',
               };
               activeToolCalls.set(toolId, toolCall);
-              log.info('[Agent] Tool started:', toolInput.tool_name, JSON.stringify(toolInput.tool_input).slice(0, 200));
+              log.info('[Agent] Tool started:', toolInput.tool_name, 'id:', toolId, JSON.stringify(toolInput.tool_input).slice(0, 200));
               // Push tool-start event directly to frontend and persist
               const toolCallMsg: ChatMessage = {
                 id: toolId,
@@ -92,22 +86,17 @@ export async function runAgent(
           }],
           PostToolUse: [{
             hooks: [async (input) => {
-              const postInput = input as { tool_name: string; duration_ms?: number; result?: unknown };
-              // Find the most recent running tool call for this tool
-              let latestTool: ToolCallInfo | undefined;
-              for (const [_, tool] of activeToolCalls) {
-                if (tool.toolName === postInput.tool_name && tool.status === 'running') {
-                  latestTool = tool;
-                }
+              const postInput = input as { tool_name: string; duration_ms?: number; tool_response: unknown; tool_use_id: string };
+              const toolId = postInput.tool_use_id;
+              // Find the tool call in our tracking map
+              const tool = activeToolCalls.get(toolId);
+              if (tool) {
+                tool.status = 'completed';
+                tool.duration = postInput.duration_ms;
               }
-              if (latestTool) {
-                latestTool.status = 'completed';
-                latestTool.duration = postInput.duration_ms;
-              }
-              log.info('[Agent] Tool completed:', postInput.tool_name, 'duration:', postInput.duration_ms + 'ms');
+              log.info('[Agent] Tool completed:', postInput.tool_name, 'id:', toolId, 'duration:', postInput.duration_ms + 'ms');
               // Update the existing tool-start message in history with completed status
-              const toolId = latestTool?.id || `tool-${Date.now()}`;
-              const toolResult = postInput.result ? JSON.stringify(postInput.result).slice(0, 1000) : undefined;
+              const toolResult = postInput.tool_response ? JSON.stringify(postInput.tool_response).slice(0, 1000) : undefined;
               const updatedMsg: ChatMessage = {
                 id: toolId,
                 role: 'system',
@@ -116,7 +105,7 @@ export async function runAgent(
                 toolCall: {
                   id: toolId,
                   toolName: postInput.tool_name,
-                  toolInput: JSON.stringify(postInput).slice(0, 500),
+                  toolInput: tool?.toolInput ? JSON.stringify(tool.toolInput).slice(0, 500) : JSON.stringify(postInput).slice(0, 500),
                   status: 'completed',
                   duration: postInput.duration_ms,
                   toolResult,
