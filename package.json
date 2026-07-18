@@ -1,0 +1,50 @@
+{
+  "name": "aigc-line",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AIGC Line - Electron desktop agent for storyboard video generation.",
+  "license": "MIT",
+  "author": "zhangtuo",
+  "type": "module",
+  "main": "dist-electron/main/index.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && electron-builder",
+    "preview": "vite preview",
+    "pretest": "vite build --mode=test",
+    "test": "vitest run",
+    "test:e2e": "pnpm pretest && playwright test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.214",
+    "@anthropic-ai/sdk": "^0.112.3",
+    "chokidar": "^4.0.0",
+    "electron-log": "^5.4.0",
+    "electron-updater": "^6.8.3",
+    "subtitle": "^4.2.0",
+    "uuid": "^11.1.0",
+    "zustand": "^5.0.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@tailwindcss/vite": "^4.3.0",
+    "@types/react": "^19.2.16",
+    "@types/react-dom": "^19.2.3",
+    "@types/uuid": "^10.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^42.1.0",
+    "electron-builder": "^26.8.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "tailwindcss": "^4.3.0",
+    "typescript": "^6.0.3",
+    "vite": "^5.4.19",
+    "vite-plugin-electron": "^0.28.0",
+    "vite-plugin-electron-renderer": "^1.0.0",
+    "vitest": "^1.6.1"
+  },
+  "optionalDependencies": {
+    "@rolldown/binding-win32-x64-msvc": "^1.1.5"
+  }
+}

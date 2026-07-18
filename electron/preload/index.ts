@@ -1,0 +1,159 @@
+import { ipcRenderer, contextBridge } from 'electron';
+import type { IpcRendererEvent } from 'electron';
+import { IPC_CHANNELS } from '../../src/shared/ipc.channels';
+import type {
+  Project,
+  ProjectIndex,
+  WorkspaceState,
+  WorkflowOptions,
+  WorkflowProgress,
+  WorkflowResult,
+  ProjectManifest,
+  ChatMessage,
+} from '../../src/shared/ipc.types';
+
+export interface ElectronAPI {
+  createProject: (name: string, folderPath: string) => Promise<Project>;
+  listProjects: () => Promise<ProjectIndex>;
+  loadProject: (id: string) => Promise<Project | null>;
+  deleteProject: (id: string) => Promise<void>;
+  scanWorkspace: (folderPath: string) => Promise<WorkspaceState>;
+  runWorkflow: (projectId: string, options?: WorkflowOptions) => Promise<string>;
+  cancelWorkflow: () => Promise<void>;
+  readManifest: (folderPath: string) => Promise<ProjectManifest | null>;
+  updateScenePrompt: (folderPath: string, cueId: number, prompt: string) => Promise<ProjectManifest>;
+  sendChatMessage: (projectId: string, message: ChatMessage) => Promise<void>;
+  loadChatHistory: (folderPath: string) => Promise<ChatMessage[]>;
+  onProgress: (callback: (progress: WorkflowProgress) => void) => () => void;
+  onComplete: (callback: (result: WorkflowResult) => void) => () => void;
+  onWorkspaceChanged: (callback: () => void) => () => void;
+  onChatMessage: (callback: (message: ChatMessage) => void) => () => void;
+  showOpenDialog: (options?: Electron.OpenDialogOptions) => Promise<string[]>;
+  showItemInFolder: (path: string) => void;
+}
+
+const invoke = <T>(channel: string, ...args: unknown[]): Promise<T> =>
+  ipcRenderer.invoke(channel, ...args);
+
+const onPush = <T>(channel: string, callback: (payload: T) => void) => {
+  const handler = (_event: IpcRendererEvent, payload: T) => callback(payload);
+  ipcRenderer.on(channel, handler);
+  return () => ipcRenderer.off(channel, handler);
+};
+
+const api: ElectronAPI = {
+  createProject: (name, folderPath) =>
+    invoke(IPC_CHANNELS.project.create, name, folderPath),
+  listProjects: () => invoke(IPC_CHANNELS.project.list),
+  loadProject: (id) => invoke(IPC_CHANNELS.project.load, id),
+  deleteProject: (id) => invoke(IPC_CHANNELS.project.delete, id),
+  scanWorkspace: (folderPath) => invoke(IPC_CHANNELS.workspace.scan, folderPath),
+  runWorkflow: (projectId, options) =>
+    invoke(IPC_CHANNELS.workflow.run, projectId, options),
+  cancelWorkflow: () => invoke(IPC_CHANNELS.workflow.cancel),
+  readManifest: (folderPath) => invoke(IPC_CHANNELS.manifest.read, folderPath),
+  updateScenePrompt: (folderPath, cueId, prompt) =>
+    invoke(IPC_CHANNELS.manifest.updateScene, folderPath, cueId, prompt),
+  sendChatMessage: (projectId, message) =>
+    invoke(IPC_CHANNELS.chat.sendMessage, projectId, message),
+  loadChatHistory: (folderPath) => invoke(IPC_CHANNELS.chat.loadHistory, folderPath),
+  onProgress: (callback) => onPush(IPC_CHANNELS.push.progress, callback),
+  onComplete: (callback) => onPush(IPC_CHANNELS.push.complete, callback),
+  onWorkspaceChanged: (callback) => onPush(IPC_CHANNELS.push.changed, callback),
+  onChatMessage: (callback) => onPush(IPC_CHANNELS.push.chatMessage, callback),
+  showOpenDialog: (options) => invoke('dialog:showOpenDialog', options),
+  showItemInFolder: (path) => ipcRenderer.send('shell:showItemInFolder', path),
+};
+
+contextBridge.exposeInMainWorld('electronAPI', api);
+
+declare global {
+  interface Window {
+    electronAPI: ElectronAPI;
+  }
+}
+
+function domReady(condition: DocumentReadyState[] = ['complete', 'interactive']) {
+  return new Promise((resolve) => {
+    if (condition.includes(document.readyState)) {
+      resolve(true);
+    } else {
+      document.addEventListener('readystatechange', () => {
+        if (condition.includes(document.readyState)) {
+          resolve(true);
+        }
+      });
+    }
+  });
+}
+
+const safeDOM = {
+  append(parent: HTMLElement, child: HTMLElement) {
+    if (!Array.from(parent.children).find((e) => e === child)) {
+      return parent.appendChild(child);
+    }
+  },
+  remove(parent: HTMLElement, child: HTMLElement) {
+    if (Array.from(parent.children).find((e) => e === child)) {
+      return parent.removeChild(child);
+    }
+  },
+};
+
+function useLoading() {
+  const className = `loaders-css__square-spin`;
+  const styleContent = `
+@keyframes square-spin {
+  25% { transform: perspective(100px) rotateX(180deg) rotateY(0); }
+  50% { transform: perspective(100px) rotateX(180deg) rotateY(180deg); }
+  75% { transform: perspective(100px) rotateX(0) rotateY(180deg); }
+  100% { transform: perspective(100px) rotateX(0) rotateY(0); }
+}
+.${className} > div {
+  animation-fill-mode: both;
+  width: 50px;
+  height: 50px;
+  background: #fff;
+  animation: square-spin 3s 0s cubic-bezier(0.09, 0.57, 0.49, 0.9) infinite;
+}
+.app-loading-wrap {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #282c34;
+  z-index: 9;
+}
+    `;
+  const oStyle = document.createElement('style');
+  const oDiv = document.createElement('div');
+
+  oStyle.id = 'app-loading-style';
+  oStyle.innerHTML = styleContent;
+  oDiv.className = 'app-loading-wrap';
+  oDiv.innerHTML = `<div class="${className}"><div></div></div>`;
+
+  return {
+    appendLoading() {
+      safeDOM.append(document.head, oStyle);
+      safeDOM.append(document.body, oDiv);
+    },
+    removeLoading() {
+      safeDOM.remove(document.head, oStyle);
+      safeDOM.remove(document.body, oDiv);
+    },
+  };
+}
+
+const { appendLoading, removeLoading } = useLoading();
+domReady().then(appendLoading);
+
+window.onmessage = (ev) => {
+  ev.data.payload === 'removeLoading' && removeLoading();
+};
+
+setTimeout(removeLoading, 4999);
