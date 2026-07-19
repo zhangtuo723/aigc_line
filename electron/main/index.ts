@@ -8,6 +8,7 @@ import { registerProjectHandlers } from './ipc/project.handlers'
 import { registerWorkspaceHandlers, stopAllWatchers } from './ipc/workspace.handlers'
 import { registerWorkflowHandlers } from './ipc/workflow.handlers'
 import { registerChatHandlers } from './ipc/chat.handlers'
+import { registerCanvasHandlers } from './ipc/canvas.handlers'
 
 const require = createRequire(import.meta.url)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -51,6 +52,7 @@ registerProjectHandlers()
 registerWorkspaceHandlers()
 registerWorkflowHandlers()
 registerChatHandlers()
+registerCanvasHandlers()
 
 async function createWindow() {
   win = new BrowserWindow({

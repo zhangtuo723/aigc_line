@@ -16,6 +16,7 @@ const PROJECT_DIR_NAME = '.aigc-line';
 const MANIFEST_FILE = 'manifest.json';
 const CHAT_HISTORY_FILE = 'chat-history.json';
 const SESSION_FILE = 'session.json';
+const CANVAS_SNAPSHOT_FILE = 'canvas-snapshot.json';
 
 export function getAppDataDir(): string {
   const dir = path.join(app.getPath('userData'), APP_DIR_NAME);
@@ -238,5 +239,25 @@ export async function writeSessionId(folderPath: string, sessionId: string): Pro
   const filePath = path.join(dir, SESSION_FILE);
   const tmpPath = `${filePath}.tmp`;
   await fs.writeFile(tmpPath, JSON.stringify({ sessionId }, null, 2), 'utf-8');
+  await fs.rename(tmpPath, filePath);
+}
+
+// Canvas snapshot persistence
+export async function readCanvasSnapshot(folderPath: string): Promise<unknown | null> {
+  const filePath = path.join(folderPath, PROJECT_DIR_NAME, CANVAS_SNAPSHOT_FILE);
+  try {
+    const data = await fs.readFile(filePath, 'utf-8');
+    return JSON.parse(data);
+  } catch {
+    return null;
+  }
+}
+
+export async function writeCanvasSnapshot(folderPath: string, snapshot: unknown): Promise<void> {
+  const dir = path.join(folderPath, PROJECT_DIR_NAME);
+  await fs.mkdir(dir, { recursive: true });
+  const filePath = path.join(dir, CANVAS_SNAPSHOT_FILE);
+  const tmpPath = `${filePath}.tmp`;
+  await fs.writeFile(tmpPath, JSON.stringify(snapshot, null, 2), 'utf-8');
   await fs.rename(tmpPath, filePath);
 }

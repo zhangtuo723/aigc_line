@@ -81,4 +81,23 @@
   *::-webkit-scrollbar-thumb:hover {
     background: #64748b;
   }
+
+  /* tldraw canvas overrides */
+  .tldraw-canvas {
+    --tl-color-background: transparent;
+  }
+
+  .tldraw-canvas .tl-container {
+    background: transparent !important;
+  }
+
+  /* Move tldraw bottom toolbar up to avoid input overlap */
+  .tlui-layout__bottom {
+    bottom: 120px !important;
+  }
+
+  /* Target the actual toolbar container */
+  .tlui-layout__bottom > div[class*="tlui-toolbar"] {
+    bottom: 120px !important;
+  }
 }

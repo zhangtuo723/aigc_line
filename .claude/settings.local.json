@@ -47,7 +47,8 @@
       "Bash(python /tmp/fix_comfy.py)",
       "Bash(python /tmp/fix_watcher.py)",
       "Bash(python /tmp/fix_import.py)",
-      "Bash(xargs rm *)"
+      "Bash(xargs rm *)",
+      "WebFetch(domain:www.npmjs.com)"
     ]
   }
 }

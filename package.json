@@ -23,6 +23,7 @@
     "electron-log": "^5.4.0",
     "electron-updater": "^6.8.3",
     "subtitle": "^4.2.0",
+    "tldraw": "^5.2.5",
     "uuid": "^11.1.0",
     "zustand": "^5.0.3"
   },

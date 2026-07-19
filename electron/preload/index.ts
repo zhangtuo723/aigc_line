@@ -24,6 +24,8 @@ export interface ElectronAPI {
   updateScenePrompt: (folderPath: string, cueId: number, prompt: string) => Promise<ProjectManifest>;
   sendChatMessage: (projectId: string, message: ChatMessage) => Promise<void>;
   loadChatHistory: (folderPath: string) => Promise<ChatMessage[]>;
+  saveCanvasSnapshot: (folderPath: string, snapshot: unknown) => Promise<{ success: boolean }>;
+  loadCanvasSnapshot: (folderPath: string) => Promise<unknown | null>;
   onProgress: (callback: (progress: WorkflowProgress) => void) => () => void;
   onComplete: (callback: (result: WorkflowResult) => void) => () => void;
   onWorkspaceChanged: (callback: () => void) => () => void;
@@ -57,6 +59,8 @@ const api: ElectronAPI = {
   sendChatMessage: (projectId, message) =>
     invoke(IPC_CHANNELS.chat.sendMessage, projectId, message),
   loadChatHistory: (folderPath) => invoke(IPC_CHANNELS.chat.loadHistory, folderPath),
+  saveCanvasSnapshot: (folderPath, snapshot) => invoke(IPC_CHANNELS.canvas.save, folderPath, snapshot),
+  loadCanvasSnapshot: (folderPath) => invoke(IPC_CHANNELS.canvas.load, folderPath),
   onProgress: (callback) => onPush(IPC_CHANNELS.push.progress, callback),
   onComplete: (callback) => onPush(IPC_CHANNELS.push.complete, callback),
   onWorkspaceChanged: (callback) => onPush(IPC_CHANNELS.push.changed, callback),

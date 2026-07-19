@@ -22,6 +22,10 @@ export const IPC_CHANNELS = {
     receiveMessage: 'chat:receiveMessage',
     loadHistory: 'chat:loadHistory',
   },
+  canvas: {
+    save: 'canvas:save',
+    load: 'canvas:load',
+  },
   push: {
     progress: 'workflow:progress',
     complete: 'workflow:complete',

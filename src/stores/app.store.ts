@@ -23,6 +23,7 @@ interface AppState {
   comfyuiBaseUrl: string;
   messages: ChatMessage[];
   isAgentThinking: boolean;
+  sidebarCollapsed: boolean;
 
   setProjects: (projects: ProjectIndex) => void;
   setCurrentProject: (project: Project | null) => void;
@@ -35,7 +36,8 @@ interface AppState {
   setComfyuiBaseUrl: (url: string) => void;
   setMessages: (messages: ChatMessage[]) => void;
   addMessage: (message: ChatMessage) => void;
-  setAgentThinking: (thinking: boolean) => void;
+  setAgentThinking: (isAgentThinking: boolean) => void;
+  setSidebarCollapsed: (collapsed: boolean) => void;
 
   loadProjects: () => Promise<void>;
   createProject: (name: string, folderPath: string) => Promise<Project>;
@@ -64,6 +66,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   comfyuiBaseUrl: 'http://127.0.0.1:8188',
   messages: [],
   isAgentThinking: false,
+  sidebarCollapsed: false,
 
   setProjects: (projects) => set({ projects }),
   setCurrentProject: (currentProject) => set({ currentProject }),
@@ -77,6 +80,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setMessages: (messages) => set({ messages }),
   addMessage: (message) => set((state) => ({ messages: [...state.messages, message] })),
   setAgentThinking: (isAgentThinking) => set({ isAgentThinking }),
+  setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
 
   loadProjects: async () => {
     const projects = await electronAPI.listProjects();

@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { ProjectList } from './components/ProjectList';
-import { ChatArea } from './components/ChatArea';
+import { CanvasWorkspace } from './components/CanvasWorkspace';
 import { useAppStore } from './stores/app.store';
 
 function App() {
@@ -13,14 +13,10 @@ function App() {
   return (
     <div className='flex h-screen overflow-hidden bg-slate-50 text-slate-900'>
       {/* Left sidebar - Project list */}
-      <aside className='w-64 flex-shrink-0'>
-        <ProjectList />
-      </aside>
+      <ProjectList />
 
-      {/* Right area - Chat */}
-      <main className='flex flex-1 flex-col overflow-hidden'>
-        <ChatArea />
-      </main>
+      {/* Right area - Canvas Workspace */}
+      <CanvasWorkspace />
     </div>
   );
 }
