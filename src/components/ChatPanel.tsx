@@ -1,61 +1,16 @@
-import { useRef, useEffect, useState, useCallback } from 'react'
+import { useRef, useEffect } from 'react'
 import type { ChatMessage as ChatMessageType } from '../shared/ipc.types'
 import { ChatMessageItem } from './ChatMessage'
 import { ChatInput } from './ChatInput'
 import { useAppStore } from '../stores/app.store'
 
-export function FloatingChat() {
+export function ChatPanel() {
   const { messages, isAgentThinking, currentProject, sendChatMessage } = useAppStore()
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const dragRef = useRef<{ isDragging: boolean; startX: number; startY: number; initialLeft: number; initialTop: number }>({
-    isDragging: false,
-    startX: 0,
-    startY: 0,
-    initialLeft: 0,
-    initialTop: 0,
-  })
-
-  const [position, setPosition] = useState({ left: 16, top: 16 })
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
-
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    const dragData = dragRef.current
-    dragData.isDragging = true
-    dragData.startX = e.clientX
-    dragData.startY = e.clientY
-    dragData.initialLeft = position.left
-    dragData.initialTop = position.top
-    e.preventDefault()
-  }, [position])
-
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      const dragData = dragRef.current
-      if (!dragData.isDragging) return
-
-      const deltaX = e.clientX - dragData.startX
-      const deltaY = e.clientY - dragData.startY
-
-      setPosition({
-        left: dragData.initialLeft + deltaX,
-        top: dragData.initialTop + deltaY,
-      })
-    }
-
-    const handleMouseUp = () => {
-      dragRef.current.isDragging = false
-    }
-
-    window.addEventListener('mousemove', handleMouseMove)
-    window.addEventListener('mouseup', handleMouseUp)
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove)
-      window.removeEventListener('mouseup', handleMouseUp)
-    }
-  }, [])
 
   const handleSend = (content: string, attachments?: ChatMessageType['attachments']) => {
     if (!currentProject) return
@@ -63,22 +18,14 @@ export function FloatingChat() {
   }
 
   return (
-    <div
-      className="absolute z-10 flex h-[80%] w-96 flex-col rounded-2xl border border-slate-200/60 bg-white/80 shadow-lg backdrop-blur-md"
-      style={{ left: position.left, top: position.top }}
-    >
-      {/* Draggable Header */}
-      <div
-        className="flex cursor-move items-center justify-between border-b border-slate-200/50 px-4 py-3 select-none"
-        onMouseDown={handleMouseDown}
-      >
-        <div className="flex items-center gap-2">
-          <svg className="h-4 w-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8h16M4 16h16" />
-          </svg>
-          <h3 className="text-sm font-semibold text-slate-700">对话记录</h3>
-        </div>
-        <span className="text-xs text-slate-400">{messages.length} 条消息</span>
+    <div className="flex h-full flex-col border-l border-slate-200 bg-white">
+      {/* Header */}
+      <div className="flex items-center gap-2 border-b border-slate-200 px-4 py-3">
+        <svg className="h-4 w-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8h16M4 16h16" />
+        </svg>
+        <h3 className="text-sm font-semibold text-slate-700">对话记录</h3>
+        <span className="ml-auto text-xs text-slate-400">{messages.length} 条消息</span>
       </div>
 
       {/* Messages area */}
@@ -115,8 +62,8 @@ export function FloatingChat() {
         )}
       </div>
 
-      {/* Input area - integrated at bottom of chat panel */}
-      <div className="border-t border-slate-200/50 bg-white/50 p-3">
+      {/* Input area */}
+      <div className="border-t border-slate-200 bg-white p-3">
         <ChatInput onSend={handleSend} disabled={!currentProject || isAgentThinking} />
       </div>
     </div>

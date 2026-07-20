@@ -1,7 +1,6 @@
 import { Tldraw, useEditor, getSnapshot, loadSnapshot, type TLEditorSnapshot } from 'tldraw'
 import 'tldraw/tldraw.css'
 import { useRef, useEffect } from 'react'
-import { FloatingChat } from './FloatingChat'
 import { useAppStore } from '../stores/app.store'
 
 // Canvas persistence component - handles save/load
@@ -54,25 +53,19 @@ function CanvasPersistence({ folderPath }: { folderPath: string }) {
   return null
 }
 
-export function CanvasWorkspace() {
+export function CanvasArea() {
   const { currentProject } = useAppStore()
 
   return (
-    <div className="relative flex-1 overflow-hidden">
-      {/* Floating chat panel with integrated input - overlay on canvas */}
-      <FloatingChat />
-
-      {/* tldraw canvas - full screen background */}
-      <div className="absolute inset-0 z-0">
-        <Tldraw
-          hideUi={false}
-          className="tldraw-canvas"
-        >
-          {currentProject && (
-            <CanvasPersistence folderPath={currentProject.folderPath} />
-          )}
-        </Tldraw>
-      </div>
+    <div className="relative h-full w-full overflow-hidden">
+      <Tldraw
+        hideUi={false}
+        className="tldraw-canvas"
+      >
+        {currentProject && (
+          <CanvasPersistence folderPath={currentProject.folderPath} />
+        )}
+      </Tldraw>
     </div>
   )
 }

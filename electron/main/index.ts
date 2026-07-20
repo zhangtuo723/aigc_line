@@ -5,8 +5,6 @@ import path from 'node:path'
 import os from 'node:os'
 import { update } from './update'
 import { registerProjectHandlers } from './ipc/project.handlers'
-import { registerWorkspaceHandlers, stopAllWatchers } from './ipc/workspace.handlers'
-import { registerWorkflowHandlers } from './ipc/workflow.handlers'
 import { registerChatHandlers } from './ipc/chat.handlers'
 import { registerCanvasHandlers } from './ipc/canvas.handlers'
 
@@ -49,8 +47,6 @@ const preload = path.join(__dirname, '../preload/index.mjs')
 const indexHtml = path.join(RENDERER_DIST, 'index.html')
 
 registerProjectHandlers()
-registerWorkspaceHandlers()
-registerWorkflowHandlers()
 registerChatHandlers()
 registerCanvasHandlers()
 
@@ -98,7 +94,6 @@ app.whenReady().then(createWindow)
 
 app.on('window-all-closed', () => {
   win = null
-  stopAllWatchers()
   if (process.platform !== 'darwin') app.quit()
 })
 

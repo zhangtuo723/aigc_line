@@ -7,79 +7,6 @@ export interface Project {
   updatedAt: number;
 }
 
-export interface Cue {
-  id: number;
-  start: number;
-  end: number;
-  text: string;
-}
-
-export type ImageStyle = 'pencil' | 'ink' | 'marker';
-
-export interface WorkflowOptions {
-  comfyuiBaseUrl?: string;
-  imageStyle?: ImageStyle;
-}
-
-export type WorkflowStep =
-  | 'idle'
-  | 'parsing'
-  | 'prompting'
-  | 'generating'
-  | 'assembling'
-  | 'done'
-  | 'error';
-
-export interface WorkflowProgress {
-  runId: string;
-  projectId: string;
-  step: WorkflowStep;
-  percent: number;
-  message: string;
-  cueId?: number;
-}
-
-export interface WorkflowResult {
-  runId: string;
-  projectId: string;
-  status: 'success' | 'cancelled' | 'error';
-  outputPath?: string;
-  error?: string;
-}
-
-export interface WorkspaceState {
-  audioFound: boolean;
-  srtFound: boolean;
-  audioPath?: string;
-  srtPath?: string;
-  cueCount: number;
-  valid: boolean;
-}
-
-export interface Scene {
-  cueId: number;
-  prompt: string;
-  imagePath?: string;
-}
-
-export interface ProjectRun {
-  runId: string;
-  startedAt: number;
-  finishedAt?: number;
-  outputPath?: string;
-  status: string;
-}
-
-export interface ProjectManifest {
-  projectId: string;
-  folderPath: string;
-  audioPath?: string;
-  srtPath?: string;
-  cues: Cue[];
-  scenes: Scene[];
-  runs: ProjectRun[];
-}
-
 export interface ProjectIndex {
   projects: Project[];
   lastOpenedId?: string;
@@ -89,7 +16,7 @@ export interface ProjectIndex {
 export type MessageRole = 'user' | 'assistant' | 'system';
 
 export interface Attachment {
-  type: 'srt' | 'mp3';
+  type: string;
   name: string;
   path: string;
 }

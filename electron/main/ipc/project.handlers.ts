@@ -7,7 +7,6 @@ import {
   deleteProject,
   setLastOpened,
   readManifest,
-  writeManifest,
 } from '../services/project.store';
 
 export function registerProjectHandlers(): void {
@@ -34,26 +33,9 @@ export function registerProjectHandlers(): void {
     await deleteProject(id);
   });
 
-  ipcMain.handle(IPC_CHANNELS.manifest.read, async (_event, folderPath: string) => {
+  ipcMain.handle('manifest:read', async (_event, folderPath: string) => {
     return readManifest(folderPath);
   });
-
-  ipcMain.handle(
-    IPC_CHANNELS.manifest.updateScene,
-    async (_event, folderPath: string, cueId: number, prompt: string) => {
-      const manifest = await readManifest(folderPath);
-      if (!manifest) {
-        throw new Error('项目清单不存在');
-      }
-      const scene = manifest.scenes.find((s) => s.cueId === cueId);
-      if (!scene) {
-        throw new Error(`未找到 cue ${cueId} 对应的 scene`);
-      }
-      scene.prompt = prompt;
-      await writeManifest(folderPath, manifest);
-      return manifest;
-    },
-  );
 
   ipcMain.handle('dialog:showOpenDialog', async (_event, options) => {
     const result = await dialog.showOpenDialog({

@@ -201,23 +201,17 @@ function extractMessageText(message: unknown): string | null {
 }
 
 function buildAgentPrompt(userMessage: ChatMessage, folderPath: string): string {
-  const basePrompt = `You are AIGC Line Agent, a helpful assistant for creating storyboard videos.
+  const basePrompt = `You are a helpful AI assistant. You can help users with a wide range of tasks including coding, writing, analysis, and general questions.
 
 Your workspace is: ${folderPath}
 
-You can:
+You have access to the following tools:
 1. Read files in the workspace
 2. Run shell commands
 3. Search for files
-4. Execute the video generation workflow
+4. Edit and write files
 
-When the user uploads files or asks to generate a video, you should:
-1. Check what files are in the workspace
-2. Parse the SRT file to understand the cues
-3. Generate scene prompts for each cue
-4. Generate storyboard images using ComfyUI
-5. Assemble the final video using Hyperframes
-`;
+When the user asks you to do something, use the available tools as needed to help them. Be concise and helpful in your responses.`;
 
   let prompt = basePrompt;
 

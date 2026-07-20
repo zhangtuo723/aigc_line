@@ -4,11 +4,6 @@ import { IPC_CHANNELS } from '../../src/shared/ipc.channels';
 import type {
   Project,
   ProjectIndex,
-  WorkspaceState,
-  WorkflowOptions,
-  WorkflowProgress,
-  WorkflowResult,
-  ProjectManifest,
   ChatMessage,
 } from '../../src/shared/ipc.types';
 
@@ -17,18 +12,10 @@ export interface ElectronAPI {
   listProjects: () => Promise<ProjectIndex>;
   loadProject: (id: string) => Promise<Project | null>;
   deleteProject: (id: string) => Promise<void>;
-  scanWorkspace: (folderPath: string) => Promise<WorkspaceState>;
-  runWorkflow: (projectId: string, options?: WorkflowOptions) => Promise<string>;
-  cancelWorkflow: () => Promise<void>;
-  readManifest: (folderPath: string) => Promise<ProjectManifest | null>;
-  updateScenePrompt: (folderPath: string, cueId: number, prompt: string) => Promise<ProjectManifest>;
   sendChatMessage: (projectId: string, message: ChatMessage) => Promise<void>;
   loadChatHistory: (folderPath: string) => Promise<ChatMessage[]>;
   saveCanvasSnapshot: (folderPath: string, snapshot: unknown) => Promise<{ success: boolean }>;
   loadCanvasSnapshot: (folderPath: string) => Promise<unknown | null>;
-  onProgress: (callback: (progress: WorkflowProgress) => void) => () => void;
-  onComplete: (callback: (result: WorkflowResult) => void) => () => void;
-  onWorkspaceChanged: (callback: () => void) => () => void;
   onChatMessage: (callback: (message: ChatMessage) => void) => () => void;
   showOpenDialog: (options?: Electron.OpenDialogOptions) => Promise<string[]>;
   showItemInFolder: (path: string) => void;
@@ -49,21 +36,11 @@ const api: ElectronAPI = {
   listProjects: () => invoke(IPC_CHANNELS.project.list),
   loadProject: (id) => invoke(IPC_CHANNELS.project.load, id),
   deleteProject: (id) => invoke(IPC_CHANNELS.project.delete, id),
-  scanWorkspace: (folderPath) => invoke(IPC_CHANNELS.workspace.scan, folderPath),
-  runWorkflow: (projectId, options) =>
-    invoke(IPC_CHANNELS.workflow.run, projectId, options),
-  cancelWorkflow: () => invoke(IPC_CHANNELS.workflow.cancel),
-  readManifest: (folderPath) => invoke(IPC_CHANNELS.manifest.read, folderPath),
-  updateScenePrompt: (folderPath, cueId, prompt) =>
-    invoke(IPC_CHANNELS.manifest.updateScene, folderPath, cueId, prompt),
   sendChatMessage: (projectId, message) =>
     invoke(IPC_CHANNELS.chat.sendMessage, projectId, message),
   loadChatHistory: (folderPath) => invoke(IPC_CHANNELS.chat.loadHistory, folderPath),
   saveCanvasSnapshot: (folderPath, snapshot) => invoke(IPC_CHANNELS.canvas.save, folderPath, snapshot),
   loadCanvasSnapshot: (folderPath) => invoke(IPC_CHANNELS.canvas.load, folderPath),
-  onProgress: (callback) => onPush(IPC_CHANNELS.push.progress, callback),
-  onComplete: (callback) => onPush(IPC_CHANNELS.push.complete, callback),
-  onWorkspaceChanged: (callback) => onPush(IPC_CHANNELS.push.changed, callback),
   onChatMessage: (callback) => onPush(IPC_CHANNELS.push.chatMessage, callback),
   showOpenDialog: (options) => invoke('dialog:showOpenDialog', options),
   showItemInFolder: (path) => ipcRenderer.send('shell:showItemInFolder', path),
