@@ -35,13 +35,30 @@ export interface ToolCall {
 }
 
 // Artifact types
-export type ArtifactType = 'markdown' | 'html' | 'image';
+export type ArtifactType = 'markdown' | 'html' | 'image' | 'storyboard';
+
+/** One shot in a short-drama storyboard (stored as a `.storyboard.json` array) */
+export interface StoryboardShot {
+  index: number; // 镜号
+  duration: number; // 时长（秒）
+  scene: string; // 画面描述/场景
+  dialogue?: string; // 台词/旁白
+  camera?: string; // 运镜/景别（如 推镜/特写）
+  textToImagePrompt: string; // 文生图提示词
+  imageToVideoPrompt: string; // 图生视频提示词
+  imageSource?: string; // 当前选定的图片（工作区相对路径）
+  imageSourceHistory?: string[]; // 历史抽卡记录（旧版本图片路径）
+  videoSource?: string; // 当前选定的视频（工作区相对路径）
+  videoSourceHistory?: string[]; // 历史抽卡记录（旧版本视频路径）
+}
 
 export interface Artifact {
   id: string;
   type: ArtifactType;
   title: string;
   content: string;
+  /** Workspace-relative source file path (for storyboard artifacts, edits are saved back to it) */
+  path?: string;
   width: number;
   height: number;
   timestamp: number;
@@ -54,10 +71,21 @@ export interface ChatMessage {
   content: string;
   timestamp: number;
   attachments?: Attachment[];
+  /** Canvas artifacts the user referenced (clicked) for this message */
+  artifactRefs?: ArtifactRef[];
   // For tool call messages
   toolCall?: ToolCall;
   // For artifact messages
   artifact?: Artifact;
+}
+
+/** A lightweight pointer to a canvas artifact, attached to a chat message */
+export interface ArtifactRef {
+  id: string;
+  title: string;
+  type: ArtifactType;
+  /** Workspace-relative source file path, if the artifact has one */
+  path?: string;
 }
 
 // ===== MessageHub types =====

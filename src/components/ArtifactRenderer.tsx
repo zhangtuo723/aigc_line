@@ -1,6 +1,7 @@
 import type { Artifact } from '../shared/ipc.types'
 import type { ReactNode } from 'react'
 import { Markdown } from './Markdown'
+import { StoryboardCard } from './StoryboardCard'
 import { useAppStore } from '../stores/app.store'
 
 interface ArtifactCardProps {
@@ -129,6 +130,25 @@ ${content}
   )
 }
 
+function StoryboardArtifactCard({ artifact, onClose }: ArtifactCardProps) {
+  return (
+    <CardShell
+      artifact={artifact}
+      onClose={onClose}
+      badge="分镜表"
+      icon={
+        <svg className="h-4 w-4 flex-shrink-0 text-[#e8c766]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 4v16M17 4v16M3 8h4m10 0h4M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z" />
+        </svg>
+      }
+    >
+      <div className="flex-1 overflow-hidden">
+        <StoryboardCard artifact={artifact} />
+      </div>
+    </CardShell>
+  )
+}
+
 interface ArtifactRendererProps {
   artifact: Artifact
   onClose?: () => void
@@ -141,6 +161,8 @@ export function ArtifactRenderer({ artifact, onClose }: ArtifactRendererProps) {
         <MarkdownCard artifact={artifact} onClose={onClose} />
       ) : artifact.type === 'image' ? (
         <ImageCard artifact={artifact} onClose={onClose} />
+      ) : artifact.type === 'storyboard' ? (
+        <StoryboardArtifactCard artifact={artifact} onClose={onClose} />
       ) : (
         <HtmlCard artifact={artifact} onClose={onClose} />
       )}

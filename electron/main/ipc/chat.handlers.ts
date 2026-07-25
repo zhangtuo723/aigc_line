@@ -44,6 +44,20 @@ export function registerChatHandlers(): void {
     async (_event, folderPath: string) => {
       try {
         const history = await readChatHistory(folderPath);
+        // Artifacts with a source file may have been edited on disk (or via
+        // artifact:save) since they were pushed - refresh content from the file
+        for (const message of history) {
+          const artifact = message.artifact;
+          // Images store a data URL in content, not file text - skip them
+          if (!artifact?.path || artifact.type === 'image') continue;
+          try {
+            const filePath = path.resolve(folderPath, artifact.path);
+            if (!filePath.startsWith(path.resolve(folderPath) + path.sep)) continue;
+            artifact.content = await fs.readFile(filePath, 'utf-8');
+          } catch {
+            // File missing or unreadable - keep the content from history
+          }
+        }
         return history;
       } catch (err) {
         log.error('[Chat] load history failed:', err);

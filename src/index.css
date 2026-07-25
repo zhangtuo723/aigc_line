@@ -107,3 +107,22 @@
   --color-primary-darkest: #96791f;
   --color-primary-light: #e8c766;
 }
+
+/* Hide Excalidraw's element-link popup (artifact:// links are internal) */
+.excalidraw-hyperlinkContainer {
+  display: none !important;
+}
+
+/* Hide Excalidraw's property panel when only artifact cards are selected -
+ * stroke/background/etc. don't apply to embeddables */
+.artifact-selected .excalidraw .App-menu__left {
+  display: none !important;
+}
+
+/* Hide Excalidraw chrome we don't use: main menu, library, help button */
+.excalidraw .main-menu-trigger,
+.excalidraw .sidebar-trigger,
+.excalidraw .default-sidebar-trigger,
+.excalidraw .help-icon {
+  display: none !important;
+}

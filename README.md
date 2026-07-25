@@ -1,79 +1,82 @@
-# electron-vite-react
-
-[![awesome-vite](https://awesome.re/mentioned-badge.svg)](https://github.com/vitejs/awesome-vite)
-![GitHub stars](https://img.shields.io/github/stars/electron-vite/electron-vite-react?color=fa6470)
-![GitHub issues](https://img.shields.io/github/issues/electron-vite/electron-vite-react?color=d8b22d)
-![GitHub license](https://img.shields.io/github/license/electron-vite/electron-vite-react)
-[![Required Node.js >= 20.19.0 || >= 22.12.0](https://img.shields.io/static/v1?label=node&message=%3E=20.19.0%20||%20%3E=22.12.0&logo=node.js&color=3f893e)](https://nodejs.org/about/releases)
+# AIGC CANVAS
 
 English | [简体中文](README.zh-CN.md)
 
-## Overview
+An Electron desktop workbench for AIGC creation: an infinite canvas (Excalidraw) on the left and a chat panel with a Claude Agent on the right. The agent reads/writes files inside the project workspace and pushes artifacts (Markdown / HTML / images / storyboards) onto the canvas. The headline capability is **AIGC short-drama storyboarding**: the agent generates a storyboard JSON and the canvas renders it as a visual per-shot pipeline card.
 
-- Ready out of the box.
-- Based on the official [template-react-ts](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts).
-- Supports Electron and Node.js APIs in the renderer process.
-- Supports C/C++ native addons.
-- Includes debugger configuration.
-- Easy to extend to multiple windows.
+![AIGC CANVAS screenshot](docs/screenshot.png)
+
+## Features
+
+- **Agent chat**: powered by `@anthropic-ai/claude-agent-sdk` (claude_code preset) with Read/Bash/Glob/Grep/Edit/Write tools, scoped to the project workspace
+- **Artifact canvas**: the agent pushes files via a custom `PushArtifact` tool; re-pushing the same file updates the existing card in place instead of adding a duplicate
+- **Storyboard artifact**: `.storyboard.json` renders as a pipeline card (scene description → image node → video node) with:
+  - **Editable** text-to-image / image-to-video prompts, saved back to the JSON source file on blur
+  - `imageSource` / `videoSource` for the currently selected generation, `imageSourceHistory` / `videoSourceHistory` for re-roll history — browse versions and promote any of them to current
+  - Generate buttons and export-edit entry (APIs pending, placeholders in place)
+- **Canvas references**: clicking an artifact card adds a reference chip to the chat input; the agent knows which artifact the message modifies/references and can locate its file directly
+- **Workspace protocol**: `workspace://<projectId>/<path>` lets HTML artifacts reference workspace assets (images, videos, css…) via relative paths
+- **Persistence**: chat history and canvas snapshots are stored per project and restored on reopen; artifacts with a source file are re-read from disk on restore
+
+## Tech Stack
+
+Electron + React 19 + Vite + TailwindCSS v4 + Zustand + Excalidraw + claude-agent-sdk (custom tools via in-process MCP server)
 
 ## Quick Start
 
 ```sh
-# clone the project
-git clone https://github.com/electron-vite/electron-vite-react.git
-
-# enter the project directory
-cd electron-vite-react
-
-# install dependencies
 pnpm install
-
-# start development
 pnpm dev
 ```
 
-## Available Scripts
+Requires working Claude credentials on the machine (Claude Code login or `ANTHROPIC_API_KEY`); the Agent SDK picks them up automatically.
 
-- `pnpm dev`: start the Vite dev server.
-- `pnpm build`: build the renderer and package the app with electron-builder.
-- `pnpm preview`: preview the production web build locally.
-- `pnpm test`: run Vitest unit tests.
-- `pnpm test:e2e`: build the test mode bundle and run Playwright tests.
-- `pnpm typecheck`: run the TypeScript type checker.
+## Scripts
+
+- `pnpm dev`: start the dev environment (Vite + Electron)
+- `pnpm build`: build the renderer and package with electron-builder
+- `pnpm test` / `pnpm test:e2e`: Vitest unit tests / Playwright e2e tests
+- `pnpm typecheck`: TypeScript type check
 
 ## Project Structure
 
 ```tree
-├── build/            Packaging assets
-├── dist-electron/    Compiled Electron output
-├── electron/         Main-process and preload source
+├── electron/
 │   ├── main/
-│   └── preload/
-├── public/           Static assets
-├── src/              Renderer source code
+│   │   ├── ipc/                 # IPC handlers (project/chat/canvas/artifact)
+│   │   └── services/
+│   │       ├── agent/           # Agent SDK wrapper
+│   │       │   ├── index.ts     #   runAgent: query loop, tool registration
+│   │       │   ├── tools.ts     #   PushArtifact custom MCP tool
+│   │       │   ├── prompts.ts   #   system/user prompt assembly
+│   │       │   └── artifact.ts  #   artifact construction & push
+│   │       ├── message-hub.ts   #   main → renderer event push
+│   │       └── project.store.ts #   project index & chat history persistence
+│   └── preload/                 # contextBridge electronAPI
+├── src/
 │   ├── components/
-│   │   └── update/
-│   ├── demos/
-│   └── type/
-└── test/             Unit and end-to-end tests
-    └── e2e/
+│   │   ├── CanvasArea.tsx       # Excalidraw canvas: artifact elements, snapshots, reference selection
+│   │   ├── ArtifactRenderer.tsx # per-type artifact dispatch
+│   │   ├── StoryboardCard.tsx   # storyboard card (pipeline layout, versions, prompt editing)
+│   │   ├── ChatPanel.tsx        # chat panel
+│   │   ├── ChatInput.tsx        # input box (attachments, artifact reference chips)
+│   │   └── ChatMessage.tsx      # message bubbles (attachments, refs, artifacts, tool calls)
+│   ├── stores/app.store.ts      # Zustand global state (messages, artifacts, references)
+│   └── shared/                  # IPC channels & types shared by main/renderer
+└── test/
 ```
 
-Files under `electron/` are compiled into `dist-electron/`.
+## Core Flows
 
-## Security Note
+**Artifact push**: agent `Write`s a file → calls `PushArtifact{path,title}` → the main process infers the type from the extension (images become data URLs; `.storyboard.json` → storyboard; `.html` → html; everything else markdown) → IPC push → the store upserts by source path → the canvas inserts or updates the embeddable card in place → the push is also persisted in chat history for restore.
 
-The `renderer: {}` preset in `vite.config.ts` is only a Vite adapter that polyfills Electron, Node.js APIs and native modules for the renderer process. It is not the same as enabling Node integration. If you want direct Node.js access in the renderer, enable `nodeIntegration` in the `BrowserWindow` webPreferences in the main process and review the security impact carefully.
+**Storyboard schema** (`StoryboardShot`, see `src/shared/ipc.types.ts`): `index`, `duration` (seconds), `scene`, `dialogue`, `camera`, `textToImagePrompt` / `imageToVideoPrompt` (English prompts, editable in the UI), `imageSource` / `videoSource` (current selection paths), `*History` (re-roll history).
 
-## Features
+**Artifact references**: selecting a card on the canvas records a reference in the store → it is inlined into the user prompt (title + workspace-relative path) → the agent edits the file with Read/Edit and re-pushes, updating the card in place.
 
-1. Electron auto update with docs in [src/components/update/README.md](src/components/update/README.md).
-2. Vitest unit tests and Playwright end-to-end tests.
-3. TailwindCSS v4.
+**Edit write-back**: editing a prompt or switching versions in the storyboard card → `artifact:save` IPC writes the JSON back into the workspace (with path-escape validation).
 
-## Resources
+## Roadmap
 
-- Auto-update docs: [English](src/components/update/README.md) | [简体中文](src/components/update/README.zh-CN.md)
-- [C/C++ addons, Node.js modules - Pre-Bundling](https://github.com/electron-vite/vite-plugin-electron-renderer#dependency-pre-bundling)
-- [dependencies vs devDependencies](https://github.com/electron-vite/vite-plugin-electron-renderer#dependencies-vs-devdependencies)
+- Wire up text-to-image / image-to-video APIs (buttons and data fields are ready: generate → download into the workspace → move old source into history → write the new path to source)
+- Export edit (concatenate per-shot videos)

@@ -4,6 +4,7 @@ import type {
   ProjectIndex,
   ChatMessage,
   Artifact,
+  ArtifactRef,
 } from '../shared/ipc.types';
 
 interface AppState {
@@ -13,6 +14,8 @@ interface AppState {
   isAgentThinking: boolean;
   currentPage: 'home' | 'project';
   artifacts: Artifact[];
+  /** Artifacts the user clicked on the canvas - attached to the next message */
+  referencedArtifacts: ArtifactRef[];
 
   setProjects: (projects: ProjectIndex) => void;
   setCurrentProject: (project: Project | null) => void;
@@ -22,6 +25,9 @@ interface AppState {
   setCurrentPage: (page: 'home' | 'project') => void;
   setArtifacts: (artifacts: Artifact[]) => void;
   addArtifact: (artifact: Artifact) => void;
+  updateArtifactContent: (id: string, content: string) => void;
+  addArtifactReference: (ref: ArtifactRef) => void;
+  removeArtifactReference: (id: string) => void;
 
   loadProjects: () => Promise<void>;
   createProject: (name: string, folderPath: string) => Promise<Project>;
@@ -33,6 +39,18 @@ interface AppState {
 
 const electronAPI = window.electronAPI;
 
+// Artifacts are keyed by their source file: re-pushing the same path updates
+// the existing entry in place (keeping its id, so canvas elements stay linked
+// and simply re-render) instead of stacking duplicate cards.
+function upsertArtifact(list: Artifact[], artifact: Artifact): Artifact[] {
+  if (!artifact.path) return [...list, artifact];
+  const index = list.findIndex((a) => a.path === artifact.path);
+  if (index === -1) return [...list, artifact];
+  const next = [...list];
+  next[index] = { ...artifact, id: list[index].id };
+  return next;
+}
+
 export const useAppStore = create<AppState>((set, get) => ({
   projects: { projects: [] },
   currentProject: null,
@@ -40,6 +58,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   isAgentThinking: false,
   currentPage: 'home',
   artifacts: [],
+  referencedArtifacts: [],
 
   setProjects: (projects) => set({ projects }),
   setCurrentProject: (currentProject) => set({ currentProject }),
@@ -48,7 +67,27 @@ export const useAppStore = create<AppState>((set, get) => ({
   setAgentThinking: (isAgentThinking) => set({ isAgentThinking }),
   setCurrentPage: (currentPage) => set({ currentPage }),
   setArtifacts: (artifacts) => set({ artifacts }),
-  addArtifact: (artifact) => set((state) => ({ artifacts: [...state.artifacts, artifact] })),
+  addArtifact: (artifact) => set((state) => ({ artifacts: upsertArtifact(state.artifacts, artifact) })),
+  // Keep the copy inside chat messages in sync so reload-independent views agree
+  updateArtifactContent: (id, content) =>
+    set((state) => ({
+      artifacts: state.artifacts.map((a) => (a.id === id ? { ...a, content } : a)),
+      messages: state.messages.map((m) =>
+        m.artifact?.id === id ? { ...m, artifact: { ...m.artifact, content } } : m,
+      ),
+    })),
+
+  // Dedup by id - re-clicking the same canvas card must not stack chips
+  addArtifactReference: (ref) =>
+    set((state) =>
+      state.referencedArtifacts.some((r) => r.id === ref.id)
+        ? state
+        : { referencedArtifacts: [...state.referencedArtifacts, ref] },
+    ),
+  removeArtifactReference: (id) =>
+    set((state) => ({
+      referencedArtifacts: state.referencedArtifacts.filter((r) => r.id !== id),
+    })),
 
   loadProjects: async () => {
     const projects = await electronAPI.listProjects();
@@ -72,14 +111,17 @@ export const useAppStore = create<AppState>((set, get) => ({
       currentProject: project,
       messages: [],
       artifacts: [],
+      referencedArtifacts: [],
       currentPage: 'project',
     });
     await get().loadChatHistory();
     // Restore artifacts from artifact-type messages in chat history
+    // (same file may have been pushed multiple times - keep one card per path)
     const { messages } = get();
-    const artifactMsgs = messages.filter((m) => m.artifact);
-    if (artifactMsgs.length > 0) {
-      const restoredArtifacts = artifactMsgs.map((m) => m.artifact!);
+    const restoredArtifacts = messages
+      .filter((m) => m.artifact)
+      .reduce<Artifact[]>((list, m) => upsertArtifact(list, m.artifact!), []);
+    if (restoredArtifacts.length > 0) {
       set({ artifacts: restoredArtifacts });
     }
   },
@@ -106,7 +148,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   sendChatMessage: async (content, attachments) => {
-    const { currentProject } = get();
+    const { currentProject, referencedArtifacts } = get();
     if (!currentProject) return;
 
     const message: ChatMessage = {
@@ -115,9 +157,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       content,
       timestamp: Date.now(),
       attachments,
+      artifactRefs: referencedArtifacts.length > 0 ? referencedArtifacts : undefined,
     };
 
-    set((state) => ({ messages: [...state.messages, message], isAgentThinking: true }));
+    set((state) => ({
+      messages: [...state.messages, message],
+      isAgentThinking: true,
+      referencedArtifacts: [],
+    }));
 
     try {
       await electronAPI.sendChatMessage(currentProject.id, message);
@@ -159,7 +206,7 @@ electronAPI?.onChatMessage?.((message: ChatMessage) => {
       if (message.artifact) {
         return {
           messages: nextMessages,
-          artifacts: [...state.artifacts, message.artifact],
+          artifacts: upsertArtifact(state.artifacts, message.artifact),
         };
       }
       return { messages: nextMessages };
@@ -176,6 +223,6 @@ electronAPI?.onTurnEnd?.(() => {
 // Subscribe to artifact push events
 electronAPI?.onArtifact?.((artifact: Artifact) => {
   useAppStore.setState((state) => ({
-    artifacts: [...state.artifacts, artifact],
+    artifacts: upsertArtifact(state.artifacts, artifact),
   }));
 });

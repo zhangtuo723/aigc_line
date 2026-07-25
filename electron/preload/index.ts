@@ -18,6 +18,11 @@ export interface ElectronAPI {
   loadChatHistory: (folderPath: string) => Promise<ChatMessage[]>;
   saveCanvasSnapshot: (folderPath: string, snapshot: unknown) => Promise<{ success: boolean }>;
   loadCanvasSnapshot: (folderPath: string) => Promise<unknown | null>;
+  saveArtifactContent: (
+    projectId: string,
+    relPath: string,
+    content: string,
+  ) => Promise<{ success: boolean; error?: string }>;
   onChatMessage: (callback: (message: ChatMessage) => void) => () => void;
   onArtifact: (callback: (artifact: Artifact) => void) => () => void;
   onTurnEnd: (callback: () => void) => () => void;
@@ -47,6 +52,8 @@ const api: ElectronAPI = {
   loadChatHistory: (folderPath) => invoke(IPC_CHANNELS.chat.loadHistory, folderPath),
   saveCanvasSnapshot: (folderPath, snapshot) => invoke(IPC_CHANNELS.canvas.save, folderPath, snapshot),
   loadCanvasSnapshot: (folderPath) => invoke(IPC_CHANNELS.canvas.load, folderPath),
+  saveArtifactContent: (projectId, relPath, content) =>
+    invoke(IPC_CHANNELS.artifact.save, projectId, relPath, content),
   onChatMessage: (callback) => onPush(IPC_CHANNELS.push.chatMessage, callback),
   onArtifact: (callback) => onPush(IPC_CHANNELS.push.artifact, callback),
   onTurnEnd: (callback) => onPush(IPC_CHANNELS.push.turnEnd, callback),

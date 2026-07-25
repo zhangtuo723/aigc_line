@@ -16,6 +16,7 @@ export const IPC_CHANNELS = {
   },
   artifact: {
     push: 'artifact:push',
+    save: 'artifact:save',
   },
   push: {
     chatMessage: 'chat:receiveMessage',

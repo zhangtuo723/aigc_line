@@ -7,6 +7,7 @@ import { update } from './update'
 import { registerProjectHandlers } from './ipc/project.handlers'
 import { registerChatHandlers } from './ipc/chat.handlers'
 import { registerCanvasHandlers } from './ipc/canvas.handlers'
+import { registerArtifactHandlers } from './ipc/artifact.handlers'
 import { loadProject } from './services/project.store'
 
 const require = createRequire(import.meta.url)
@@ -120,6 +121,7 @@ const indexHtml = path.join(RENDERER_DIST, 'index.html')
 registerProjectHandlers()
 registerChatHandlers()
 registerCanvasHandlers()
+registerArtifactHandlers()
 
 async function createWindow() {
   win = new BrowserWindow({

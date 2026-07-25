@@ -32,7 +32,7 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
     tools: [
       tool(
         'PushArtifact',
-        'Push a file from the workspace (markdown, html, or image) to the user\'s canvas. Pass the file path - the file content is read from disk, so you do NOT need to repeat the content. Images (png/jpg/jpeg/gif/webp/svg/bmp/avif) are displayed as picture cards.',
+        'Push a file from the workspace (markdown, html, image, or storyboard) to the user\'s canvas. Pass the file path - the file content is read from disk, so you do NOT need to repeat the content. Images (png/jpg/jpeg/gif/webp/svg/bmp/avif) are displayed as picture cards; files ending in .storyboard.json are rendered as a visual storyboard table.',
         {
           path: z.string().describe('Path to the file, relative to the workspace or absolute'),
           title: z.string().describe('A short title for the artifact'),
@@ -49,6 +49,7 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
             }
             const ext = path.extname(filePath).toLowerCase();
             const imageMime = IMAGE_MIME[ext];
+            const isStoryboard = filePath.toLowerCase().endsWith('.storyboard.json');
             let type: Artifact['type'];
             let content: string;
             if (imageMime) {
@@ -58,9 +59,18 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
               content = `data:${imageMime};base64,${buf.toString('base64')}`;
             } else {
               content = await fs.readFile(filePath, 'utf-8');
-              type = ext === '.html' || ext === '.htm' ? 'html' : 'markdown';
+              type = isStoryboard ? 'storyboard' : ext === '.html' || ext === '.htm' ? 'html' : 'markdown';
             }
-            const artifact = pushArtifact(projectId, type, args.title, content, args.width, args.height);
+            const artifact = pushArtifact(
+              projectId,
+              type,
+              args.title,
+              content,
+              args.width,
+              args.height,
+              // Store the workspace-relative path so edits can be saved back to the file
+              path.relative(folderPath, filePath),
+            );
             // Also persist as a chat message so it survives reloads
             const artifactMsg: ChatMessage = {
               id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

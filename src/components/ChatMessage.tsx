@@ -181,7 +181,7 @@ export function ChatMessageItem({ message }: ChatMessageProps) {
             </svg>
             <span className='text-xs font-medium text-[#e8e6df]'>{art.title}</span>
             <span className='ml-auto rounded bg-[#d4af37]/15 px-1.5 py-0.5 text-[10px] text-[#e8c766]'>
-              {art.type === 'image' ? '图片' : art.type}
+              {art.type === 'image' ? '图片' : art.type === 'storyboard' ? '分镜表' : art.type}
             </span>
           </div>
           <div className='mt-1 text-xs text-[#6d6a78]'>
@@ -194,7 +194,11 @@ export function ChatMessageItem({ message }: ChatMessageProps) {
 
   const imageAttachments = message.attachments?.filter(isImageAttachment) ?? [];
   const fileAttachments = message.attachments?.filter((a) => !isImageAttachment(a)) ?? [];
-  const hasBubbleContent = isToolCall || fileAttachments.length > 0 || !!message.content;
+  const hasBubbleContent =
+    isToolCall ||
+    fileAttachments.length > 0 ||
+    !!message.content ||
+    (message.artifactRefs?.length ?? 0) > 0;
 
   return (
     <div className={['flex gap-3 py-3', isUser ? 'flex-row-reverse' : 'flex-row'].join(' ')}>
@@ -257,6 +261,23 @@ export function ChatMessageItem({ message }: ChatMessageProps) {
                     {ATTACHMENT_ICONS[attachment.type] ?? '📎'}
                   </span>
                   <span className='truncate'>{attachment.name}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Referenced canvas artifacts */}
+          {message.artifactRefs && message.artifactRefs.length > 0 && (
+            <div className='mb-2 flex flex-wrap items-start gap-2'>
+              {message.artifactRefs.map((ref) => (
+                <div
+                  key={ref.id}
+                  className='flex items-center gap-1.5 rounded-lg border border-[#d4af37]/30 bg-[#d4af37]/[0.08] px-2 py-1 text-xs text-[#e8c766]'
+                >
+                  <span>
+                    {ref.type === 'storyboard' ? '🎬' : ref.type === 'image' ? '🖼️' : ref.type === 'html' ? '🌐' : '📄'}
+                  </span>
+                  <span className='max-w-[140px] truncate'>{ref.title}</span>
                 </div>
               ))}
             </div>

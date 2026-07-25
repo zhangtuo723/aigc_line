@@ -97,12 +97,16 @@ const newArtifactElement = (
 export function CanvasArea() {
   const { currentProject, artifacts } = useAppStore()
   const [api, setApi] = useState<ExcalidrawImperativeAPI | null>(null)
+  // True when the selection consists solely of artifact cards - used to hide
+  // Excalidraw's property panel, which is meaningless for embeddables
+  const [onlyArtifactsSelected, setOnlyArtifactsSelected] = useState(false)
   const folderPath = currentProject?.folderPath
 
   const folderPathRef = useRef(folderPath)
   const loadedFolderRef = useRef<string | null>(null)
   const readyToSaveRef = useRef(false)
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout>>()
+  const prevSelectedIdsRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     folderPathRef.current = folderPath
@@ -147,6 +151,42 @@ export function CanvasArea() {
       appState: AppState,
       files: BinaryFiles,
     ) => {
+      // Clicking an artifact card references it in the chat input, so the
+      // next message tells the agent which artifact to modify/reference.
+      // Only NEWLY selected elements are added - otherwise the chip would
+      // reappear right after the user removes it while the card stays selected.
+      const selectedIds = appState.selectedElementIds ?? {}
+      const prevSelected = prevSelectedIdsRef.current
+      let artifactSelected = 0
+      let otherSelected = 0
+      for (const el of elements) {
+        if (!selectedIds[el.id]) continue
+        const link =
+          el.type === 'embeddable' ? (el as ExcalidrawEmbeddableElement).link : null
+        if (link?.startsWith(ARTIFACT_LINK_PREFIX)) {
+          artifactSelected++
+          if (prevSelected.has(el.id)) continue
+          const artifactId = link.slice(ARTIFACT_LINK_PREFIX.length)
+          const artifact = useAppStore
+            .getState()
+            .artifacts.find((a) => a.id === artifactId)
+          if (artifact) {
+            useAppStore.getState().addArtifactReference({
+              id: artifact.id,
+              title: artifact.title,
+              type: artifact.type,
+              path: artifact.path,
+            })
+          }
+        } else {
+          otherSelected++
+        }
+      }
+      setOnlyArtifactsSelected(artifactSelected > 0 && otherSelected === 0)
+      prevSelectedIdsRef.current = new Set(
+        Object.keys(selectedIds).filter((id) => selectedIds[id]),
+      )
+
       const currentFolder = folderPathRef.current
       if (!currentFolder || !readyToSaveRef.current) return
       clearTimeout(saveTimeoutRef.current)
@@ -233,7 +273,9 @@ export function CanvasArea() {
   )
 
   return (
-    <div className="relative h-full w-full overflow-hidden">
+    <div
+      className={`relative h-full w-full overflow-hidden${onlyArtifactsSelected ? ' artifact-selected' : ''}`}
+    >
       <Excalidraw
         excalidrawAPI={setApi}
         theme="dark"
