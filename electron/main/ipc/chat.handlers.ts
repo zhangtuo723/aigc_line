@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { IPC_CHANNELS } from '../../../src/shared/ipc.channels';
 import type { Attachment, ChatMessage } from '../../../src/shared/ipc.types';
-import { runAgent } from '../services/claude-agent.service';
+import { runAgent } from '../services/agent';
 import { messageHub } from '../services/message-hub';
 import { loadProject, readChatHistory } from '../services/project.store';
 import log from 'electron-log/main';

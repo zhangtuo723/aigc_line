@@ -9,6 +9,7 @@ import type {
 } from '../../src/shared/ipc.types';
 
 export interface ElectronAPI {
+  platform: NodeJS.Platform;
   createProject: (name: string, folderPath: string) => Promise<Project>;
   listProjects: () => Promise<ProjectIndex>;
   loadProject: (id: string) => Promise<Project | null>;
@@ -35,6 +36,7 @@ const onPush = <T>(channel: string, callback: (payload: T) => void) => {
 };
 
 const api: ElectronAPI = {
+  platform: process.platform,
   createProject: (name, folderPath) =>
     invoke(IPC_CHANNELS.project.create, name, folderPath),
   listProjects: () => invoke(IPC_CHANNELS.project.list),

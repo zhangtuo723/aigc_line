@@ -1,5 +1,5 @@
-import type { ChatMessage } from '../shared/ipc.types';
-import { useState } from 'react';
+import type { Attachment, ChatMessage } from '../shared/ipc.types';
+import { useEffect, useState } from 'react';
 import { Markdown } from './Markdown';
 
 interface ChatMessageProps {
@@ -20,6 +20,64 @@ const ATTACHMENT_ICONS: Record<string, string> = {
   jpeg: '🖼️',
   webp: '🖼️',
 };
+
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg', 'avif']);
+
+const isImageAttachment = (attachment: Attachment) =>
+  IMAGE_EXTENSIONS.has(attachment.type.toLowerCase());
+
+// Served by the `local-file` protocol registered in the main process
+const localFileUrl = (path: string) =>
+  `local-file:///${encodeURI(path.replace(/^\/+/, ''))}`;
+
+// Image attachment: small thumbnail perched above the bubble, click to view full size
+function ImageAttachment({ attachment }: { attachment: Attachment }) {
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const url = localFileUrl(attachment.path);
+
+  useEffect(() => {
+    if (!lightboxOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setLightboxOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [lightboxOpen]);
+
+  return (
+    <>
+      <button
+        type='button'
+        onClick={() => setLightboxOpen(true)}
+        className='app-no-drag block h-12 w-12 overflow-hidden rounded-lg border border-white/15 shadow-sm transition hover:scale-105 hover:border-[#d4af37]/50'
+        title={attachment.name}
+      >
+        <img
+          src={url}
+          alt={attachment.name}
+          className='h-full w-full object-cover'
+          loading='lazy'
+        />
+      </button>
+
+      {lightboxOpen && (
+        <div
+          className='fixed inset-0 z-50 flex cursor-zoom-out items-center justify-center bg-black/80 p-8'
+          onClick={() => setLightboxOpen(false)}
+        >
+          <img
+            src={url}
+            alt={attachment.name}
+            className='max-h-full max-w-full rounded-lg object-contain shadow-2xl'
+          />
+          <span className='absolute bottom-4 left-1/2 -translate-x-1/2 rounded-full bg-black/60 px-3 py-1 text-xs text-white/70'>
+            {attachment.name} · 点击任意处或按 Esc 关闭
+          </span>
+        </div>
+      )}
+    </>
+  );
+}
 
 // Tool call block - collapsed by default, click header to expand input/result
 function ToolCallBlock({ toolCall }: { toolCall: ToolCall }) {
@@ -134,6 +192,10 @@ export function ChatMessageItem({ message }: ChatMessageProps) {
     );
   }
 
+  const imageAttachments = message.attachments?.filter(isImageAttachment) ?? [];
+  const fileAttachments = message.attachments?.filter((a) => !isImageAttachment(a)) ?? [];
+  const hasBubbleContent = isToolCall || fileAttachments.length > 0 || !!message.content;
+
   return (
     <div className={['flex gap-3 py-3', isUser ? 'flex-row-reverse' : 'flex-row'].join(' ')}>
       {/* Avatar */}
@@ -148,55 +210,83 @@ export function ChatMessageItem({ message }: ChatMessageProps) {
         {isUser ? '我' : isToolCall ? '🔧' : 'AI'}
       </div>
 
-      {/* Message content */}
+      {/* Image attachments: small thumbnails perched above the bubble, sender-aligned */}
       <div
         className={[
-          'max-w-[70%] rounded-2xl border px-4 py-2.5 text-sm leading-relaxed',
-          isUser
-            ? 'rounded-tr-sm border-[#d4af37]/30 bg-[#d4af37]/[0.12] text-[#f5f3ea]'
-            : 'rounded-tl-sm border-white/10 bg-white/[0.04] text-[#e8e6df]',
+          'flex max-w-[70%] flex-col gap-1',
+          isUser ? 'items-end' : 'items-start',
         ].join(' ')}
       >
-        {/* Tool call indicator */}
-        {isToolCall && message.toolCall && (
-          <ToolCallBlock toolCall={message.toolCall} />
-        )}
-
-        {/* Attachments */}
-        {message.attachments && message.attachments.length > 0 && (
-          <div className='mb-2 space-y-1'>
-            {message.attachments.map((attachment, index) => (
-              <div
-                key={index}
-                className='flex items-center gap-2 rounded-lg bg-white/10 px-3 py-1.5 text-xs'
-              >
-                <span className='font-medium'>
-                  {ATTACHMENT_ICONS[attachment.type] ?? '📎'}
-                </span>
-                <span className='truncate'>{attachment.name}</span>
-              </div>
+        {imageAttachments.length > 0 && (
+          <div
+            className={[
+              'flex flex-wrap gap-1.5',
+              isUser ? 'justify-end' : 'justify-start',
+            ].join(' ')}
+          >
+            {imageAttachments.map((attachment, index) => (
+              <ImageAttachment key={index} attachment={attachment} />
             ))}
           </div>
         )}
 
-        {/* Text content - hide for tool messages, content is shown in toolCall block */}
-        {(!isToolCall || !message.toolCall) && (
-          isUser ? (
-            <div className='whitespace-pre-wrap'>{message.content}</div>
-          ) : (
-            <Markdown>{message.content}</Markdown>
-          )
-        )}
+        {/* Message bubble (skipped for image-only messages) */}
+        {hasBubbleContent ? (
+          <div
+            className={[
+              'rounded-2xl border px-4 py-2.5 text-sm leading-relaxed',
+              isUser
+                ? 'rounded-tr-sm border-[#d4af37]/30 bg-[#d4af37]/[0.12] text-[#f5f3ea]'
+                : 'rounded-tl-sm border-white/10 bg-white/[0.04] text-[#e8e6df]',
+            ].join(' ')}
+          >
+          {/* Tool call indicator */}
+          {isToolCall && message.toolCall && (
+            <ToolCallBlock toolCall={message.toolCall} />
+          )}
 
-        {/* Timestamp */}
-        <div
-          className={[
-            'mt-1 text-xs',
-            isUser ? 'text-[#a09258]' : 'text-[#6d6a78]',
-          ].join(' ')}
-        >
-          {new Date(message.timestamp).toLocaleTimeString()}
-        </div>
+          {/* Non-image attachments */}
+          {fileAttachments.length > 0 && (
+            <div className='mb-2 flex flex-wrap items-start gap-2'>
+              {fileAttachments.map((attachment, index) => (
+                <div
+                  key={index}
+                  className='flex items-center gap-2 rounded-lg bg-white/10 px-3 py-1.5 text-xs'
+                >
+                  <span className='font-medium'>
+                    {ATTACHMENT_ICONS[attachment.type] ?? '📎'}
+                  </span>
+                  <span className='truncate'>{attachment.name}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Text content - hide for tool messages, content is shown in toolCall block */}
+          {(!isToolCall || !message.toolCall) && (
+            isUser ? (
+              <div className='whitespace-pre-wrap'>{message.content}</div>
+            ) : (
+              <Markdown>{message.content}</Markdown>
+            )
+          )}
+
+          {/* Timestamp */}
+          <div
+            className={[
+              'mt-1 text-xs',
+              isUser ? 'text-[#a09258]' : 'text-[#6d6a78]',
+            ].join(' ')}
+          >
+            {new Date(message.timestamp).toLocaleTimeString()}
+          </div>
+          </div>
+        ) : (
+          /* Image-only message: bare timestamp under the thumbnails */
+          <div className='mt-1 text-xs text-[#6d6a78]'>
+            {new Date(message.timestamp).toLocaleTimeString()}
+          </div>
+        )}
       </div>
     </div>
   );

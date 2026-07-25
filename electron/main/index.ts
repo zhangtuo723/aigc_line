@@ -1,6 +1,6 @@
-import { app, BrowserWindow, shell, ipcMain, nativeTheme } from 'electron'
+import { app, BrowserWindow, shell, ipcMain, nativeTheme, protocol, net } from 'electron'
 import { createRequire } from 'node:module'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
 import os from 'node:os'
 import { update } from './update'
@@ -40,6 +40,28 @@ if (process.platform === 'win32') app.setAppUserModelId(app.getName())
 // Dark native window chrome (title bar, borders, dialogs)
 nativeTheme.themeSource = 'dark'
 
+// Custom scheme so the renderer can display local images (thumbnails, previews).
+// file:// is blocked when the page is served from the Vite dev server.
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'local-file', privileges: { secure: true, supportFetchAPI: true, stream: true } },
+])
+
+const LOCAL_FILE_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg', '.avif',
+])
+
+function registerLocalFileProtocol() {
+  protocol.handle('local-file', (request) => {
+    let filePath = decodeURIComponent(new URL(request.url).pathname)
+    if (process.platform === 'win32') filePath = filePath.replace(/^\/+/, '')
+    // Only serve common image formats to avoid exposing arbitrary file reads
+    if (!LOCAL_FILE_EXTENSIONS.has(path.extname(filePath).toLowerCase())) {
+      return new Response('Forbidden', { status: 403 })
+    }
+    return net.fetch(pathToFileURL(filePath).toString())
+  })
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
   process.exit(0)
@@ -59,6 +81,8 @@ async function createWindow() {
     autoHideMenuBar: true,
     backgroundColor: '#0a0a0f',
     titleBarStyle: 'hidden',
+    // Vertically center the macOS traffic lights in the 40px custom title bar
+    trafficLightPosition: { x: 12, y: 13 },
     titleBarOverlay: {
       color: '#0a0a0f',
       symbolColor: '#e8c766',
@@ -103,7 +127,10 @@ async function createWindow() {
   update(win)
 }
 
-app.whenReady().then(createWindow)
+app.whenReady().then(() => {
+  registerLocalFileProtocol()
+  createWindow()
+})
 
 app.on('window-all-closed', () => {
   win = null

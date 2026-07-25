@@ -50,7 +50,17 @@
       "Bash(xargs rm *)",
       "WebFetch(domain:www.npmjs.com)",
       "Bash(git stash *)",
-      "Bash(npx electron *)"
+      "Bash(npx electron *)",
+      "Bash(pnpm -v)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:5173/)",
+      "Bash(curl -s -o /dev/null http://localhost:5173/)",
+      "Bash(screencapture -x /tmp/aigc_titlebar.png)",
+      "Read(//tmp/**)",
+      "Bash(curl -s -o /dev/null -w \"vite:%{http_code}\\\\n\" http://localhost:5173/)",
+      "Bash(echo \"tsc exit: $?\")",
+      "Bash(git -C /Users/zhangtuo/Desktop/aigc_line status --short)",
+      "Bash(echo \"baseline exit: $?\")"
     ]
   }
 }
