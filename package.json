@@ -1,8 +1,8 @@
 {
-  "name": "aigc-line",
+  "name": "aigc-canvas",
   "version": "0.1.0",
   "private": true,
-  "description": "AIGC Line - Electron desktop agent for storyboard video generation.",
+  "description": "AIGC CANVAS - Electron desktop agent for storyboard video generation.",
   "license": "MIT",
   "author": "zhangtuo",
   "type": "module",
@@ -22,9 +22,12 @@
     "chokidar": "^4.0.0",
     "electron-log": "^5.4.0",
     "electron-updater": "^6.8.3",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
     "subtitle": "^4.2.0",
     "tldraw": "^5.2.5",
     "uuid": "^11.1.0",
+    "zod": "^4.4.3",
     "zustand": "^5.0.3"
   },
   "devDependencies": {
@@ -39,6 +42,7 @@
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "tailwindcss": "^4.3.0",
+    "tree-kill": "^1.2.2",
     "typescript": "^6.0.3",
     "vite": "^5.4.19",
     "vite-plugin-electron": "^0.28.0",

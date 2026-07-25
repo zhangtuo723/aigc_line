@@ -19,13 +19,17 @@ export function ProjectList() {
   };
 
   return (
-    <div className={`flex h-full flex-col border-r border-slate-200 bg-white transition-all duration-300 ${sidebarCollapsed ? 'w-14' : 'w-64'}`}>
+    <div className={`flex h-full flex-col border-r border-white/[0.08] bg-[#0d0d14] transition-all duration-300 ${sidebarCollapsed ? 'w-14' : 'w-64'}`}>
       {/* Header with collapse button */}
-      <div className={`flex items-center border-b border-slate-200 p-4 ${sidebarCollapsed ? 'justify-center' : 'justify-between'}`}>
-        {!sidebarCollapsed && <h2 className='text-sm font-semibold uppercase tracking-wider text-slate-500'>项目列表</h2>}
+      <div className={`flex items-center border-b border-white/[0.08] p-4 ${sidebarCollapsed ? 'justify-center' : 'justify-between'}`}>
+        {!sidebarCollapsed && (
+          <h2 className='flex items-center gap-2 text-xs font-semibold tracking-[0.3em] text-[#8a8794]'>
+            <span className="text-[9px] text-[#d4af37]">✦</span>项目列表
+          </h2>
+        )}
         <button
           onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-          className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+          className="flex h-6 w-6 items-center justify-center rounded-md text-[#6d6a78] transition hover:bg-white/5 hover:text-[#e8c766]"
           title={sidebarCollapsed ? '展开' : '收起'}
         >
           <svg
@@ -43,7 +47,7 @@ export function ProjectList() {
         <>
           <div className='flex-1 overflow-auto p-2'>
             {projects.projects.length === 0 ? (
-              <p className='p-2 text-sm text-slate-400'>暂无项目</p>
+              <p className='p-2 text-sm text-[#6d6a78]'>暂无项目</p>
             ) : (
               <ul className='space-y-1'>
                 {projects.projects.map((project) => (
@@ -51,16 +55,16 @@ export function ProjectList() {
                     key={project.id}
                     onClick={() => selectProject(project.id)}
                     className={[
-                      'group flex cursor-pointer items-center justify-between rounded-lg px-3 py-2 text-sm transition',
+                      'group flex cursor-pointer items-center justify-between rounded-lg border border-transparent px-3 py-2 text-sm transition',
                       currentProject?.id === project.id
-                        ? 'bg-cyan-50 text-cyan-800'
-                        : 'text-slate-700 hover:bg-slate-50',
+                        ? 'border-[#d4af37]/30 bg-[#d4af37]/10 text-[#e8c766]'
+                        : 'text-[#b8b5c2] hover:bg-white/5 hover:text-[#e8e6df]',
                     ].join(' ')}
                   >
-                    <span className='truncate'>{project.name}</span>
+                    <span className='truncate tracking-wider'>{project.name}</span>
                     <button
                       onClick={(e) => handleDelete(e, project.id)}
-                      className='opacity-0 transition hover:text-red-600 group-hover:opacity-100'
+                      className='opacity-0 transition hover:text-rose-400 group-hover:opacity-100'
                       title='删除项目'
                     >
                       ×
@@ -70,10 +74,10 @@ export function ProjectList() {
               </ul>
             )}
           </div>
-          <div className='border-t border-slate-200 p-3'>
+          <div className='border-t border-white/[0.08] p-3'>
             <button
               onClick={handleCreate}
-              className='w-full rounded-lg bg-cyan-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-cyan-700'
+              className='w-full rounded-lg border border-[#d4af37]/40 bg-[#d4af37]/10 px-4 py-2 text-sm font-medium tracking-widest text-[#e8c766] transition hover:bg-[#d4af37]/20'
             >
               新建项目
             </button>
@@ -87,10 +91,10 @@ export function ProjectList() {
             <button
               key={project.id}
               onClick={() => selectProject(project.id)}
-              className={`flex h-10 w-10 items-center justify-center rounded-lg text-xs font-medium transition ${
+              className={`flex h-10 w-10 items-center justify-center rounded-lg border text-xs font-medium transition ${
                 currentProject?.id === project.id
-                  ? 'bg-cyan-50 text-cyan-800'
-                  : 'text-slate-600 hover:bg-slate-50'
+                  ? 'border-[#d4af37]/30 bg-[#d4af37]/10 text-[#e8c766]'
+                  : 'border-transparent text-[#8a8794] hover:bg-white/5 hover:text-[#e8e6df]'
               }`}
               title={project.name}
             >
@@ -99,7 +103,7 @@ export function ProjectList() {
           ))}
           <button
             onClick={handleCreate}
-            className="flex h-10 w-10 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-50 hover:text-cyan-600"
+            className="flex h-10 w-10 items-center justify-center rounded-lg text-[#6d6a78] transition hover:bg-white/5 hover:text-[#e8c766]"
             title="新建项目"
           >
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

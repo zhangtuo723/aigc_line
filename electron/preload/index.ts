@@ -1,10 +1,11 @@
-import { ipcRenderer, contextBridge } from 'electron';
+import { ipcRenderer, contextBridge, webUtils } from 'electron';
 import type { IpcRendererEvent } from 'electron';
 import { IPC_CHANNELS } from '../../src/shared/ipc.channels';
 import type {
   Project,
   ProjectIndex,
   ChatMessage,
+  Artifact,
 } from '../../src/shared/ipc.types';
 
 export interface ElectronAPI {
@@ -17,8 +18,11 @@ export interface ElectronAPI {
   saveCanvasSnapshot: (folderPath: string, snapshot: unknown) => Promise<{ success: boolean }>;
   loadCanvasSnapshot: (folderPath: string) => Promise<unknown | null>;
   onChatMessage: (callback: (message: ChatMessage) => void) => () => void;
+  onArtifact: (callback: (artifact: Artifact) => void) => () => void;
+  onTurnEnd: (callback: () => void) => () => void;
   showOpenDialog: (options?: Electron.OpenDialogOptions) => Promise<string[]>;
   showItemInFolder: (path: string) => void;
+  getPathForFile: (file: File) => string;
 }
 
 const invoke = <T>(channel: string, ...args: unknown[]): Promise<T> =>
@@ -42,8 +46,12 @@ const api: ElectronAPI = {
   saveCanvasSnapshot: (folderPath, snapshot) => invoke(IPC_CHANNELS.canvas.save, folderPath, snapshot),
   loadCanvasSnapshot: (folderPath) => invoke(IPC_CHANNELS.canvas.load, folderPath),
   onChatMessage: (callback) => onPush(IPC_CHANNELS.push.chatMessage, callback),
+  onArtifact: (callback) => onPush(IPC_CHANNELS.push.artifact, callback),
+  onTurnEnd: (callback) => onPush(IPC_CHANNELS.push.turnEnd, callback),
   showOpenDialog: (options) => invoke('dialog:showOpenDialog', options),
   showItemInFolder: (path) => ipcRenderer.send('shell:showItemInFolder', path),
+  // File.path was removed in Electron 32 - this is the supported way
+  getPathForFile: (file) => webUtils.getPathForFile(file),
 };
 
 contextBridge.exposeInMainWorld('electronAPI', api);

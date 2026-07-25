@@ -48,7 +48,9 @@
       "Bash(python /tmp/fix_watcher.py)",
       "Bash(python /tmp/fix_import.py)",
       "Bash(xargs rm *)",
-      "WebFetch(domain:www.npmjs.com)"
+      "WebFetch(domain:www.npmjs.com)",
+      "Bash(git stash *)",
+      "Bash(npx electron *)"
     ]
   }
 }

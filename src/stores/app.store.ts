@@ -3,6 +3,7 @@ import type {
   Project,
   ProjectIndex,
   ChatMessage,
+  Artifact,
 } from '../shared/ipc.types';
 
 interface AppState {
@@ -11,6 +12,7 @@ interface AppState {
   messages: ChatMessage[];
   isAgentThinking: boolean;
   currentPage: 'home' | 'project';
+  artifacts: Artifact[];
 
   setProjects: (projects: ProjectIndex) => void;
   setCurrentProject: (project: Project | null) => void;
@@ -18,6 +20,8 @@ interface AppState {
   addMessage: (message: ChatMessage) => void;
   setAgentThinking: (isAgentThinking: boolean) => void;
   setCurrentPage: (page: 'home' | 'project') => void;
+  setArtifacts: (artifacts: Artifact[]) => void;
+  addArtifact: (artifact: Artifact) => void;
 
   loadProjects: () => Promise<void>;
   createProject: (name: string, folderPath: string) => Promise<Project>;
@@ -35,6 +39,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   messages: [],
   isAgentThinking: false,
   currentPage: 'home',
+  artifacts: [],
 
   setProjects: (projects) => set({ projects }),
   setCurrentProject: (currentProject) => set({ currentProject }),
@@ -42,6 +47,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   addMessage: (message) => set((state) => ({ messages: [...state.messages, message] })),
   setAgentThinking: (isAgentThinking) => set({ isAgentThinking }),
   setCurrentPage: (currentPage) => set({ currentPage }),
+  setArtifacts: (artifacts) => set({ artifacts }),
+  addArtifact: (artifact) => set((state) => ({ artifacts: [...state.artifacts, artifact] })),
 
   loadProjects: async () => {
     const projects = await electronAPI.listProjects();
@@ -64,16 +71,24 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       currentProject: project,
       messages: [],
+      artifacts: [],
       currentPage: 'project',
     });
     await get().loadChatHistory();
+    // Restore artifacts from artifact-type messages in chat history
+    const { messages } = get();
+    const artifactMsgs = messages.filter((m) => m.artifact);
+    if (artifactMsgs.length > 0) {
+      const restoredArtifacts = artifactMsgs.map((m) => m.artifact!);
+      set({ artifacts: restoredArtifacts });
+    }
   },
 
   deleteProject: async (id) => {
     await electronAPI.deleteProject(id);
     const state = get();
     if (state.currentProject?.id === id) {
-      set({ currentProject: null, messages: [] });
+      set({ currentProject: null, messages: [], artifacts: [] });
     }
     await get().loadProjects();
   },
@@ -114,7 +129,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 }));
 
 // Subscribe to push events once
-electronAPI.onChatMessage((message: ChatMessage) => {
+electronAPI?.onChatMessage?.((message: ChatMessage) => {
   useAppStore.setState((state) => {
     // System messages include: thinking indicators and tool call status
     if (message.role === 'system') {
@@ -136,13 +151,31 @@ electronAPI.onChatMessage((message: ChatMessage) => {
         isAgentThinking: true,
       };
     }
-    // For assistant messages, add to messages and clear thinking state
+    // For assistant messages, append them; thinking state is cleared only by the
+    // turn-end signal from the main process, since a turn may continue with tool calls
     if (message.role === 'assistant') {
-      return {
-        messages: [...state.messages, message],
-        isAgentThinking: false,
-      };
+      const nextMessages = [...state.messages, message];
+      // If this assistant message contains an artifact, also add to artifacts
+      if (message.artifact) {
+        return {
+          messages: nextMessages,
+          artifacts: [...state.artifacts, message.artifact],
+        };
+      }
+      return { messages: nextMessages };
     }
     return state;
   });
+});
+
+// Turn-end signal from the main process - clears the thinking indicator
+electronAPI.onTurnEnd(() => {
+  useAppStore.setState({ isAgentThinking: false });
+});
+
+// Subscribe to artifact push events
+electronAPI.onArtifact((artifact: Artifact) => {
+  useAppStore.setState((state) => ({
+    artifacts: [...state.artifacts, artifact],
+  }));
 });

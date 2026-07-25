@@ -34,6 +34,19 @@ export interface ToolCall {
   toolResult?: string;
 }
 
+// Artifact types
+export type ArtifactType = 'markdown' | 'html' | 'image';
+
+export interface Artifact {
+  id: string;
+  type: ArtifactType;
+  title: string;
+  content: string;
+  width: number;
+  height: number;
+  timestamp: number;
+}
+
 // Unified chat message type
 export interface ChatMessage {
   id: string;
@@ -43,6 +56,8 @@ export interface ChatMessage {
   attachments?: Attachment[];
   // For tool call messages
   toolCall?: ToolCall;
+  // For artifact messages
+  artifact?: Artifact;
 }
 
 // ===== MessageHub types =====

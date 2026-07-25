@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, ipcMain } from 'electron'
+import { app, BrowserWindow, shell, ipcMain, nativeTheme } from 'electron'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -37,6 +37,9 @@ if (process.platform === 'win32' && os.release().startsWith('6.1')) app.disableH
 // Set application name for Windows 10+ notifications
 if (process.platform === 'win32') app.setAppUserModelId(app.getName())
 
+// Dark native window chrome (title bar, borders, dialogs)
+nativeTheme.themeSource = 'dark'
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
   process.exit(0)
@@ -52,7 +55,15 @@ registerCanvasHandlers()
 
 async function createWindow() {
   win = new BrowserWindow({
-    title: 'Main window',
+    title: 'AIGC CANVAS',
+    autoHideMenuBar: true,
+    backgroundColor: '#0a0a0f',
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#0a0a0f',
+      symbolColor: '#e8c766',
+      height: 40,
+    },
     width: 1400,
     height: 900,
     icon: path.join(process.env.VITE_PUBLIC || '', 'favicon.ico'),
@@ -66,6 +77,8 @@ async function createWindow() {
       // contextIsolation: false,
     },
   })
+
+  win.maximize()
 
   if (VITE_DEV_SERVER_URL) { // #298
     win.loadURL(VITE_DEV_SERVER_URL)

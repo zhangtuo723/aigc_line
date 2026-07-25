@@ -5,6 +5,7 @@ import type {
   MessageHubEvent,
   MessageHubHandler,
   ToolCall,
+  Artifact,
 } from '../../../src/shared/ipc.types';
 import log from 'electron-log/main';
 
@@ -144,7 +145,19 @@ class MessageHub {
     });
   }
 
-  /** Get active tool calls */
+  /** Push an artifact to all renderer windows */
+  pushArtifact(artifact: Artifact): void {
+    BrowserWindow.getAllWindows().forEach((win) => {
+      win.webContents.send(IPC_CHANNELS.push.artifact, artifact);
+    });
+  }
+
+  /** Notify that the agent turn has finished (successfully or not) */
+  notifyTurnEnd(): void {
+    BrowserWindow.getAllWindows().forEach((win) => {
+      win.webContents.send(IPC_CHANNELS.push.turnEnd);
+    });
+  }
   getActiveToolCalls(): ToolCall[] {
     return Array.from(this.activeToolCalls.values()).filter(
       (t) => t.status === 'running',
