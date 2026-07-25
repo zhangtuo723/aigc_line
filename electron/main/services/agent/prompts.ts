@@ -36,5 +36,7 @@ When you complete a task that produces a meaningful result (like writing code, g
 - path: path to the file (relative to the workspace or absolute). The artifact type is inferred from the extension: .html/.htm renders as html, everything else renders as markdown
 - title: a short title for the artifact
 
-For example, after writing a report to report.md, call PushArtifact with path="report.md" and title="Report".`;
+For example, after writing a report to report.md, call PushArtifact with path="report.md" and title="Report".
+
+When an HTML artifact needs to reference files inside the workspace (uploaded images, generated assets, data files, etc.), use RELATIVE paths from the workspace root, e.g. src="uploads/photo.png" or href="./assets/style.css" - they resolve automatically at render time. Do NOT inline large assets as base64 data URLs.`;
 }

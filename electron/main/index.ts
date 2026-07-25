@@ -7,6 +7,7 @@ import { update } from './update'
 import { registerProjectHandlers } from './ipc/project.handlers'
 import { registerChatHandlers } from './ipc/chat.handlers'
 import { registerCanvasHandlers } from './ipc/canvas.handlers'
+import { loadProject } from './services/project.store'
 
 const require = createRequire(import.meta.url)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -44,10 +45,21 @@ nativeTheme.themeSource = 'dark'
 // file:// is blocked when the page is served from the Vite dev server.
 protocol.registerSchemesAsPrivileged([
   { scheme: 'local-file', privileges: { secure: true, supportFetchAPI: true, stream: true } },
+  // Per-project static file access for HTML artifacts: workspace://<projectId>/<rel-path>
+  { scheme: 'workspace', privileges: { secure: true, supportFetchAPI: true, stream: true } },
 ])
 
 const LOCAL_FILE_EXTENSIONS = new Set([
   '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg', '.avif',
+])
+
+// Extensions servable from a project workspace (HTML artifact subresources)
+const WORKSPACE_FILE_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg', '.avif', '.ico',
+  '.mp4', '.webm', '.mov', '.mp3', '.wav', '.m4a', '.ogg',
+  '.woff', '.woff2', '.ttf', '.otf',
+  '.css', '.js', '.mjs', '.json', '.txt', '.md', '.csv', '.srt', '.vtt', '.xml',
+  '.html', '.htm', '.pdf',
 ])
 
 function registerLocalFileProtocol() {
@@ -59,6 +71,40 @@ function registerLocalFileProtocol() {
       return new Response('Forbidden', { status: 403 })
     }
     return net.fetch(pathToFileURL(filePath).toString())
+  })
+}
+
+/**
+ * Read-only static access scoped to a project workspace. Relative URLs inside
+ * HTML artifacts resolve against workspace://<projectId>/ via an injected
+ * <base> tag, so agents can reference files with plain relative paths.
+ */
+function registerWorkspaceProtocol() {
+  protocol.handle('workspace', async (request) => {
+    try {
+      const url = new URL(request.url)
+      const project = await loadProject(url.host)
+      if (!project) {
+        return new Response('Unknown project', { status: 404 })
+      }
+      const rel = decodeURIComponent(url.pathname).replace(/^\/+/, '')
+      // Never expose app-internal state (chat history, sessions, ...)
+      if (rel === '.aigc-line' || rel.startsWith('.aigc-line/')) {
+        return new Response('Forbidden', { status: 403 })
+      }
+      const root = path.resolve(project.folderPath)
+      const filePath = path.resolve(root, rel)
+      // Reject paths that escape the workspace
+      if (!filePath.startsWith(root + path.sep)) {
+        return new Response('Forbidden', { status: 403 })
+      }
+      if (!WORKSPACE_FILE_EXTENSIONS.has(path.extname(filePath).toLowerCase())) {
+        return new Response('Forbidden', { status: 403 })
+      }
+      return net.fetch(pathToFileURL(filePath).toString())
+    } catch (err) {
+      return new Response('Not found', { status: 404 })
+    }
   })
 }
 
@@ -108,6 +154,11 @@ async function createWindow() {
     win.loadURL(VITE_DEV_SERVER_URL)
     // Open devTool if the app is not packaged
     win.webContents.openDevTools()
+    // Forward renderer console messages to the main process log (dev only)
+    win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+      const tag = ['verbose', 'info', 'warning', 'error'][level] ?? String(level)
+      console.log(`[renderer:${tag}] ${message} (${sourceId}:${line})`)
+    })
   } else {
     win.loadFile(indexHtml)
   }
@@ -129,6 +180,7 @@ async function createWindow() {
 
 app.whenReady().then(() => {
   registerLocalFileProtocol()
+  registerWorkspaceProtocol()
   createWindow()
 })
 

@@ -98,33 +98,12 @@
   .app-no-drag {
     -webkit-app-region: no-drag;
   }
-
-  /* Move tldraw bottom toolbar up to avoid input overlap */
-  .tlui-layout__bottom {
-    bottom: 120px !important;
-  }
-
-  /* Target the actual toolbar container */
-  .tlui-layout__bottom > div[class*="tlui-toolbar"] {
-    bottom: 120px !important;
-  }
 }
 
-/* tldraw gothic dark overrides - unlayered so they beat tldraw.css theme rules */
-.tldraw-canvas .tl-container {
-  --tl-color-background: #0a0a0f;
-  --tl-color-low: #0d0d14;
-  --tl-color-low-border: #1a1a26;
-  --tl-color-panel: #12121b;
-  --tl-color-panel-contrast: #1f1f2e;
-  --tl-color-panel-overlay: rgba(31, 31, 46, 0.85);
-  --tl-color-panel-transparent: rgba(18, 18, 27, 0);
-  --tl-color-divider: #262637;
-  --tl-color-grid: hsl(240, 8%, 30%);
-  --tl-color-primary: #d4af37;
-  --tl-color-selected: #d4af37;
-  --tl-color-selected-contrast: #0a0a0f;
-  --tl-color-focus: #e8c766;
-  --tl-color-selection-stroke: #d4af37;
-  --tl-color-selection-fill: rgba(212, 175, 55, 0.16);
+/* excalidraw gothic dark overrides - unlayered so they beat excalidraw theme rules */
+.excalidraw.theme--dark {
+  --color-primary: #d4af37;
+  --color-primary-darker: #b89a2e;
+  --color-primary-darkest: #96791f;
+  --color-primary-light: #e8c766;
 }

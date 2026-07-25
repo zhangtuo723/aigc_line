@@ -60,7 +60,18 @@
       "Bash(curl -s -o /dev/null -w \"vite:%{http_code}\\\\n\" http://localhost:5173/)",
       "Bash(echo \"tsc exit: $?\")",
       "Bash(git -C /Users/zhangtuo/Desktop/aigc_line status --short)",
-      "Bash(echo \"baseline exit: $?\")"
+      "Bash(echo \"baseline exit: $?\")",
+      "Bash(npm uninstall *)",
+      "Bash(node -e \"console.log\\(require\\('/Users/zhangtuo/Desktop/aigc_line/node_modules/@excalidraw/excalidraw/package.json'\\).version\\)\")",
+      "Bash(curl -s http://localhost:9222/json/list)",
+      "Bash(python3 -c \"import json,sys; [print\\(t['type'], '|', t['title'][:50], '|', t['url'][:60]\\) for t in json.load\\(sys.stdin\\)]\")",
+      "Bash(curl -s http://localhost:9222/json/version)",
+      "Bash(curl -sv http://localhost:9222/json/version)",
+      "Bash(lsof -nP -iTCP:9222 -sTCP:LISTEN)",
+      "Bash(curl -s http://127.0.0.1:9222/json/list)",
+      "Bash(awk 'NR>=30420 && NR<=30540 && \\(/elements\\\\s*=/ || /const elements|let elements/\\)' /Users/zhangtuo/Desktop/aigc_line/node_modules/@excalidraw/excalidraw/dist/dev/index.js)",
+      "Bash(awk -F: '$1 < 30537')",
+      "Bash(node -e \"const e = require\\('/Users/zhangtuo/Desktop/aigc_line/node_modules/@excalidraw/excalidraw/dist/prod/index.js'\\); console.log\\(Object.keys\\(e\\).filter\\(k => /newElement|Embeddable|restore|serialize/i.test\\(k\\)\\).join\\('\\\\n'\\)\\)\")"
     ]
   }
 }

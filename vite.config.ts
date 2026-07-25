@@ -4,6 +4,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import electron from 'vite-plugin-electron/simple'
+import { viteStaticCopy } from 'vite-plugin-static-copy'
 import pkg from './package.json'
 
 const external = Object.keys(
@@ -27,6 +28,16 @@ export default defineConfig(({ command }) => {
     plugins: [
       react(),
       tailwindcss(),
+      // Bundle excalidraw fonts for offline/packaged builds (dev serves them
+      // straight from node_modules, see EXCALIDRAW_ASSET_PATH in CanvasArea)
+      viteStaticCopy({
+        targets: [
+          {
+            src: 'node_modules/@excalidraw/excalidraw/dist/prod/fonts',
+            dest: '.',
+          },
+        ],
+      }),
       electron({
         main: {
           entry: 'electron/main/index.ts',

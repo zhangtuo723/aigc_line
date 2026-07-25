@@ -169,12 +169,12 @@ electronAPI?.onChatMessage?.((message: ChatMessage) => {
 });
 
 // Turn-end signal from the main process - clears the thinking indicator
-electronAPI.onTurnEnd(() => {
+electronAPI?.onTurnEnd?.(() => {
   useAppStore.setState({ isAgentThinking: false });
 });
 
 // Subscribe to artifact push events
-electronAPI.onArtifact((artifact: Artifact) => {
+electronAPI?.onArtifact?.((artifact: Artifact) => {
   useAppStore.setState((state) => ({
     artifacts: [...state.artifacts, artifact],
   }));

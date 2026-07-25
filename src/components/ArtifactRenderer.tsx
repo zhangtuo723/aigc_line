@@ -1,6 +1,7 @@
 import type { Artifact } from '../shared/ipc.types'
 import type { ReactNode } from 'react'
 import { Markdown } from './Markdown'
+import { useAppStore } from '../stores/app.store'
 
 interface ArtifactCardProps {
   artifact: Artifact
@@ -73,17 +74,27 @@ function ImageCard({ artifact, onClose }: ArtifactCardProps) {
 }
 
 function HtmlCard({ artifact, onClose }: ArtifactCardProps) {
+  const projectId = useAppStore((s) => s.currentProject?.id)
+  // Relative URLs in the artifact resolve against the project workspace
+  // (served by the workspace:// protocol registered in the main process)
+  const baseTag = projectId ? `<base href="workspace://${projectId}/">` : ''
+
   // Wrap content in a full HTML document if not already
   const wrappedContent = (() => {
     const content = artifact.content.trim()
     if (content.toLowerCase().startsWith('<!doctype') || content.toLowerCase().startsWith('<html')) {
-      return content
+      // Full document: inject <base> into the existing <head>, or create one
+      if (/<head[^>]*>/i.test(content)) {
+        return content.replace(/<head[^>]*>/i, (m) => m + baseTag)
+      }
+      return content.replace(/<html[^>]*>/i, (m) => `${m}<head>${baseTag}</head>`)
     }
     return `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+${baseTag}
 <style>
   body { margin: 0; padding: 8px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
   * { box-sizing: border-box; }
