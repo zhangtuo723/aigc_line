@@ -12,7 +12,7 @@ interface AppState {
   currentProject: Project | null;
   messages: ChatMessage[];
   isAgentThinking: boolean;
-  currentPage: 'home' | 'project';
+  currentPage: 'home' | 'project' | 'settings';
   artifacts: Artifact[];
   /** Artifacts the user clicked on the canvas - attached to the next message */
   referencedArtifacts: ArtifactRef[];
@@ -22,7 +22,7 @@ interface AppState {
   setMessages: (messages: ChatMessage[]) => void;
   addMessage: (message: ChatMessage) => void;
   setAgentThinking: (isAgentThinking: boolean) => void;
-  setCurrentPage: (page: 'home' | 'project') => void;
+  setCurrentPage: (page: 'home' | 'project' | 'settings') => void;
   setArtifacts: (artifacts: Artifact[]) => void;
   addArtifact: (artifact: Artifact) => void;
   updateArtifactContent: (id: string, content: string) => void;

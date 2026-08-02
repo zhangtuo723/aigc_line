@@ -6,6 +6,14 @@ import type {
   ProjectIndex,
   ChatMessage,
   Artifact,
+  GenerateImageRequest,
+  GenerateImageResult,
+  GenerateVideoRequest,
+  GenerateVideoResult,
+  ComfyWorkflowInfo,
+  AppSettingsView,
+  SaveAppSettingsRequest,
+  ConnectionTestResult,
 } from '../../src/shared/ipc.types';
 
 export interface ElectronAPI {
@@ -23,6 +31,12 @@ export interface ElectronAPI {
     relPath: string,
     content: string,
   ) => Promise<{ success: boolean; error?: string }>;
+  generateImage: (request: GenerateImageRequest) => Promise<GenerateImageResult>;
+  generateVideo: (request: GenerateVideoRequest) => Promise<GenerateVideoResult>;
+  listComfyWorkflows: () => Promise<ComfyWorkflowInfo[]>;
+  getAppSettings: () => Promise<AppSettingsView>;
+  saveAppSettings: (request: SaveAppSettingsRequest) => Promise<AppSettingsView>;
+  testComfyUIConnection: (baseUrl: string) => Promise<ConnectionTestResult>;
   onChatMessage: (callback: (message: ChatMessage) => void) => () => void;
   onArtifact: (callback: (artifact: Artifact) => void) => () => void;
   onTurnEnd: (callback: () => void) => () => void;
@@ -54,6 +68,12 @@ const api: ElectronAPI = {
   loadCanvasSnapshot: (folderPath) => invoke(IPC_CHANNELS.canvas.load, folderPath),
   saveArtifactContent: (projectId, relPath, content) =>
     invoke(IPC_CHANNELS.artifact.save, projectId, relPath, content),
+  generateImage: (request) => invoke(IPC_CHANNELS.comfyui.generateImage, request),
+  generateVideo: (request) => invoke(IPC_CHANNELS.comfyui.generateVideo, request),
+  listComfyWorkflows: () => invoke(IPC_CHANNELS.comfyui.listWorkflows),
+  getAppSettings: () => invoke(IPC_CHANNELS.settings.get),
+  saveAppSettings: (request) => invoke(IPC_CHANNELS.settings.save, request),
+  testComfyUIConnection: (baseUrl) => invoke(IPC_CHANNELS.settings.testComfyUI, baseUrl),
   onChatMessage: (callback) => onPush(IPC_CHANNELS.push.chatMessage, callback),
   onArtifact: (callback) => onPush(IPC_CHANNELS.push.artifact, callback),
   onTurnEnd: (callback) => onPush(IPC_CHANNELS.push.turnEnd, callback),

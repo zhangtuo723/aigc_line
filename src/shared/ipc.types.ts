@@ -88,6 +88,71 @@ export interface ArtifactRef {
   path?: string;
 }
 
+// ComfyUI image generation
+export type ImageAspectRatio = '16:9' | '1:1' | '4:3';
+
+export interface GenerateImageRequest {
+  projectId: string;
+  nodeId: string;
+  prompt: string;
+  aspectRatio: ImageAspectRatio;
+  negativePrompt?: string;
+  workflowId?: string;
+  referenceImagePath?: string;
+}
+
+export type ComfyWorkflowKind = 'text-to-image' | 'image-to-image' | 'image-to-video';
+
+export interface ComfyWorkflowInfo {
+  id: string;
+  name: string;
+  kind: ComfyWorkflowKind;
+}
+
+export interface AppSettingsView {
+  comfyuiBaseUrl: string;
+  agentBaseUrl: string;
+  agentTokenConfigured: boolean;
+  defaultImageWorkflowId: string;
+}
+
+export interface SaveAppSettingsRequest {
+  comfyuiBaseUrl: string;
+  agentBaseUrl: string;
+  defaultImageWorkflowId: string;
+  agentToken?: string;
+  clearAgentToken?: boolean;
+}
+
+export interface ConnectionTestResult {
+  success: boolean;
+  message: string;
+}
+
+export interface GenerateImageResult {
+  success: boolean;
+  relativePath?: string;
+  promptId?: string;
+  error?: string;
+}
+
+export interface GenerateVideoRequest {
+  projectId: string;
+  nodeId: string;
+  prompt: string;
+  aspectRatio: ImageAspectRatio;
+  duration?: number;
+  workflowId?: string;
+  referenceImagePath: string;
+}
+
+export interface GenerateVideoResult {
+  success: boolean;
+  relativePath?: string;
+  promptId?: string;
+  error?: string;
+}
+
 // ===== MessageHub types =====
 
 /** Message types supported by MessageHub */

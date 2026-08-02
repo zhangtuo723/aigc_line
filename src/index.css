@@ -100,29 +100,91 @@
   }
 }
 
-/* excalidraw gothic dark overrides - unlayered so they beat excalidraw theme rules */
-.excalidraw.theme--dark {
-  --color-primary: #d4af37;
-  --color-primary-darker: #b89a2e;
-  --color-primary-darkest: #96791f;
-  --color-primary-light: #e8c766;
+/* React Flow storyboard canvas */
+.react-flow {
+  --xy-background-color: #0a0a0f;
+  --xy-edge-stroke: #8aa5c2;
+  --xy-edge-stroke-selected: #e8c766;
+  --xy-connectionline-stroke: #e8c766;
+  --xy-selection-background-color: rgba(212, 175, 55, 0.08);
+  --xy-selection-border: 1px solid rgba(212, 175, 55, 0.55);
+  background: #0a0a0f;
 }
 
-/* Hide Excalidraw's element-link popup (artifact:// links are internal) */
-.excalidraw-hyperlinkContainer {
-  display: none !important;
+.react-flow__node-storyNode {
+  border: 0;
+  background: transparent;
 }
 
-/* Hide Excalidraw's property panel when only artifact cards are selected -
- * stroke/background/etc. don't apply to embeddables */
-.artifact-selected .excalidraw .App-menu__left {
-  display: none !important;
+.react-flow.canvas-select-mode .react-flow__pane {
+  cursor: default;
 }
 
-/* Hide Excalidraw chrome we don't use: main menu, library, help button */
-.excalidraw .main-menu-trigger,
-.excalidraw .sidebar-trigger,
-.excalidraw .default-sidebar-trigger,
-.excalidraw .help-icon {
-  display: none !important;
+.react-flow.canvas-pan-mode .react-flow__pane {
+  cursor: grab;
+}
+
+.react-flow.canvas-pan-mode .react-flow__pane:active {
+  cursor: grabbing;
+}
+
+.react-flow__selection {
+  border: 1px solid rgba(232, 199, 102, 0.8);
+  border-radius: 8px;
+  background: rgba(212, 175, 55, 0.1);
+  box-shadow: 0 0 0 1px rgba(212, 175, 55, 0.08) inset;
+}
+
+.story-handle.react-flow__handle {
+  z-index: 20;
+  width: 14px;
+  height: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  background: #17171b;
+  box-shadow: 0 0 0 3px rgba(10, 10, 15, 0.75);
+  transition: border-color 150ms, background-color 150ms, transform 150ms;
+}
+
+.story-handle.react-flow__handle-left:hover {
+  transform: translate(-50%, -50%) scale(1.18);
+}
+
+.story-handle.react-flow__handle-right:hover {
+  transform: translate(50%, -50%) scale(1.18);
+}
+
+.story-handle.react-flow__handle::after {
+  content: '+';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.story-handle.react-flow__handle:hover {
+  border-color: #e8c766;
+  background: #3b3420;
+}
+
+.react-flow__controls,
+.react-flow__minimap {
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 12px;
+  background: rgba(23, 23, 27, 0.92);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+.react-flow__controls-button {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.react-flow__controls-button:hover {
+  background: rgba(255, 255, 255, 0.08);
 }

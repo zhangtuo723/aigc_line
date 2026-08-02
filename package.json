@@ -19,7 +19,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.214",
     "@anthropic-ai/sdk": "^0.112.3",
-    "@excalidraw/excalidraw": "^0.18.1",
+    "@xyflow/react": "^12.11.2",
     "chokidar": "^4.0.0",
     "electron-log": "^5.4.0",
     "electron-updater": "^6.8.3",
@@ -47,7 +47,6 @@
     "vite": "^5.4.19",
     "vite-plugin-electron": "^0.28.0",
     "vite-plugin-electron-renderer": "^1.0.0",
-    "vite-plugin-static-copy": "^4.1.1",
     "vitest": "^1.6.1"
   },
   "optionalDependencies": {

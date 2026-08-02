@@ -25,5 +25,9 @@
     }
   },
   "include": ["src"],
-  "references": [{ "path": "./tsconfig.node.json" }]
+  "exclude": [
+    "src/components/ProgressPanel.tsx",
+    "src/components/ProjectList.tsx",
+    "src/components/ResultPanel.tsx"
+  ]
 }

@@ -14,6 +14,7 @@ import { buildUserPrompt, buildSystemPromptAppend } from './prompts';
 import { createPushArtifactServer } from './tools';
 import { createToolTrackingHooks } from './hooks';
 import { extractMessageText } from './stream';
+import { getRuntimeSettings } from '../settings.service';
 
 export type { AgentOptions } from './types';
 export { pushArtifact } from './artifact';
@@ -37,6 +38,14 @@ export async function runAgent(
 
     // 4. Build the prompt - only current user message, system instructions go in systemPrompt
     const prompt = buildUserPrompt(userMessage, folderPath);
+    const runtimeSettings = await getRuntimeSettings();
+    const agentEnv: Record<string, string | undefined> = { ...process.env };
+    if (runtimeSettings.agentBaseUrl) {
+      agentEnv.ANTHROPIC_BASE_URL = runtimeSettings.agentBaseUrl;
+    }
+    if (runtimeSettings.agentToken) {
+      agentEnv.ANTHROPIC_AUTH_TOKEN = runtimeSettings.agentToken;
+    }
 
     // 5. Track active tool calls
     const activeToolCalls = new Map<string, ToolCallInfo>();
@@ -48,6 +57,7 @@ export async function runAgent(
       options: {
         allowedTools: [...allowedTools, 'PushArtifact'],
         cwd: folderPath,
+        env: agentEnv,
         // Resume existing session if available, otherwise start fresh
         ...(sessionId ? { resume: sessionId } : {}),
         // Register the MCP server

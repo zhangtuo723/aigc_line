@@ -33,3 +33,7 @@ yarn.lock
 /playwright/.cache/
 
 test/screenshots
+
+# TypeScript build-mode cache/output must never be written beside source files
+*.tsbuildinfo
+.tsbuild/

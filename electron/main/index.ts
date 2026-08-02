@@ -3,11 +3,16 @@ import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
 import os from 'node:os'
+import fs from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
+import { Readable } from 'node:stream'
 import { update } from './update'
 import { registerProjectHandlers } from './ipc/project.handlers'
 import { registerChatHandlers } from './ipc/chat.handlers'
 import { registerCanvasHandlers } from './ipc/canvas.handlers'
 import { registerArtifactHandlers } from './ipc/artifact.handlers'
+import { registerComfyUIHandlers } from './ipc/comfyui.handlers'
+import { registerSettingsHandlers } from './ipc/settings.handlers'
 import { loadProject } from './services/project.store'
 
 const require = createRequire(import.meta.url)
@@ -47,7 +52,16 @@ nativeTheme.themeSource = 'dark'
 protocol.registerSchemesAsPrivileged([
   { scheme: 'local-file', privileges: { secure: true, supportFetchAPI: true, stream: true } },
   // Per-project static file access for HTML artifacts: workspace://<projectId>/<rel-path>
-  { scheme: 'workspace', privileges: { secure: true, supportFetchAPI: true, stream: true } },
+  {
+    scheme: 'workspace',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  },
 ])
 
 const LOCAL_FILE_EXTENSIONS = new Set([
@@ -62,6 +76,69 @@ const WORKSPACE_FILE_EXTENSIONS = new Set([
   '.css', '.js', '.mjs', '.json', '.txt', '.md', '.csv', '.srt', '.vtt', '.xml',
   '.html', '.htm', '.pdf',
 ])
+
+const VIDEO_CONTENT_TYPES: Record<string, string> = {
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
+  '.mkv': 'video/x-matroska',
+}
+
+async function serveWorkspaceVideo(request: Request, filePath: string): Promise<Response> {
+  const stat = await fs.stat(filePath)
+  const contentType = VIDEO_CONTENT_TYPES[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream'
+  const range = request.headers.get('range')
+  const commonHeaders = {
+    'Accept-Ranges': 'bytes',
+    'Access-Control-Allow-Origin': '*',
+    'Cross-Origin-Resource-Policy': 'cross-origin',
+    'Content-Type': contentType,
+    'Cache-Control': 'no-cache',
+  }
+  if (request.method === 'HEAD') {
+    return new Response(null, {
+      status: 200,
+      headers: { ...commonHeaders, 'Content-Length': String(stat.size) },
+    })
+  }
+  if (!range) {
+    const stream = Readable.toWeb(createReadStream(filePath)) as ReadableStream<Uint8Array>
+    return new Response(stream, {
+      status: 200,
+      headers: { ...commonHeaders, 'Content-Length': String(stat.size) },
+    })
+  }
+
+  const match = /^bytes=(\d*)-(\d*)$/i.exec(range.trim())
+  if (!match) {
+    return new Response(null, {
+      status: 416,
+      headers: { ...commonHeaders, 'Content-Range': `bytes */${stat.size}` },
+    })
+  }
+  const requestedStart = match[1] ? Number(match[1]) : undefined
+  const requestedEnd = match[2] ? Number(match[2]) : undefined
+  let start = requestedStart ?? Math.max(0, stat.size - (requestedEnd ?? 0))
+  let end = requestedStart === undefined
+    ? stat.size - 1
+    : Math.min(requestedEnd ?? stat.size - 1, stat.size - 1)
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start >= stat.size || end < start) {
+    return new Response(null, {
+      status: 416,
+      headers: { ...commonHeaders, 'Content-Range': `bytes */${stat.size}` },
+    })
+  }
+  const length = end - start + 1
+  const stream = Readable.toWeb(createReadStream(filePath, { start, end })) as ReadableStream<Uint8Array>
+  return new Response(stream, {
+    status: 206,
+    headers: {
+      ...commonHeaders,
+      'Content-Length': String(length),
+      'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+    },
+  })
+}
 
 function registerLocalFileProtocol() {
   protocol.handle('local-file', (request) => {
@@ -102,6 +179,9 @@ function registerWorkspaceProtocol() {
       if (!WORKSPACE_FILE_EXTENSIONS.has(path.extname(filePath).toLowerCase())) {
         return new Response('Forbidden', { status: 403 })
       }
+      if (path.extname(filePath).toLowerCase() in VIDEO_CONTENT_TYPES) {
+        return serveWorkspaceVideo(request, filePath)
+      }
       return net.fetch(pathToFileURL(filePath).toString())
     } catch (err) {
       return new Response('Not found', { status: 404 })
@@ -122,6 +202,8 @@ registerProjectHandlers()
 registerChatHandlers()
 registerCanvasHandlers()
 registerArtifactHandlers()
+registerComfyUIHandlers()
+registerSettingsHandlers()
 
 async function createWindow() {
   win = new BrowserWindow({

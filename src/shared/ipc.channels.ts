@@ -18,6 +18,16 @@ export const IPC_CHANNELS = {
     push: 'artifact:push',
     save: 'artifact:save',
   },
+  comfyui: {
+    listWorkflows: 'comfyui:listWorkflows',
+    generateImage: 'comfyui:generateImage',
+    generateVideo: 'comfyui:generateVideo',
+  },
+  settings: {
+    get: 'settings:get',
+    save: 'settings:save',
+    testComfyUI: 'settings:testComfyUI',
+  },
   push: {
     chatMessage: 'chat:receiveMessage',
     artifact: 'artifact:receive',
@@ -30,4 +40,6 @@ export type IpcChannel =
   | (typeof IPC_CHANNELS.chat)[keyof typeof IPC_CHANNELS.chat]
   | (typeof IPC_CHANNELS.canvas)[keyof typeof IPC_CHANNELS.canvas]
   | (typeof IPC_CHANNELS.artifact)[keyof typeof IPC_CHANNELS.artifact]
+  | (typeof IPC_CHANNELS.comfyui)[keyof typeof IPC_CHANNELS.comfyui]
+  | (typeof IPC_CHANNELS.settings)[keyof typeof IPC_CHANNELS.settings]
   | (typeof IPC_CHANNELS.push)[keyof typeof IPC_CHANNELS.push];

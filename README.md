@@ -2,81 +2,106 @@
 
 English | [简体中文](README.zh-CN.md)
 
-An Electron desktop workbench for AIGC creation: an infinite canvas (Excalidraw) on the left and a chat panel with a Claude Agent on the right. The agent reads/writes files inside the project workspace and pushes artifacts (Markdown / HTML / images / storyboards) onto the canvas. The headline capability is **AIGC short-drama storyboarding**: the agent generates a storyboard JSON and the canvas renders it as a visual per-shot pipeline card.
+AIGC CANVAS is an Electron desktop workbench for AI storyboarding and video creation. It brings a Claude Agent, a React Flow infinite canvas, and ComfyUI generation pipelines into one project workspace: create storyboards through chat, connect image and video nodes, and run text-to-image, image editing, and image-to-video workflows directly on the canvas.
 
-![AIGC CANVAS screenshot](docs/screenshot.png)
+![Storyboard canvas and Agent chat](docs/screenshots/storyboard-canvas.png)
 
 ## Features
 
-- **Agent chat**: powered by `@anthropic-ai/claude-agent-sdk` (claude_code preset) with Read/Bash/Glob/Grep/Edit/Write tools, scoped to the project workspace
-- **Artifact canvas**: the agent pushes files via a custom `PushArtifact` tool; re-pushing the same file updates the existing card in place instead of adding a duplicate
-- **Storyboard artifact**: `.storyboard.json` renders as a pipeline card (scene description → image node → video node) with:
-  - **Editable** text-to-image / image-to-video prompts, saved back to the JSON source file on blur
-  - `imageSource` / `videoSource` for the currently selected generation, `imageSourceHistory` / `videoSourceHistory` for re-roll history — browse versions and promote any of them to current
-  - Generate buttons and export-edit entry (APIs pending, placeholders in place)
-- **Canvas references**: clicking an artifact card adds a reference chip to the chat input; the agent knows which artifact the message modifies/references and can locate its file directly
-- **Workspace protocol**: `workspace://<projectId>/<path>` lets HTML artifacts reference workspace assets (images, videos, css…) via relative paths
-- **Persistence**: chat history and canvas snapshots are stored per project and restored on reopen; artifacts with a source file are re-read from disk on restore
+- **Project Agent** powered by @anthropic-ai/claude-agent-sdk, scoped to the selected workspace and equipped with a custom PushArtifact tool.
+- **React Flow infinite canvas** with zoom, pan, marquee/multi-selection, drag, delete, Bézier connections, and per-project snapshots.
+- **Text, image, video, and storyboard nodes**. Connecting an image to a video automatically uses that image as the first-frame reference.
+- **Storyboard pipeline**: every row in a .storyboard.json artifact expands into shot → image → video, with prompts and generated paths written back to the source file.
+- **ComfyUI image generation** with text-to-image, image-to-image, 16:9 / 1:1 / 4:3 ratios, and RTX 2× ULTRA upscaling.
+- **ComfyUI video generation** with LTX 2.3 image-to-video, first-frame references, RTX 2× ULTRA upscaling, and 5s / 10s / 15s durations.
+- **In-canvas media preview**, including Range-based streaming for generated videos.
+- **Application settings** for the ComfyUI endpoint, Agent API URL/token, and default image workflow. Tokens are encrypted with Electron safe storage.
+- **Project persistence** for chat history, canvas layout, node parameters, and generated assets.
 
-## Tech Stack
+## Creation Flow
 
-Electron + React 19 + Vite + TailwindCSS v4 + Zustand + Excalidraw + claude-agent-sdk (custom tools via in-process MCP server)
+![Image and video generation pipeline](docs/screenshots/generation-pipeline.png)
+
+1. Create a project and select a local workspace.
+2. Ask the Agent to create a .storyboard.json artifact.
+3. Each storyboard shot is connected to an image node and a video node.
+4. Edit the image prompt, workflow, and aspect ratio, then click **Generate**.
+5. Enter motion/camera instructions in the video node, select a duration, and generate the clip.
+6. Outputs are stored under generated/images and generated/videos.
+
+## Bundled ComfyUI Workflows
+
+| Workflow | Type | RTX upscale |
+|---|---|---|
+| Flux2 Klein 9B | Text to image | 2× ULTRA |
+| Flux2 Klein 9B Edit | Image to image | 2× ULTRA |
+| Z-Image Turbo | Text to image | 2× ULTRA |
+| LTX 2.3 22B | Image to video | 2× ULTRA |
+
+Templates live in resources/comfyui-workflows/. The corresponding models and custom nodes must already be installed on the ComfyUI server.
+
+## Settings
+
+![Application settings](docs/screenshots/settings.png)
+
+Open Settings from the home page to configure:
+
+- ComfyUI HTTP endpoint, for example http://127.0.0.1:8188
+- ANTHROPIC_BASE_URL
+- ANTHROPIC_AUTH_TOKEN
+- Default text-to-image workflow
 
 ## Quick Start
 
-```sh
-pnpm install
-pnpm dev
-```
+Requirements: Node.js, npm, a reachable ComfyUI server, and Claude Agent credentials or a compatible Anthropic API URL and token.
 
-Requires working Claude credentials on the machine (Claude Code login or `ANTHROPIC_API_KEY`); the Agent SDK picks them up automatically.
+~~~powershell
+npm install
+npm run dev
+~~~
+
+Production build:
+
+~~~powershell
+npm run build
+~~~
 
 ## Scripts
 
-- `pnpm dev`: start the dev environment (Vite + Electron)
-- `pnpm build`: build the renderer and package with electron-builder
-- `pnpm test` / `pnpm test:e2e`: Vitest unit tests / Playwright e2e tests
-- `pnpm typecheck`: TypeScript type check
+- npm run dev: start Vite and Electron in development mode
+- npm run build: build and package with electron-builder
+- npm run typecheck: run TypeScript checks
+- npm test: run Vitest tests
+- npm run test:e2e: run Playwright Electron tests
 
 ## Project Structure
 
-```tree
+~~~text
 ├── electron/
 │   ├── main/
-│   │   ├── ipc/                 # IPC handlers (project/chat/canvas/artifact)
+│   │   ├── ipc/                    # Project, chat, canvas, artifact, ComfyUI, settings IPC
 │   │   └── services/
-│   │       ├── agent/           # Agent SDK wrapper
-│   │       │   ├── index.ts     #   runAgent: query loop, tool registration
-│   │       │   ├── tools.ts     #   PushArtifact custom MCP tool
-│   │       │   ├── prompts.ts   #   system/user prompt assembly
-│   │       │   └── artifact.ts  #   artifact construction & push
-│   │       ├── message-hub.ts   #   main → renderer event push
-│   │       └── project.store.ts #   project index & chat history persistence
-│   └── preload/                 # contextBridge electronAPI
+│   │       ├── agent/              # Claude Agent SDK and PushArtifact
+│   │       ├── comfyui.service.ts  # Image/video workflows and output downloads
+│   │       ├── settings.service.ts # Global settings and secure token storage
+│   │       └── project.store.ts    # Project, chat, and canvas persistence
+│   └── preload/                    # Secure electronAPI bridge
+├── resources/comfyui-workflows/    # ComfyUI API workflow templates
 ├── src/
-│   ├── components/
-│   │   ├── CanvasArea.tsx       # Excalidraw canvas: artifact elements, snapshots, reference selection
-│   │   ├── ArtifactRenderer.tsx # per-type artifact dispatch
-│   │   ├── StoryboardCard.tsx   # storyboard card (pipeline layout, versions, prompt editing)
-│   │   ├── ChatPanel.tsx        # chat panel
-│   │   ├── ChatInput.tsx        # input box (attachments, artifact reference chips)
-│   │   └── ChatMessage.tsx      # message bubbles (attachments, refs, artifacts, tool calls)
-│   ├── stores/app.store.ts      # Zustand global state (messages, artifacts, references)
-│   └── shared/                  # IPC channels & types shared by main/renderer
+│   ├── components/CanvasArea.tsx   # React Flow canvas and generation nodes
+│   ├── pages/                      # Home, project, and settings pages
+│   ├── shared/                     # IPC channels and types
+│   └── stores/                     # Zustand state
 └── test/
-```
+~~~
 
-## Core Flows
+## Storyboard Data
 
-**Artifact push**: agent `Write`s a file → calls `PushArtifact{path,title}` → the main process infers the type from the extension (images become data URLs; `.storyboard.json` → storyboard; `.html` → html; everything else markdown) → IPC push → the store upserts by source path → the canvas inserts or updates the embeddable card in place → the push is also persisted in chat history for restore.
-
-**Storyboard schema** (`StoryboardShot`, see `src/shared/ipc.types.ts`): `index`, `duration` (seconds), `scene`, `dialogue`, `camera`, `textToImagePrompt` / `imageToVideoPrompt` (English prompts, editable in the UI), `imageSource` / `videoSource` (current selection paths), `*History` (re-roll history).
-
-**Artifact references**: selecting a card on the canvas records a reference in the store → it is inlined into the user prompt (title + workspace-relative path) → the agent edits the file with Read/Edit and re-pushes, updating the card in place.
-
-**Edit write-back**: editing a prompt or switching versions in the storyboard card → `artifact:save` IPC writes the JSON back into the workspace (with path-escape validation).
+A storyboard file contains an array of StoryboardShot objects with shot number, duration, scene, dialogue, camera direction, image/video prompts, current asset paths, and version history. Successful generations automatically write output paths back to the storyboard file.
 
 ## Roadmap
 
-- Wire up text-to-image / image-to-video APIs (buttons and data fields are ready: generate → download into the workspace → move old source into history → write the new path to source)
-- Export edit (concatenate per-shot videos)
+- Additional ComfyUI video workflows
+- Batch generation and queue management
+- Shot concatenation, voice-over, and timeline export
+- Visual workflow importing and field mapping

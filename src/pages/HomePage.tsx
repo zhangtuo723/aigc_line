@@ -1,7 +1,7 @@
 import { useAppStore } from '../stores/app.store';
 
 export function HomePage() {
-  const { projects, createProject, selectProject, deleteProject, loadProjects } = useAppStore();
+  const { projects, createProject, selectProject, deleteProject, loadProjects, setCurrentPage } = useAppStore();
 
   const handleCreate = async () => {
     const folders = await window.electronAPI.showOpenDialog({ title: '选择项目文件夹' });
@@ -41,7 +41,19 @@ export function HomePage() {
             <p className="mt-1 text-[11px] tracking-[0.35em] text-[#8a8794]">AI 分镜视频创作画布</p>
           </div>
         </div>
-        {createButton('px-5 py-2.5 text-[13px]')}
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setCurrentPage('settings')}
+            className="flex h-10 w-10 items-center justify-center rounded-lg border border-white/[0.1] bg-white/[0.04] text-[#8a8794] transition hover:border-[#d4af37]/40 hover:bg-[#d4af37]/[0.08] hover:text-[#e8c766]"
+            title="系统配置"
+          >
+            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M10.3 3.3c.4-1.7 2.9-1.7 3.4 0a1.7 1.7 0 002.5 1c1.5-.9 3.2.9 2.3 2.4a1.7 1.7 0 001 2.5c1.7.5 1.7 3 0 3.5a1.7 1.7 0 00-1 2.5c.9 1.5-.8 3.2-2.3 2.3a1.7 1.7 0 00-2.5 1c-.5 1.7-3 1.7-3.4 0a1.7 1.7 0 00-2.5-1c-1.5.9-3.2-.8-2.3-2.3a1.7 1.7 0 00-1-2.5c-1.7-.5-1.7-3 0-3.5a1.7 1.7 0 001-2.5C4.6 5.2 6.3 3.4 7.8 4.3a1.7 1.7 0 002.5-1z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.7} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </button>
+          {createButton('px-5 py-2.5 text-[13px]')}
+        </div>
       </header>
 
       {/* Content */}
