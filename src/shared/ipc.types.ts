@@ -12,6 +12,14 @@ export interface ProjectIndex {
   lastOpenedId?: string;
 }
 
+export interface ImportAudioResult {
+  success: boolean;
+  canceled?: boolean;
+  relativePath?: string;
+  name?: string;
+  error?: string;
+}
+
 // Chat / Agent types
 export type MessageRole = 'user' | 'assistant' | 'system';
 
@@ -143,7 +151,11 @@ export interface GenerateVideoRequest {
   aspectRatio: ImageAspectRatio;
   duration?: number;
   workflowId?: string;
-  referenceImagePath: string;
+  referenceImagePath?: string;
+  lastFrameImagePath?: string;
+  referenceImagePaths?: string[];
+  referenceVideoPaths?: string[];
+  referenceAudioPaths?: string[];
 }
 
 export interface GenerateVideoResult {

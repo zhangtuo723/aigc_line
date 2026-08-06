@@ -90,16 +90,31 @@ const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
   },
 ]
 
-const VIDEO_WORKFLOW: ComfyWorkflowInfo & { file: string } = {
-  id: 'ltx-2.3-22b-i2v-rtx',
-  name: 'LTX 2.3 22B · 图生视频 + RTX 放大',
-  kind: 'image-to-video',
-  file: 'ltx2.3-22b-image-to-video-rtx.json',
+interface VideoWorkflowTemplate extends ComfyWorkflowInfo {
+  file: string
+  mode: 'first-last' | 'reference'
 }
+
+const VIDEO_WORKFLOWS: VideoWorkflowTemplate[] = [
+  {
+    id: 'minimax-h3-t2v-flf2v',
+    name: 'MiniMax H3 · 文生视频 / 首尾帧',
+    kind: 'image-to-video',
+    file: 'video_minimax_h3_t2v.json',
+    mode: 'first-last',
+  },
+  {
+    id: 'minimax-h3-r2v',
+    name: 'MiniMax H3 · 全模态参考',
+    kind: 'image-to-video',
+    file: 'video_minimax_h3_r2v.json',
+    mode: 'reference',
+  },
+]
 
 export const listComfyWorkflows = async (): Promise<ComfyWorkflowInfo[]> => {
   const { defaultImageWorkflowId } = await getRuntimeSettings()
-  return [...WORKFLOW_TEMPLATES, VIDEO_WORKFLOW]
+  return [...WORKFLOW_TEMPLATES, ...VIDEO_WORKFLOWS]
     .sort((a, b) => Number(b.id === defaultImageWorkflowId) - Number(a.id === defaultImageWorkflowId))
     .map(({ id, name, kind }) => ({ id, name, kind }))
 }
@@ -418,7 +433,7 @@ async function waitForVideo(baseUrl: string, promptId: string): Promise<ComfyMed
   throw new Error('ComfyUI 视频生成超时（30 分钟）')
 }
 
-async function uploadReferenceImage(
+async function uploadReferenceMedia(
   baseUrl: string,
   projectRoot: string,
   relativePath: string,
@@ -426,7 +441,7 @@ async function uploadReferenceImage(
   const root = path.resolve(projectRoot)
   const absolutePath = path.resolve(root, relativePath)
   if (absolutePath !== root && !absolutePath.startsWith(root + path.sep)) {
-    throw new Error('参考图片路径超出项目目录')
+    throw new Error('参考媒体路径超出项目目录')
   }
   const bytes = await fs.readFile(absolutePath)
   const form = new FormData()
@@ -440,11 +455,11 @@ async function uploadReferenceImage(
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     })
   } catch (error) {
-    throw new Error(`上传参考图片失败：${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`上传参考媒体失败：${error instanceof Error ? error.message : String(error)}`)
   }
-  if (!response.ok) throw new Error(`上传参考图片失败 (${response.status})`)
+  if (!response.ok) throw new Error(`上传参考媒体失败 (${response.status})`)
   const uploaded = await response.json() as { name?: string; subfolder?: string }
-  if (!uploaded.name) throw new Error('ComfyUI 未返回上传后的图片名称')
+  if (!uploaded.name) throw new Error('ComfyUI 未返回上传后的媒体名称')
   return uploaded.subfolder ? `${uploaded.subfolder}/${uploaded.name}` : uploaded.name
 }
 
@@ -472,7 +487,7 @@ async function buildTemplateWorkflow(
   if (template.kind === 'image-to-image') {
     if (!request.referenceImagePath) throw new Error('图生图工作流需要先连接一个已有图片节点作为参考图')
     if (!template.imageNode || !template.imageField) throw new Error(`工作流 ${template.name} 未配置输入图片节点`)
-    const uploadedName = await uploadReferenceImage(baseUrl, projectRoot, request.referenceImagePath)
+    const uploadedName = await uploadReferenceMedia(baseUrl, projectRoot, request.referenceImagePath)
     setInput(template.imageNode, template.imageField, uploadedName)
   }
   return workflow
@@ -527,36 +542,87 @@ export async function generateVideoWithComfyUI(
 ): Promise<GenerateVideoResult> {
   const project = await loadProject(request.projectId)
   if (!project) throw new Error('项目不存在或已被删除')
-  if (!request.prompt.trim()) throw new Error('请先输入图生视频提示词')
-  if (!request.referenceImagePath) throw new Error('请先连接一个已有图片节点作为视频首帧')
+  if (!request.prompt.trim()) throw new Error('请先输入视频生成提示词')
 
   const settings = await getRuntimeSettings()
   const baseUrl = normalizeBaseUrl(settings.comfyuiBaseUrl || project.comfyuiBaseUrl || 'http://127.0.0.1:8188')
-  const workflow = await loadWorkflowFile(VIDEO_WORKFLOW.file, VIDEO_WORKFLOW.name)
-  const uploadedName = await uploadReferenceImage(baseUrl, project.folderPath, request.referenceImagePath)
-  const seed = () => Math.floor(Math.random() * 1_000_000_000_000_000)
-  const duration = Math.max(5, Math.min(15, Math.round(request.duration ?? 5)))
+  const template = VIDEO_WORKFLOWS.find((item) => item.id === request.workflowId) ?? VIDEO_WORKFLOWS[0]
+  const workflow = await loadWorkflowFile(template.file, template.name)
+  const duration = Math.max(1, Math.min(15, Number(request.duration ?? 5)))
   const dimensions = request.aspectRatio === '1:1'
-    ? { width: 960, height: 960 }
+    ? { width: 1024, height: 1024 }
     : request.aspectRatio === '4:3'
-      ? { width: 1280, height: 960 }
-      : { width: 1280, height: 720 }
+      ? { width: 1024, height: 768 }
+      : { width: 1024, height: 576 }
   const setInput = (nodeId: string, field: string, value: unknown) => {
     const node = workflow[nodeId]
-    if (!node) throw new Error(`LTX 2.3 工作流缺少节点 ${nodeId}`)
+    if (!node) throw new Error(`${template.name} 工作流缺少节点 ${nodeId}`)
     node.inputs[field] = value
   }
-  setInput('269', 'image', uploadedName)
-  setInput('320:319', 'value', request.prompt.trim())
-  setInput('320:312', 'value', dimensions.width)
-  setInput('320:299', 'value', dimensions.height)
-  setInput('320:301', 'value', duration)
-  setInput('320:276', 'noise_seed', seed())
-  setInput('320:277', 'noise_seed', seed())
+
+  const imagePaths = (request.referenceImagePaths ?? []).filter(Boolean)
+  const videoPaths = (request.referenceVideoPaths ?? []).filter(Boolean)
+  const audioPaths = (request.referenceAudioPaths ?? []).filter(Boolean)
+
+  if (template.mode === 'first-last') {
+    setInput('105:104', 'prompt', request.prompt.trim())
+    setInput('105:104', 'width', dimensions.width)
+    setInput('105:104', 'height', dimensions.height)
+    setInput('105:111', 'value', duration)
+    setInput('105:15', 'noise_seed', Math.floor(Math.random() * 1_000_000_000_000_000))
+
+    const frameInputs = [
+      ['first_frame', request.referenceImagePath],
+      ['last_frame', request.lastFrameImagePath],
+    ] as const
+    for (const [index, [field, relativePath]] of frameInputs.entries()) {
+      if (!relativePath) continue
+      const nodeId = String(900001 + index)
+      const uploadedName = await uploadReferenceMedia(baseUrl, project.folderPath, relativePath)
+      workflow[nodeId] = { class_type: 'LoadImage', inputs: { image: uploadedName } }
+      setInput('105:104', field, [nodeId, 0])
+    }
+  } else {
+    if (imagePaths.length > 9) throw new Error('MiniMax H3 全模态参考最多连接 9 张图片')
+    if (videoPaths.length > 3) throw new Error('MiniMax H3 全模态参考最多连接 3 个视频')
+    if (audioPaths.length > 3) throw new Error('MiniMax H3 全模态参考最多连接 3 段独立音频')
+    if (imagePaths.length + videoPaths.length + audioPaths.length === 0) {
+      throw new Error('全模态参考工作流至少需要连接一个图片、视频或音频节点')
+    }
+    setInput('138', 'value', request.prompt.trim())
+    setInput('136', 'width', dimensions.width)
+    setInput('136', 'height', dimensions.height)
+    setInput('136', 'ref_image_size', 'match')
+    setInput('132', 'value', duration)
+    setInput('129', 'noise_seed', Math.floor(Math.random() * 1_000_000_000_000_000))
+
+    for (const [index, relativePath] of imagePaths.entries()) {
+      const nodeId = String(910001 + index)
+      const uploadedName = await uploadReferenceMedia(baseUrl, project.folderPath, relativePath)
+      workflow[nodeId] = { class_type: 'LoadImage', inputs: { image: uploadedName } }
+      setInput('136', `ref_images.ref_image_${index}`, [nodeId, 0])
+    }
+    for (const [index, relativePath] of videoPaths.entries()) {
+      const loadNodeId = String(920001 + index * 2)
+      const componentsNodeId = String(920002 + index * 2)
+      const uploadedName = await uploadReferenceMedia(baseUrl, project.folderPath, relativePath)
+      workflow[loadNodeId] = { class_type: 'LoadVideo', inputs: { file: uploadedName } }
+      workflow[componentsNodeId] = { class_type: 'GetVideoComponents', inputs: { video: [loadNodeId, 0] } }
+      setInput('136', `ref_videos.ref_video_${index}`, [componentsNodeId, 0])
+      setInput('136', `ref_video_audios.ref_video_audio_${index}`, [componentsNodeId, 1])
+    }
+    for (const [index, relativePath] of audioPaths.entries()) {
+      const nodeId = String(930001 + index)
+      const uploadedName = await uploadReferenceMedia(baseUrl, project.folderPath, relativePath)
+      workflow[nodeId] = { class_type: 'LoadAudio', inputs: { audio: uploadedName } }
+      setInput('136', `ref_audios.ref_audio_${index}`, [nodeId, 0])
+    }
+  }
+
   const safeNodeId = request.nodeId.replace(/[^a-zA-Z0-9_-]/g, '-').slice(-48)
-  setInput('75', 'filename_prefix', `aigc-canvas/video/${safeNodeId}`)
-  setInput('75', 'format', 'mp4')
-  setInput('75', 'codec', 'h264')
+  setInput('92', 'filename_prefix', `aigc-canvas/video/${safeNodeId}`)
+  setInput('92', 'format', 'mp4')
+  setInput('92', 'codec', 'h264')
 
   const queued = await fetchJson<{ prompt_id?: string; error?: unknown }>(`${baseUrl}/prompt`, {
     method: 'POST',

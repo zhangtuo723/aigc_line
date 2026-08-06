@@ -4,6 +4,7 @@ export const IPC_CHANNELS = {
     list: 'project:list',
     load: 'project:load',
     delete: 'project:delete',
+    importAudio: 'project:importAudio',
   },
   chat: {
     sendMessage: 'chat:sendMessage',

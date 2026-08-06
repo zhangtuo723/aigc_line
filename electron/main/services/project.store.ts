@@ -97,6 +97,7 @@ export async function deleteProject(id: string): Promise<void> {
 export async function setLastOpened(id: string): Promise<void> {
   const index = await readProjectsFile();
   if (index.projects.some((p) => p.id === id)) {
+    if (index.lastOpenedId === id) return;
     index.lastOpenedId = id;
     await writeProjectsFile(index);
   }

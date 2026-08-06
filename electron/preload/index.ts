@@ -14,6 +14,7 @@ import type {
   AppSettingsView,
   SaveAppSettingsRequest,
   ConnectionTestResult,
+  ImportAudioResult,
 } from '../../src/shared/ipc.types';
 
 export interface ElectronAPI {
@@ -22,6 +23,7 @@ export interface ElectronAPI {
   listProjects: () => Promise<ProjectIndex>;
   loadProject: (id: string) => Promise<Project | null>;
   deleteProject: (id: string) => Promise<void>;
+  importAudio: (projectId: string) => Promise<ImportAudioResult>;
   sendChatMessage: (projectId: string, message: ChatMessage) => Promise<void>;
   loadChatHistory: (folderPath: string) => Promise<ChatMessage[]>;
   saveCanvasSnapshot: (folderPath: string, snapshot: unknown) => Promise<{ success: boolean }>;
@@ -61,6 +63,7 @@ const api: ElectronAPI = {
   listProjects: () => invoke(IPC_CHANNELS.project.list),
   loadProject: (id) => invoke(IPC_CHANNELS.project.load, id),
   deleteProject: (id) => invoke(IPC_CHANNELS.project.delete, id),
+  importAudio: (projectId) => invoke(IPC_CHANNELS.project.importAudio, projectId),
   sendChatMessage: (projectId, message) =>
     invoke(IPC_CHANNELS.chat.sendMessage, projectId, message),
   loadChatHistory: (folderPath) => invoke(IPC_CHANNELS.chat.loadHistory, folderPath),

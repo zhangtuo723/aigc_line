@@ -2,31 +2,30 @@
 
 [English](README.md) | 简体中文
 
-AIGC CANVAS 是一个面向 AI 分镜与视频创作的 Electron 桌面工作台。它将 Claude Agent、React Flow 无限画布和 ComfyUI 生成管线放在同一个项目工作区中：通过对话生成分镜，在画布上连接图片与视频节点，并直接完成文生图、图生图和图生视频。
+![AIGC CANVAS 封面](docs/screenshots/aigc-canvas-cover.png)
 
-![分镜画布与 Agent 对话](docs/screenshots/storyboard-canvas.png)
+AIGC CANVAS 是一个面向 AI 分镜与视频创作的 Electron 桌面工作台。它将 Claude Agent、React Flow 无限画布和 ComfyUI 生成管线放在同一个项目工作区中：通过对话生成分镜，在画布上连接文本、图片、视频与音频节点，并直接完成图片和视频生成。
 
 ## 核心能力
 
 - **Agent 项目助手**：基于 @anthropic-ai/claude-agent-sdk，可在项目目录内读写文件，并通过自定义 PushArtifact 工具把产物推送到画布。
 - **React Flow 无限画布**：支持缩放、平移、框选、多选、拖拽、删除和贝塞尔连接线，画布快照按项目持久化。
-- **多种节点**：支持文本、图片、视频和分镜表节点；图片连接视频后，图片自动作为图生视频首帧引用。
+- **多种节点**：支持文本、图片、视频、音频和分镜表节点；音频节点可上传并预览本地音频。
 - **分镜流水线**：.storyboard.json 的每个镜头自动展开为“分镜行 → 图片节点 → 视频节点”，提示词和生成结果会写回源文件。
 - **ComfyUI 图片生成**：支持文生图、图生图、16:9 / 1:1 / 4:3 画幅以及 RTX 2× ULTRA 放大。
-- **ComfyUI 视频生成**：支持 LTX 2.3 图生视频、首帧引用、RTX 2× ULTRA 放大和 5s / 10s / 15s 时长。
+- **MiniMax H3 文生视频 / 首尾帧视频**：连接的图片会进入候选集，可拖入明确的首帧和尾帧槽位；两个槽位均可选，也支持只设置其中一个。
+- **MiniMax H3 全模态参考视频**：可将连接的素材拖入有序的图片轨、视频轨和音频轨。轨道顺序直接对应提示词中的 `<Picture n>`、`<Video n>`、`<Audio n>`，上限分别为 9 张图片、3 个视频和 3 段独立音频。
 - **媒体预览**：图片直接展示，生成的视频可以在画布节点内播放；工作区协议支持视频 Range 流式读取。
 - **系统配置**：可配置 ComfyUI 地址、Agent API 地址与 Token，以及默认文生图工作流。Token 使用 Electron 系统安全存储加密。
 - **项目持久化**：聊天记录、画布布局、节点参数和生成产物均按项目保存。
 
 ## 创作流程
 
-![图片与视频生成流水线](docs/screenshots/generation-pipeline.png)
-
 1. 新建项目并选择本地工作目录。
 2. 在右侧对话中让 Agent 创建 .storyboard.json 分镜表。
 3. 每个镜头自动连接图片节点和视频节点。
 4. 编辑图片提示词并选择工作流、画幅，点击“生成”。
-5. 在视频节点中填写动作与运镜提示词，选择时长并生成视频。
+5. 在视频节点中填写动作与运镜提示词；首尾帧模式可把连接图片拖入首帧/尾帧槽，全模态模式可把连接素材排列到三个参考轨道。
 6. 生成文件保存在项目的 generated/images 和 generated/videos 目录。
 
 ## 内置 ComfyUI 工作流
@@ -36,13 +35,20 @@ AIGC CANVAS 是一个面向 AI 分镜与视频创作的 Electron 桌面工作台
 | Flux2 Klein 9B | 文生图 | 2× ULTRA |
 | Flux2 Klein 9B Edit | 图生图 | 2× ULTRA |
 | Z-Image Turbo | 文生图 | 2× ULTRA |
-| LTX 2.3 22B | 图生视频 | 2× ULTRA |
+| MiniMax H3 | 文本 / 首尾帧生视频 | — |
+| MiniMax H3 全模态参考 | 图片 / 视频 / 音频生视频 | — |
 
 工作流模板位于 resources/comfyui-workflows/。ComfyUI 服务端需要提前安装模板所使用的模型和自定义节点。
 
-## 系统配置
+MiniMax H3 输出分辨率：
 
-![系统配置页面](docs/screenshots/settings.png)
+| 画幅 | 分辨率 |
+|---|---:|
+| 16:9 | 1024 × 576 |
+| 4:3 | 1024 × 768 |
+| 1:1 | 1024 × 1024 |
+
+## 系统配置
 
 首页右上角进入系统配置，可设置：
 

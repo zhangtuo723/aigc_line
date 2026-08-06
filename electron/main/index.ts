@@ -71,7 +71,7 @@ const LOCAL_FILE_EXTENSIONS = new Set([
 // Extensions servable from a project workspace (HTML artifact subresources)
 const WORKSPACE_FILE_EXTENSIONS = new Set([
   '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg', '.avif', '.ico',
-  '.mp4', '.webm', '.mov', '.mp3', '.wav', '.m4a', '.ogg',
+  '.mp4', '.webm', '.mov', '.mp3', '.wav', '.m4a', '.flac', '.ogg', '.aac',
   '.woff', '.woff2', '.ttf', '.otf',
   '.css', '.js', '.mjs', '.json', '.txt', '.md', '.csv', '.srt', '.vtt', '.xml',
   '.html', '.htm', '.pdf',

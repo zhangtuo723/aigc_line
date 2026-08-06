@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import {
   addEdge,
   Background,
@@ -28,7 +28,7 @@ import '@xyflow/react/dist/style.css'
 import { useAppStore } from '../stores/app.store'
 import type { ComfyWorkflowInfo, StoryboardShot } from '../shared/ipc.types'
 
-type StoryNodeKind = 'text' | 'image' | 'video' | 'storyboard'
+type StoryNodeKind = 'text' | 'image' | 'video' | 'audio' | 'storyboard'
 type InteractionMode = 'select' | 'pan'
 
 interface StoryNodeData extends Record<string, unknown> {
@@ -44,6 +44,11 @@ interface StoryNodeData extends Record<string, unknown> {
   sourceHistory?: string[]
   workflowId?: string
   duration?: number
+  firstFrameNodeId?: string
+  lastFrameNodeId?: string
+  referenceImageNodeIds?: string[]
+  referenceVideoNodeIds?: string[]
+  referenceAudioNodeIds?: string[]
   generationStatus?: 'idle' | 'generating' | 'error'
   generationError?: string
 }
@@ -107,6 +112,13 @@ const nodeIcon = (kind: StoryNodeKind) => {
       </svg>
     )
   }
+  if (kind === 'audio') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="h-3.5 w-3.5">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M4 12h2l2-6 3 12 3-9 2 6 2-3h2" />
+      </svg>
+    )
+  }
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="h-3.5 w-3.5">
       <path strokeLinecap="round" strokeWidth="1.8" d="M5 6h14M5 10h14M5 14h10M5 18h8" />
@@ -150,10 +162,75 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
     : item.kind === 'text-to-image' || item.kind === 'image-to-image')
   const selectedWorkflow = availableWorkflows.find((item) => item.id === current?.data.workflowId)
     ?? availableWorkflows[0]
+  const isReferenceWorkflow = selectedWorkflow?.id === 'minimax-h3-r2v'
+  const isFirstLastWorkflow = kind === 'video' && selectedWorkflow?.id === 'minimax-h3-t2v-flf2v'
   const incoming = edges
     .filter((edge) => edge.target === id)
     .map((edge) => ({ edge, source: nodes.find((node) => node.id === edge.source) }))
     .filter((item): item is { edge: StoryEdge; source: StoryNode } => !!item.source)
+  const imageCandidates = incoming.filter(({ source }) => source.data.kind === 'image' && source.data.sourcePath)
+  const referenceCandidates = incoming.filter(({ source }) => (
+    source.data.kind === 'image' || source.data.kind === 'video' || source.data.kind === 'audio'
+  ) && source.data.sourcePath)
+  const firstFrameNode = imageCandidates.find(({ source }) => source.id === current?.data.firstFrameNodeId)?.source
+  const lastFrameNode = imageCandidates.find(({ source }) => source.id === current?.data.lastFrameNodeId)?.source
+  const resolveReferenceTrack = (nodeIds: string[] | undefined, trackKind: 'image' | 'video' | 'audio') => (
+    (nodeIds ?? [])
+      .map((nodeId) => referenceCandidates.find(({ source }) => source.id === nodeId)?.source)
+      .filter((node): node is StoryNode => !!node && node.data.kind === trackKind)
+  )
+  const referenceImageNodes = resolveReferenceTrack(current?.data.referenceImageNodeIds, 'image')
+  const referenceVideoNodes = resolveReferenceTrack(current?.data.referenceVideoNodeIds, 'video')
+  const referenceAudioNodes = resolveReferenceTrack(current?.data.referenceAudioNodeIds, 'audio')
+
+  const assignFrame = (field: 'firstFrameNodeId' | 'lastFrameNodeId', nodeId?: string) => {
+    setNodes((list) => list.map((node) => node.id === id
+      ? { ...node, data: { ...node.data, [field]: nodeId } }
+      : node))
+  }
+
+  const dropFrame = (event: DragEvent<HTMLDivElement>, field: 'firstFrameNodeId' | 'lastFrameNodeId') => {
+    event.preventDefault()
+    event.stopPropagation()
+    const nodeId = event.dataTransfer.getData('application/x-aigc-node-id')
+    if (imageCandidates.some(({ source }) => source.id === nodeId)) assignFrame(field, nodeId)
+  }
+
+  const referenceTrackField = {
+    image: 'referenceImageNodeIds',
+    video: 'referenceVideoNodeIds',
+    audio: 'referenceAudioNodeIds',
+  } as const
+  const referenceTrackLimit = { image: 9, video: 3, audio: 3 } as const
+
+  const assignReference = (trackKind: 'image' | 'video' | 'audio', nodeId: string) => {
+    const candidate = referenceCandidates.find(({ source }) => source.id === nodeId)?.source
+    if (!candidate || candidate.data.kind !== trackKind) return
+    const field = referenceTrackField[trackKind]
+    setNodes((list) => list.map((node) => {
+      if (node.id !== id) return node
+      const validCandidateIds = new Set(referenceCandidates
+        .filter(({ source }) => source.data.kind === trackKind)
+        .map(({ source }) => source.id))
+      const existing = (node.data[field] ?? [])
+        .filter((item) => item !== nodeId && validCandidateIds.has(item))
+      if (existing.length >= referenceTrackLimit[trackKind]) return node
+      return { ...node, data: { ...node.data, [field]: [...existing, nodeId] } }
+    }))
+  }
+
+  const removeReference = (trackKind: 'image' | 'video' | 'audio', nodeId: string) => {
+    const field = referenceTrackField[trackKind]
+    setNodes((list) => list.map((node) => node.id === id
+      ? { ...node, data: { ...node.data, [field]: (node.data[field] ?? []).filter((item) => item !== nodeId) } }
+      : node))
+  }
+
+  const dropReference = (event: DragEvent<HTMLDivElement>, trackKind: 'image' | 'video' | 'audio') => {
+    event.preventDefault()
+    event.stopPropagation()
+    assignReference(trackKind, event.dataTransfer.getData('application/x-aigc-node-id'))
+  }
 
   useEffect(() => {
     let active = true
@@ -245,16 +322,32 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
     if (kind !== 'video' || !currentProject || !current) return
     if (!current.data.prompt.trim()) {
       setNodes((list) => list.map((node) => node.id === id
-        ? { ...node, data: { ...node.data, generationStatus: 'error', generationError: '请先输入图生视频提示词' } }
+        ? { ...node, data: { ...node.data, generationStatus: 'error', generationError: '请先输入视频生成提示词' } }
         : node))
       return
     }
-    const referenceNode = incoming.find(({ source }) => source.data.kind === 'image' && source.data.sourcePath)?.source
-    if (!referenceNode?.data.sourcePath) {
-      setNodes((list) => list.map((node) => node.id === id
-        ? { ...node, data: { ...node.data, generationStatus: 'error', generationError: '请先连接一个已经生成图片的节点作为视频首帧' } }
-        : node))
-      return
+    const referenceNodes = [...referenceImageNodes, ...referenceVideoNodes, ...referenceAudioNodes]
+    const referenceImagePaths = referenceImageNodes.map((source) => source.data.sourcePath!)
+    const referenceVideoPaths = referenceVideoNodes.map((source) => source.data.sourcePath!)
+    const referenceAudioPaths = referenceAudioNodes.map((source) => source.data.sourcePath!)
+    const referenceNode = firstFrameNode ?? referenceImageNodes[0]
+
+    if (isReferenceWorkflow) {
+      const error = referenceImagePaths.length > 9
+        ? '全模态参考图片轨最多放入 9 张图片'
+        : referenceVideoPaths.length > 3
+          ? '全模态参考视频轨最多放入 3 个视频'
+          : referenceAudioPaths.length > 3
+            ? '全模态参考音频轨最多放入 3 段音频'
+            : referenceNodes.length === 0
+              ? '请从候选素材中至少拖一个图片、视频或音频到参考轨道'
+              : ''
+      if (error) {
+        setNodes((list) => list.map((node) => node.id === id
+          ? { ...node, data: { ...node.data, generationStatus: 'error', generationError: error } }
+          : node))
+        return
+      }
     }
     setNodes((list) => list.map((node) => node.id === id
       ? { ...node, data: { ...node.data, generationStatus: 'generating', generationError: '' } }
@@ -267,7 +360,11 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
         aspectRatio,
         duration: currentDuration,
         workflowId: selectedWorkflow?.id,
-        referenceImagePath: referenceNode.data.sourcePath,
+        referenceImagePath: isFirstLastWorkflow ? firstFrameNode?.data.sourcePath : undefined,
+        lastFrameImagePath: isFirstLastWorkflow ? lastFrameNode?.data.sourcePath : undefined,
+        referenceImagePaths: isReferenceWorkflow ? referenceImagePaths : undefined,
+        referenceVideoPaths: isReferenceWorkflow ? referenceVideoPaths : undefined,
+        referenceAudioPaths: isReferenceWorkflow ? referenceAudioPaths : undefined,
       })
       if (!result.success || !result.relativePath) {
         throw new Error(result.error || 'ComfyUI 没有返回视频')
@@ -294,7 +391,9 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
           }
         : node))
 
-      const storyboardEdge = edges.find((edge) => edge.target === referenceNode.id)
+      const storyboardEdge = referenceNode
+        ? edges.find((edge) => edge.target === referenceNode.id)
+        : undefined
       const storyboardSource = storyboardEdge
         ? nodes.find((node) => node.id === storyboardEdge.source && node.data.kind === 'storyboard')
         : undefined
@@ -332,17 +431,16 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
 
   return (
     <div className="nodrag nowheel mt-3 cursor-default rounded-2xl border border-white/[0.09] bg-[#17171b] p-3 shadow-[0_18px_50px_rgba(0,0,0,0.45)]">
-      <div className="mb-3 flex items-center gap-1.5 text-[10px] text-white/45">
-        <span className="rounded-full bg-white/[0.06] px-2 py-1">＋ 参考</span>
-        <span className="rounded-full bg-white/[0.06] px-2 py-1">◎ 标记</span>
-        <span className="rounded-full bg-white/[0.06] px-2 py-1">◇ 风格</span>
+      <div className="mb-3 flex items-center text-[10px] text-white/45">
         <div className="nodrag relative ml-auto">
             <button
               onClick={() => setWorkflowMenuOpen((open) => !open)}
               className={`flex max-w-[190px] items-center gap-1.5 rounded-full border px-2.5 py-1 transition ${workflowMenuOpen ? 'border-[#d4af37]/45 bg-[#d4af37]/10 text-[#f0d98c]' : 'border-white/[0.06] bg-white/[0.05] text-white/48 hover:text-white/75'}`}
               title="选择 ComfyUI 工作流"
             >
-              <span className="truncate">{selectedWorkflow?.name ?? '加载工作流…'}</span>
+              <span className="truncate">
+                {selectedWorkflow?.name ?? (kind === 'video' ? '视频工作流待配置' : '加载工作流…')}
+              </span>
               <span className="text-[8px]">▼</span>
             </button>
             {workflowMenuOpen && (
@@ -360,7 +458,7 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
                   >
                     <span className="min-w-0 flex-1 truncate">{workflow.name}</span>
                     <span className="flex-shrink-0 rounded bg-white/[0.06] px-1.5 py-0.5 text-[8px] text-white/35">
-                      {workflow.kind === 'image-to-video' ? '图生视频' : workflow.kind === 'image-to-image' ? '图生图' : '文生图'}
+                      {workflow.id === 'minimax-h3-r2v' ? '全模态' : workflow.kind === 'image-to-video' ? '视频' : workflow.kind === 'image-to-image' ? '图生图' : '文生图'}
                     </span>
                   </button>
                 ))}
@@ -369,7 +467,186 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
         </div>
       </div>
 
-      {incoming.length > 0 && (
+      {isFirstLastWorkflow && imageCandidates.length > 0 && (
+        <div className="mb-2.5">
+          <div className="mb-1.5 text-[9px] text-white/35">候选图片（拖到首帧或尾帧）</div>
+          <div className="flex flex-wrap gap-2">
+            {imageCandidates.map(({ edge, source }, index) => (
+              <div
+                key={edge.id}
+                draggable
+                onDragStart={(event) => {
+                  event.stopPropagation()
+                  event.dataTransfer.setData('application/x-aigc-node-id', source.id)
+                  event.dataTransfer.effectAllowed = 'copy'
+                }}
+                className="nodrag group/ref relative flex h-16 w-16 cursor-grab flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-white/[0.09] px-1 text-[9px] text-[#e8e6df] active:cursor-grabbing"
+                title={`拖拽分配：${source.data.title}`}
+              >
+                <span className="absolute -left-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-[#25252b] text-[9px] text-white">
+                  {index + 1}
+                </span>
+                {source.data.preview ? (
+                  <img src={source.data.preview} className="h-9 w-9 flex-shrink-0 rounded-md object-cover" draggable={false} />
+                ) : nodeIcon(source.data.kind)}
+                <span className="w-full truncate text-center">{source.data.title}</span>
+                <button
+                  className="absolute right-1 top-1 flex h-4 w-4 items-center justify-center rounded-full bg-black/55 text-white/55 opacity-0 transition hover:text-white group-hover/ref:opacity-100"
+                  onClick={() => void deleteElements({ edges: [edge] })}
+                  title="移除候选并断开连线"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isFirstLastWorkflow && (
+        <div className="mb-2.5 grid grid-cols-2 gap-2">
+          {([
+            ['firstFrameNodeId', '首帧', firstFrameNode],
+            ['lastFrameNodeId', '尾帧', lastFrameNode],
+          ] as const).map(([field, label, frameNode]) => (
+            <div
+              key={field}
+              onDragOver={(event) => {
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'copy'
+              }}
+              onDrop={(event) => dropFrame(event, field)}
+              className={`relative flex h-[78px] items-center gap-2 overflow-hidden rounded-xl border border-dashed px-2 transition ${frameNode ? 'border-[#d4af37]/55 bg-[#d4af37]/[0.07]' : 'border-white/15 bg-black/15 hover:border-[#d4af37]/40'}`}
+            >
+              {frameNode ? (
+                <>
+                  {frameNode.data.preview ? (
+                    <img src={frameNode.data.preview} className="h-14 w-14 flex-shrink-0 rounded-lg object-cover" draggable={false} />
+                  ) : (
+                    <div className="flex h-14 w-14 flex-shrink-0 items-center justify-center rounded-lg bg-white/[0.06]">
+                      {nodeIcon('image')}
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <div className="text-[9px] text-[#d7bc63]">{label}</div>
+                    <div className="truncate text-[10px] text-white/70">{frameNode.data.title}</div>
+                  </div>
+                  <button
+                    onClick={() => assignFrame(field)}
+                    className="absolute right-1.5 top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-black/50 text-[10px] text-white/55 hover:text-white"
+                    title={`清空${label}`}
+                  >
+                    ×
+                  </button>
+                </>
+              ) : (
+                <div className="w-full text-center">
+                  <div className="text-[11px] text-white/60">{label}</div>
+                  <div className="mt-1 text-[9px] text-white/25">拖入候选图片</div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {isReferenceWorkflow && referenceCandidates.length > 0 && (
+        <div className="mb-2.5">
+          <div className="mb-1.5 text-[9px] text-white/35">候选素材（拖到同类型轨道）</div>
+          <div className="flex flex-wrap gap-2">
+            {referenceCandidates.map(({ edge, source }, index) => (
+              <div
+                key={edge.id}
+                draggable
+                onDragStart={(event) => {
+                  event.stopPropagation()
+                  event.dataTransfer.setData('application/x-aigc-node-id', source.id)
+                  event.dataTransfer.effectAllowed = 'copy'
+                }}
+                className="nodrag group/ref relative flex h-16 w-16 cursor-grab flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-white/[0.09] px-1 text-[9px] text-[#e8e6df] active:cursor-grabbing"
+                title={`拖拽分配：${source.data.title}`}
+              >
+                <span className="absolute -left-1.5 -top-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-[#25252b] text-[9px] text-white">
+                  {index + 1}
+                </span>
+                {source.data.kind === 'image' && source.data.preview ? (
+                  <img src={source.data.preview} className="h-9 w-9 flex-shrink-0 rounded-md object-cover" draggable={false} />
+                ) : nodeIcon(source.data.kind)}
+                <span className="w-full truncate text-center">{source.data.title}</span>
+                <button
+                  className="absolute right-1 top-1 flex h-4 w-4 items-center justify-center rounded-full bg-black/55 text-white/55 opacity-0 transition hover:text-white group-hover/ref:opacity-100"
+                  onClick={() => void deleteElements({ edges: [edge] })}
+                  title="移除候选并断开连线"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isReferenceWorkflow && (
+        <div className="mb-2.5 space-y-2">
+          {([
+            ['image', '图片轨', referenceImageNodes, 9, 'Picture'],
+            ['video', '视频轨', referenceVideoNodes, 3, 'Video'],
+            ['audio', '音频轨', referenceAudioNodes, 3, 'Audio'],
+          ] as const).map(([trackKind, label, trackNodes, limit, token]) => (
+            <div
+              key={trackKind}
+              onDragOver={(event) => {
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'copy'
+              }}
+              onDrop={(event) => dropReference(event, trackKind)}
+              className="min-h-[58px] rounded-xl border border-dashed border-white/15 bg-black/15 p-2 transition hover:border-[#d4af37]/40"
+            >
+              <div className="mb-1.5 flex items-center gap-1.5 text-[9px] text-white/45">
+                {nodeIcon(trackKind)}
+                <span>{label}</span>
+                <span className="ml-auto text-white/25">{trackNodes.length}/{limit}</span>
+              </div>
+              {trackNodes.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {trackNodes.map((trackNode, index) => (
+                    <div
+                      key={trackNode.id}
+                      draggable
+                      onDragStart={(event) => {
+                        event.stopPropagation()
+                        event.dataTransfer.setData('application/x-aigc-node-id', trackNode.id)
+                        event.dataTransfer.effectAllowed = 'copyMove'
+                      }}
+                      className="nodrag group/track relative flex h-14 w-14 cursor-grab flex-col items-center justify-center gap-1 rounded-lg border border-[#d4af37]/25 bg-[#d4af37]/[0.07] px-1 pt-1 text-[8px] text-white/65 active:cursor-grabbing"
+                      title={`<${token} ${index + 1}> · ${trackNode.data.title}；拖回本轨道末尾可调整顺序`}
+                    >
+                      <span className="absolute left-1 top-1 flex h-4 min-w-4 items-center justify-center rounded bg-[#d4af37]/15 px-1 text-[8px] text-[#e8c766]">{index + 1}</span>
+                      {trackNode.data.kind === 'image' && trackNode.data.preview ? (
+                        <img src={trackNode.data.preview} className="h-7 w-7 rounded object-cover" draggable={false} />
+                      ) : (
+                        <span className="text-white/55">{nodeIcon(trackKind)}</span>
+                      )}
+                      <span className="w-full truncate text-center">{trackNode.data.title}</span>
+                      <button
+                        onClick={() => removeReference(trackKind, trackNode.id)}
+                        className="absolute right-1 top-1 flex h-4 w-4 items-center justify-center rounded-full bg-black/45 text-white/45 hover:text-white"
+                        title={`移出${label}`}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="py-1 text-center text-[9px] text-white/22">拖入{trackKind === 'image' ? '图片' : trackKind === 'video' ? '视频' : '音频'}素材</div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!isFirstLastWorkflow && !isReferenceWorkflow && incoming.length > 0 && (
         <div className="mb-2.5 flex flex-wrap gap-2">
           {incoming.map(({ edge, source }, index) => (
             <div
@@ -394,13 +671,26 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
         </div>
       )}
 
+      {kind === 'video' && isReferenceWorkflow && (
+        <div className="mb-2.5 rounded-lg border border-[#d4af37]/15 bg-[#d4af37]/[0.05] px-2.5 py-2 text-[9px] leading-4 text-white/42">
+          最多 9 张图片、3 个视频、3 段音频。按轨道中的顺序在提示词中使用
+          {' '}<span className="text-[#e8c766]">&lt;Picture 1&gt;</span>、
+          <span className="text-[#e8c766]">&lt;Video 1&gt;</span>、
+          <span className="text-[#e8c766]">&lt;Audio 1&gt;</span>。参考视频建议为 24fps、2–15 秒；视频自带音轨时会占用一个 Audio 编号。
+        </div>
+      )}
+
       <textarea
         value={current?.data.prompt ?? ''}
         onChange={(event) => {
           const prompt = event.target.value
           setNodes((list) => list.map((node) => node.id === id ? { ...node, data: { ...node.data, prompt } } : node))
         }}
-        placeholder={kind === 'image' ? '描述你想要生成的画面内容，连接其他节点可引用素材…' : '描述视频的运动、镜头和节奏，连接图片节点可作为首帧参考…'}
+        placeholder={kind === 'image'
+          ? '描述你想要生成的画面内容，连接其他节点可引用素材…'
+          : isReferenceWorkflow
+            ? '描述视频并用 <Picture 1>、<Video 1>、<Audio 1> 指定参考素材…'
+            : '描述视频的运动、镜头和节奏，连接图片节点可作为首尾帧参考…'}
         className="min-h-20 w-full resize-none border-0 bg-transparent px-1 text-[12px] leading-5 text-[#e8e6df] outline-none placeholder:text-white/25"
       />
 
@@ -448,7 +738,7 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
             <span>标准画质 · 2K</span>
           ) : (
             <>
-              <span>RTX 放大</span>
+              <span>原生音画</span>
               <span>·</span>
               <div className="nodrag relative">
                 <button
@@ -488,7 +778,7 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
           onClick={() => void (kind === 'image' ? generateImage() : generateVideo())}
           disabled={generationState === 'generating' || !selectedWorkflow}
           className="flex h-9 min-w-[72px] items-center justify-center gap-2 rounded-xl bg-[#e8e6df] px-4 text-[11px] font-semibold tracking-wider text-[#17171b] shadow-[0_5px_18px_rgba(255,255,255,0.08)] transition hover:bg-white hover:shadow-[0_7px_22px_rgba(255,255,255,0.13)] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45"
-          title={kind === 'image' ? '使用 ComfyUI 生成图片' : '使用 LTX 2.3 生成视频'}
+          title={kind === 'image' ? '使用 ComfyUI 生成图片' : '使用 MiniMax H3 生成视频'}
         >
           {generationState === 'generating' ? (
             <>
@@ -567,15 +857,53 @@ function StoryboardNodeCard({ id, data, selected }: { id: string; data: StoryNod
 
 function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
   const { setNodes } = useReactFlow<StoryNode, StoryEdge>()
+  const currentProject = useAppStore((state) => state.currentProject)
+  const [audioImporting, setAudioImporting] = useState(false)
   if (data.kind === 'storyboard') {
     return <StoryboardNodeCard id={id} data={data} selected={selected} />
   }
-  const mediaKind = data.kind === 'image' || data.kind === 'video' ? data.kind : null
+  const visualMediaKind = data.kind === 'image' || data.kind === 'video' ? data.kind : null
+  const isAudio = data.kind === 'audio'
+  const isMedia = !!visualMediaKind || isAudio
   const aspectRatio = data.aspectRatio ?? '16:9'
   const aspectRatioValue = aspectRatio === '1:1' ? '1 / 1' : aspectRatio === '4:3' ? '4 / 3' : '16 / 9'
 
+  const importAudio = async () => {
+    if (!currentProject || audioImporting) return
+    setAudioImporting(true)
+    try {
+      const result = await window.electronAPI.importAudio(currentProject.id)
+      if (result.canceled) return
+      if (!result.success || !result.relativePath) throw new Error(result.error || '音频导入失败')
+      const preview = `workspace://${currentProject.id}/${result.relativePath
+        .split('/')
+        .map(encodeURIComponent)
+        .join('/')}`
+      setNodes((nodes) => nodes.map((node) => node.id === id
+        ? {
+            ...node,
+            data: {
+              ...node.data,
+              title: result.name || node.data.title,
+              preview,
+              sourcePath: result.relativePath,
+              generationStatus: 'idle',
+              generationError: '',
+            },
+          }
+        : node))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setNodes((nodes) => nodes.map((node) => node.id === id
+        ? { ...node, data: { ...node.data, generationStatus: 'error', generationError: message } }
+        : node))
+    } finally {
+      setAudioImporting(false)
+    }
+  }
+
   return (
-    <div className={mediaKind ? 'w-[420px]' : 'w-[250px]'}>
+    <div className={isMedia ? 'w-[420px]' : 'w-[250px]'}>
       <div className="mb-1.5 flex items-center gap-1 text-[11px] text-white/48">
         {nodeIcon(data.kind)}
         <span>{data.title}</span>
@@ -592,7 +920,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
         className={`relative overflow-visible rounded-xl border bg-[#202023] shadow-[0_10px_35px_rgba(0,0,0,0.3)] transition ${selected ? 'border-[#e8c766]/75 shadow-[0_0_0_1px_rgba(232,199,102,0.18),0_18px_45px_rgba(0,0,0,0.4)]' : 'border-white/[0.13]'}`}
       >
         <Handle type="target" position={Position.Left} className="story-handle" />
-        {mediaKind ? (
+        {visualMediaKind ? (
           <div className="relative overflow-hidden rounded-[11px] bg-[#202023] transition-[height] duration-200" style={{ aspectRatio: aspectRatioValue }}>
             {data.preview ? (
               data.kind === 'image' ? (
@@ -622,7 +950,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
                 />
               )
             ) : (
-              <EmptyPreview kind={mediaKind} />
+              <EmptyPreview kind={visualMediaKind} />
             )}
             {data.generationStatus === 'generating' && (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-[#101014]/75 text-[#e8c766] backdrop-blur-[2px]">
@@ -630,6 +958,25 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
                 <span className="text-[11px] tracking-wider">ComfyUI 生成中</span>
               </div>
             )}
+          </div>
+        ) : isAudio ? (
+          <div className="nodrag nowheel flex min-h-[150px] flex-col items-center justify-center gap-4 rounded-[11px] bg-[#17171b] p-5" onPointerDown={(event) => event.stopPropagation()}>
+            {data.preview ? (
+              <audio src={data.preview} controls preload="metadata" className="w-full" />
+            ) : (
+              <div className="flex flex-col items-center gap-2 text-white/28">
+                <div className="text-3xl">♪</div>
+                <span className="text-[11px]">尚未上传音频</span>
+              </div>
+            )}
+            <button
+              onClick={() => void importAudio()}
+              disabled={audioImporting}
+              className="rounded-xl border border-[#d4af37]/25 bg-[#d4af37]/10 px-4 py-2 text-[11px] text-[#f0d98c] transition hover:bg-[#d4af37]/15 disabled:opacity-50"
+            >
+              {audioImporting ? '导入中…' : data.preview ? '替换本地音频' : '上传本地音频'}
+            </button>
+            {data.generationError && <p className="text-[10px] text-rose-300">{data.generationError}</p>}
           </div>
         ) : (
           <div className="min-h-[190px] p-5">
@@ -641,7 +988,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
         )}
         <Handle type="source" position={Position.Right} className="story-handle" />
       </div>
-      {selected && mediaKind && <PromptPanel id={id} kind={mediaKind} />}
+      {selected && visualMediaKind && <PromptPanel id={id} kind={visualMediaKind} />}
     </div>
   )
 }
@@ -654,7 +1001,7 @@ const makeNode = (kind: StoryNodeKind, index: number, position?: { x: number; y:
   position: position ?? { x: 120 + index * 45, y: 100 + index * 35 },
   data: {
     kind,
-    title: `${kind === 'image' ? '图片' : kind === 'video' ? '视频' : kind === 'storyboard' ? '分镜表' : '文本'}节点 ${index}`,
+    title: `${kind === 'image' ? '图片' : kind === 'video' ? '视频' : kind === 'audio' ? '音频' : kind === 'storyboard' ? '分镜表' : '文本'}节点 ${index}`,
     prompt: '',
     aspectRatio: kind === 'image' || kind === 'video' ? '16:9' : undefined,
     duration: kind === 'video' ? 5 : undefined,
@@ -946,15 +1293,15 @@ function CanvasFlow() {
         </svg>
       </button>
       <div className="mx-1 h-5 w-px bg-white/10" />
-      {(['text', 'image', 'video'] as StoryNodeKind[]).map((kind) => (
+      {(['text', 'image', 'video', 'audio'] as StoryNodeKind[]).map((kind) => (
         <button
           key={kind}
           onClick={() => addNode(kind)}
           className="flex items-center gap-2 rounded-xl px-3 py-2 text-[11px] text-white/60 transition hover:bg-white/[0.08] hover:text-white"
-          title={`添加${kind === 'image' ? '图片' : kind === 'video' ? '视频' : '文本'}节点`}
+          title={`添加${kind === 'image' ? '图片' : kind === 'video' ? '视频' : kind === 'audio' ? '音频' : '文本'}节点`}
         >
           {nodeIcon(kind)}
-          {kind === 'image' ? '图片' : kind === 'video' ? '视频' : '文本'}
+          {kind === 'image' ? '图片' : kind === 'video' ? '视频' : kind === 'audio' ? '音频' : '文本'}
         </button>
       ))}
       <div className="mx-1 h-5 w-px bg-white/10" />
@@ -993,7 +1340,7 @@ function CanvasFlow() {
           position="bottom-right"
           pannable
           zoomable
-          nodeColor={(node) => node.data.kind === 'image' ? '#8b7355' : node.data.kind === 'video' ? '#566b7f' : '#67636e'}
+          nodeColor={(node) => node.data.kind === 'image' ? '#8b7355' : node.data.kind === 'video' ? '#566b7f' : node.data.kind === 'audio' ? '#7f6656' : '#67636e'}
           maskColor="rgba(5,5,8,0.72)"
         />
       </ReactFlow>
@@ -1002,7 +1349,7 @@ function CanvasFlow() {
           <div className="mb-20 text-center">
             <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border border-[#d4af37]/20 bg-[#d4af37]/[0.06] text-2xl text-[#e8c766]">✦</div>
             <p className="mt-4 text-sm tracking-[0.2em] text-white/65">创建你的第一个分镜节点</p>
-            <p className="mt-2 text-xs text-white/30">从下方添加文本、图片或视频节点</p>
+            <p className="mt-2 text-xs text-white/30">从下方添加文本、图片、视频或音频节点</p>
           </div>
         </div>
       )}
