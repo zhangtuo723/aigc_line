@@ -10,11 +10,17 @@ import type {
   GenerateImageResult,
   GenerateVideoRequest,
   GenerateVideoResult,
+  UpscaleVideoRequest,
+  UpscaleVideoResult,
   ComfyWorkflowInfo,
   AppSettingsView,
   SaveAppSettingsRequest,
   ConnectionTestResult,
   ImportAudioResult,
+  CanvasCommandRequest,
+  CanvasCommandResponse,
+  AvailableSkill,
+  ClearAgentContextResult,
 } from '../../src/shared/ipc.types';
 
 export interface ElectronAPI {
@@ -25,7 +31,10 @@ export interface ElectronAPI {
   deleteProject: (id: string) => Promise<void>;
   importAudio: (projectId: string) => Promise<ImportAudioResult>;
   sendChatMessage: (projectId: string, message: ChatMessage) => Promise<void>;
+  interruptAgent: (projectId: string) => Promise<void>;
   loadChatHistory: (folderPath: string) => Promise<ChatMessage[]>;
+  listAgentSkills: (projectId: string) => Promise<AvailableSkill[]>;
+  clearAgentContext: (projectId: string) => Promise<ClearAgentContextResult>;
   saveCanvasSnapshot: (folderPath: string, snapshot: unknown) => Promise<{ success: boolean }>;
   loadCanvasSnapshot: (folderPath: string) => Promise<unknown | null>;
   saveArtifactContent: (
@@ -35,6 +44,7 @@ export interface ElectronAPI {
   ) => Promise<{ success: boolean; error?: string }>;
   generateImage: (request: GenerateImageRequest) => Promise<GenerateImageResult>;
   generateVideo: (request: GenerateVideoRequest) => Promise<GenerateVideoResult>;
+  upscaleVideo: (request: UpscaleVideoRequest) => Promise<UpscaleVideoResult>;
   listComfyWorkflows: () => Promise<ComfyWorkflowInfo[]>;
   getAppSettings: () => Promise<AppSettingsView>;
   saveAppSettings: (request: SaveAppSettingsRequest) => Promise<AppSettingsView>;
@@ -42,6 +52,8 @@ export interface ElectronAPI {
   onChatMessage: (callback: (message: ChatMessage) => void) => () => void;
   onArtifact: (callback: (artifact: Artifact) => void) => () => void;
   onTurnEnd: (callback: () => void) => () => void;
+  onCanvasCommand: (callback: (command: CanvasCommandRequest) => void) => () => void;
+  sendCanvasCommandResult: (response: CanvasCommandResponse) => void;
   showOpenDialog: (options?: Electron.OpenDialogOptions) => Promise<string[]>;
   showItemInFolder: (path: string) => void;
   getPathForFile: (file: File) => string;
@@ -66,13 +78,18 @@ const api: ElectronAPI = {
   importAudio: (projectId) => invoke(IPC_CHANNELS.project.importAudio, projectId),
   sendChatMessage: (projectId, message) =>
     invoke(IPC_CHANNELS.chat.sendMessage, projectId, message),
+  interruptAgent: (projectId) =>
+    invoke(IPC_CHANNELS.chat.interrupt, projectId),
   loadChatHistory: (folderPath) => invoke(IPC_CHANNELS.chat.loadHistory, folderPath),
+  listAgentSkills: (projectId) => invoke(IPC_CHANNELS.chat.listSkills, projectId),
+  clearAgentContext: (projectId) => invoke(IPC_CHANNELS.chat.clearContext, projectId),
   saveCanvasSnapshot: (folderPath, snapshot) => invoke(IPC_CHANNELS.canvas.save, folderPath, snapshot),
   loadCanvasSnapshot: (folderPath) => invoke(IPC_CHANNELS.canvas.load, folderPath),
   saveArtifactContent: (projectId, relPath, content) =>
     invoke(IPC_CHANNELS.artifact.save, projectId, relPath, content),
   generateImage: (request) => invoke(IPC_CHANNELS.comfyui.generateImage, request),
   generateVideo: (request) => invoke(IPC_CHANNELS.comfyui.generateVideo, request),
+  upscaleVideo: (request) => invoke(IPC_CHANNELS.comfyui.upscaleVideo, request),
   listComfyWorkflows: () => invoke(IPC_CHANNELS.comfyui.listWorkflows),
   getAppSettings: () => invoke(IPC_CHANNELS.settings.get),
   saveAppSettings: (request) => invoke(IPC_CHANNELS.settings.save, request),
@@ -80,6 +97,8 @@ const api: ElectronAPI = {
   onChatMessage: (callback) => onPush(IPC_CHANNELS.push.chatMessage, callback),
   onArtifact: (callback) => onPush(IPC_CHANNELS.push.artifact, callback),
   onTurnEnd: (callback) => onPush(IPC_CHANNELS.push.turnEnd, callback),
+  onCanvasCommand: (callback) => onPush(IPC_CHANNELS.push.canvasCommand, callback),
+  sendCanvasCommandResult: (response) => ipcRenderer.send(IPC_CHANNELS.canvas.commandResult, response),
   showOpenDialog: (options) => invoke('dialog:showOpenDialog', options),
   showItemInFolder: (path) => ipcRenderer.send('shell:showItemInFolder', path),
   // File.path was removed in Electron 32 - this is the supported way

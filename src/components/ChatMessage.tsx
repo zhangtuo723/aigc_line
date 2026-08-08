@@ -99,7 +99,7 @@ function ToolCallBlock({ toolCall }: { toolCall: ToolCall }) {
             <div className='h-3 w-3 animate-spin rounded-full border-2 border-[#e8c766] border-t-transparent' />
             <span className='text-[#e8c766]'>正在执行: {toolCall.toolName}</span>
           </>
-        ) : (
+        ) : toolCall.status === 'completed' ? (
           <>
             <svg className='h-3 w-3 text-emerald-400' fill='none' viewBox='0 0 24 24' stroke='currentColor'>
               <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M5 13l4 4L19 7' />
@@ -108,6 +108,20 @@ function ToolCallBlock({ toolCall }: { toolCall: ToolCall }) {
               {toolCall.toolName}
               {toolCall.duration && ` (${toolCall.duration}ms)`}
             </span>
+          </>
+        ) : toolCall.status === 'interrupted' ? (
+          <>
+            <svg className='h-3 w-3 text-amber-400' fill='none' viewBox='0 0 24 24' stroke='currentColor'>
+              <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M6 6l12 12M18 6L6 18' />
+            </svg>
+            <span className='text-amber-400'>已中断: {toolCall.toolName}</span>
+          </>
+        ) : (
+          <>
+            <svg className='h-3 w-3 text-rose-400' fill='none' viewBox='0 0 24 24' stroke='currentColor'>
+              <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M6 6l12 12M18 6L6 18' />
+            </svg>
+            <span className='text-rose-400'>执行失败: {toolCall.toolName}</span>
           </>
         )}
         {hasDetails && (
@@ -154,6 +168,19 @@ export function ChatMessageItem({ message }: ChatMessageProps) {
   const isToolCall = !!message.toolCall;
   const isArtifact = !!message.artifact;
 
+  if (message.event === 'context-cleared') {
+    return (
+      <div className='flex items-center gap-3 py-4' role='separator' aria-label='Claude 上下文已清空'>
+        <div className='h-px flex-1 bg-gradient-to-r from-transparent to-[#d4af37]/30' />
+        <div className='max-w-[75%] text-center'>
+          <div className='text-[10px] font-medium tracking-wider text-[#e8c766]'>上下文已清空</div>
+          <div className='mt-1 text-[10px] leading-4 text-[#6d6a78]'>之前消息仅供查看，画布和历史记录未删除</div>
+        </div>
+        <div className='h-px flex-1 bg-gradient-to-l from-transparent to-[#d4af37]/30' />
+      </div>
+    );
+  }
+
   // System messages (thinking indicators, etc.)
   if (isSystem && !isToolCall) {
     return (
@@ -198,7 +225,8 @@ export function ChatMessageItem({ message }: ChatMessageProps) {
     isToolCall ||
     fileAttachments.length > 0 ||
     !!message.content ||
-    (message.artifactRefs?.length ?? 0) > 0;
+    (message.artifactRefs?.length ?? 0) > 0 ||
+    (message.nodeRefs?.length ?? 0) > 0;
 
   return (
     <div className={['flex gap-3 py-3', isUser ? 'flex-row-reverse' : 'flex-row'].join(' ')}>
@@ -277,6 +305,22 @@ export function ChatMessageItem({ message }: ChatMessageProps) {
                   <span>
                     {ref.type === 'storyboard' ? '🎬' : ref.type === 'image' ? '🖼️' : ref.type === 'html' ? '🌐' : '📄'}
                   </span>
+                  <span className='max-w-[140px] truncate'>{ref.title}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Referenced live canvas nodes */}
+          {message.nodeRefs && message.nodeRefs.length > 0 && (
+            <div className='mb-2 flex flex-wrap items-start gap-2'>
+              {message.nodeRefs.map((ref) => (
+                <div
+                  key={ref.id}
+                  className='flex items-center gap-1.5 rounded-lg border border-sky-400/30 bg-sky-400/[0.08] px-2 py-1 text-xs text-sky-200'
+                  title={`节点 ID：${ref.id}`}
+                >
+                  <span>{ref.kind === 'shot' ? '🎬' : ref.kind === 'image' ? '🖼️' : ref.kind === 'video' ? '🎞️' : ref.kind === 'audio' ? '🎵' : ref.kind === 'upscale' ? '✨' : '📄'}</span>
                   <span className='max-w-[140px] truncate'>{ref.title}</span>
                 </div>
               ))}

@@ -8,6 +8,8 @@ import type {
   GenerateVideoRequest,
   GenerateVideoResult,
   ImageAspectRatio,
+  UpscaleVideoRequest,
+  UpscaleVideoResult,
 } from '../../../src/shared/ipc.types'
 import { loadProject } from './project.store'
 import { getRuntimeSettings } from './settings.service'
@@ -121,7 +123,6 @@ export const listComfyWorkflows = async (): Promise<ComfyWorkflowInfo[]> => {
 
 const REQUEST_TIMEOUT_MS = 20_000
 const GENERATION_TIMEOUT_MS = 5 * 60_000
-const VIDEO_GENERATION_TIMEOUT_MS = 30 * 60_000
 
 const dimensionsFor = (ratio: ImageAspectRatio): { width: number; height: number } => {
   if (ratio === '1:1') return { width: 1024, height: 1024 }
@@ -413,8 +414,9 @@ function findVideoOutput(value: unknown): ComfyMediaOutput | null {
 }
 
 async function waitForVideo(baseUrl: string, promptId: string): Promise<ComfyMediaOutput> {
-  const startedAt = Date.now()
-  while (Date.now() - startedAt < VIDEO_GENERATION_TIMEOUT_MS) {
+  // No overall timeout: ComfyUI queues prompts, so queue wait time is
+  // unpredictable. Poll until the record resolves or reports an error.
+  while (true) {
     const history = await fetchJson<Record<string, {
       status?: { status_str?: string; completed?: boolean; messages?: unknown[] }
       outputs?: Record<string, unknown>
@@ -430,7 +432,6 @@ async function waitForVideo(baseUrl: string, promptId: string): Promise<ComfyMed
     }
     await new Promise((resolve) => setTimeout(resolve, 1_500))
   }
-  throw new Error('ComfyUI 视频生成超时（30 分钟）')
 }
 
 async function uploadReferenceMedia(
@@ -537,6 +538,61 @@ export async function generateImageWithComfyUI(
   }
 }
 
+const UPSCALE_SCALES = [2, 3, 4] as const
+const UPSCALE_QUALITIES = ['FAST', 'MEDIUM', 'HIGH', 'ULTRA'] as const
+
+export async function upscaleVideoWithComfyUI(
+  request: UpscaleVideoRequest,
+): Promise<UpscaleVideoResult> {
+  const project = await loadProject(request.projectId)
+  if (!project) throw new Error('项目不存在或已被删除')
+  if (!request.sourceVideoPath) throw new Error('请先连接一个已有视频节点作为输入')
+
+  const settings = await getRuntimeSettings()
+  const baseUrl = normalizeBaseUrl(settings.comfyuiBaseUrl || project.comfyuiBaseUrl || 'http://127.0.0.1:8188')
+  const workflow = await loadWorkflowFile('video-upscale.json', 'RTX 视频放大')
+  const uploadedName = await uploadReferenceMedia(baseUrl, project.folderPath, request.sourceVideoPath)
+
+  const scale = (UPSCALE_SCALES as readonly number[]).includes(Number(request.scale))
+    ? Number(request.scale)
+    : 2
+  const quality = (UPSCALE_QUALITIES as readonly string[]).includes(String(request.quality))
+    ? String(request.quality)
+    : 'ULTRA'
+  const setInput = (nodeId: string, field: string, value: unknown) => {
+    const node = workflow[nodeId]
+    if (!node) throw new Error(`视频放大工作流缺少节点 ${nodeId}`)
+    node.inputs[field] = value
+  }
+  setInput('2', 'video', uploadedName)
+  setInput('3', 'resize_type.scale', scale)
+  setInput('3', 'quality', quality)
+  const safeNodeId = request.nodeId.replace(/[^a-zA-Z0-9_-]/g, '-').slice(-48)
+  setInput('1', 'filename_prefix', `aigc-canvas/upscale/${safeNodeId}`)
+
+  const queued = await fetchJson<{ prompt_id?: string; error?: unknown }>(`${baseUrl}/prompt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: workflow, client_id: `aigc-canvas-upscale-${Date.now()}` }),
+  })
+  if (!queued.prompt_id) {
+    throw new Error(`ComfyUI 未接受视频放大工作流：${JSON.stringify(queued.error ?? queued).slice(0, 1000)}`)
+  }
+
+  const output = await waitForVideo(baseUrl, queued.prompt_id)
+  const bytes = await downloadImage(baseUrl, output)
+  const outputDir = path.join(project.folderPath, 'generated', 'videos')
+  await fs.mkdir(outputDir, { recursive: true })
+  const sourceExt = path.extname(output.filename).toLowerCase()
+  const extension = ['.mp4', '.webm', '.mov', '.mkv'].includes(sourceExt) ? sourceExt : '.mp4'
+  const outputPath = path.join(outputDir, `${safeNodeId}-upscale-${Date.now()}${extension}`)
+  await fs.writeFile(outputPath, bytes)
+  return {
+    success: true,
+    relativePath: path.relative(project.folderPath, outputPath).split(path.sep).join('/'),
+    promptId: queued.prompt_id,
+  }
+}
 export async function generateVideoWithComfyUI(
   request: GenerateVideoRequest,
 ): Promise<GenerateVideoResult> {

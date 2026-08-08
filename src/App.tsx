@@ -9,7 +9,7 @@ function App() {
   const { currentPage, loadProjects } = useAppStore();
 
   useEffect(() => {
-    loadProjects();
+    void loadProjects({ restoreLastOpened: true });
   }, [loadProjects]);
 
   return (

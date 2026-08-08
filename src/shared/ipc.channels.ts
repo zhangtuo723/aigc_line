@@ -10,10 +10,14 @@ export const IPC_CHANNELS = {
     sendMessage: 'chat:sendMessage',
     receiveMessage: 'chat:receiveMessage',
     loadHistory: 'chat:loadHistory',
+    listSkills: 'chat:listSkills',
+    clearContext: 'chat:clearContext',
+    interrupt: 'chat:interrupt',
   },
   canvas: {
     save: 'canvas:save',
     load: 'canvas:load',
+    commandResult: 'canvas:commandResult',
   },
   artifact: {
     push: 'artifact:push',
@@ -23,6 +27,7 @@ export const IPC_CHANNELS = {
     listWorkflows: 'comfyui:listWorkflows',
     generateImage: 'comfyui:generateImage',
     generateVideo: 'comfyui:generateVideo',
+    upscaleVideo: 'comfyui:upscaleVideo',
   },
   settings: {
     get: 'settings:get',
@@ -33,6 +38,7 @@ export const IPC_CHANNELS = {
     chatMessage: 'chat:receiveMessage',
     artifact: 'artifact:receive',
     turnEnd: 'chat:turnEnd',
+    canvasCommand: 'canvas:command',
   },
 } as const;
 

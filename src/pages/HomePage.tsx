@@ -1,7 +1,7 @@
 import { useAppStore } from '../stores/app.store';
 
 export function HomePage() {
-  const { projects, createProject, selectProject, deleteProject, loadProjects, setCurrentPage } = useAppStore();
+  const { projects, createProject, selectProject, deleteProject, setCurrentPage } = useAppStore();
 
   const handleCreate = async () => {
     const folders = await window.electronAPI.showOpenDialog({ title: '选择项目文件夹' });
@@ -14,7 +14,6 @@ export function HomePage() {
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     await deleteProject(id);
-    await loadProjects();
   };
 
   const createButton = (className: string) => (

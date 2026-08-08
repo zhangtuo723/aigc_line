@@ -5,6 +5,7 @@ import type {
   ChatMessage,
   Artifact,
   ArtifactRef,
+  CanvasNodeRef,
 } from '../shared/ipc.types';
 
 interface AppState {
@@ -16,6 +17,8 @@ interface AppState {
   artifacts: Artifact[];
   /** Artifacts the user clicked on the canvas - attached to the next message */
   referencedArtifacts: ArtifactRef[];
+  /** Canvas nodes attached to the next user message */
+  referencedCanvasNodes: CanvasNodeRef[];
 
   setProjects: (projects: ProjectIndex) => void;
   setCurrentProject: (project: Project | null) => void;
@@ -28,8 +31,10 @@ interface AppState {
   updateArtifactContent: (id: string, content: string) => void;
   addArtifactReference: (ref: ArtifactRef) => void;
   removeArtifactReference: (id: string) => void;
+  addCanvasNodeReference: (ref: CanvasNodeRef) => void;
+  removeCanvasNodeReference: (id: string) => void;
 
-  loadProjects: () => Promise<void>;
+  loadProjects: (options?: { restoreLastOpened?: boolean }) => Promise<void>;
   createProject: (name: string, folderPath: string) => Promise<Project>;
   selectProject: (id: string) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
@@ -59,6 +64,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   currentPage: 'home',
   artifacts: [],
   referencedArtifacts: [],
+  referencedCanvasNodes: [],
 
   setProjects: (projects) => set({ projects }),
   setCurrentProject: (currentProject) => set({ currentProject }),
@@ -88,11 +94,23 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => ({
       referencedArtifacts: state.referencedArtifacts.filter((r) => r.id !== id),
     })),
+  addCanvasNodeReference: (ref) =>
+    set((state) =>
+      state.referencedCanvasNodes.some((item) => item.id === ref.id)
+        ? state
+        : { referencedCanvasNodes: [...state.referencedCanvasNodes, ref] },
+    ),
+  removeCanvasNodeReference: (id) =>
+    set((state) => ({
+      referencedCanvasNodes: state.referencedCanvasNodes.filter((item) => item.id !== id),
+    })),
 
-  loadProjects: async () => {
+  loadProjects: async (options) => {
     const projects = await electronAPI.listProjects();
     set({ projects });
-    if (projects.lastOpenedId) {
+    // Only restore navigation during app startup. Refreshing the list after a
+    // delete/create must not unexpectedly leave the home page.
+    if (options?.restoreLastOpened && projects.lastOpenedId) {
       await get().selectProject(projects.lastOpenedId);
     }
   },
@@ -112,6 +130,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       messages: [],
       artifacts: [],
       referencedArtifacts: [],
+      referencedCanvasNodes: [],
       currentPage: 'project',
     });
     await get().loadChatHistory();
@@ -130,7 +149,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     await electronAPI.deleteProject(id);
     const state = get();
     if (state.currentProject?.id === id) {
-      set({ currentProject: null, messages: [], artifacts: [] });
+      set({
+        currentProject: null,
+        messages: [],
+        artifacts: [],
+        referencedArtifacts: [],
+        referencedCanvasNodes: [],
+      });
     }
     await get().loadProjects();
   },
@@ -148,7 +173,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   sendChatMessage: async (content, attachments) => {
-    const { currentProject, referencedArtifacts } = get();
+    const { currentProject, referencedArtifacts, referencedCanvasNodes } = get();
     if (!currentProject) return;
 
     const message: ChatMessage = {
@@ -158,12 +183,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       timestamp: Date.now(),
       attachments,
       artifactRefs: referencedArtifacts.length > 0 ? referencedArtifacts : undefined,
+      nodeRefs: referencedCanvasNodes.length > 0 ? referencedCanvasNodes : undefined,
     };
 
     set((state) => ({
       messages: [...state.messages, message],
       isAgentThinking: true,
       referencedArtifacts: [],
+      referencedCanvasNodes: [],
     }));
 
     try {
@@ -180,6 +207,12 @@ electronAPI?.onChatMessage?.((message: ChatMessage) => {
   useAppStore.setState((state) => {
     // System messages include: thinking indicators and tool call status
     if (message.role === 'system') {
+      if (message.event === 'context-cleared') {
+        return {
+          messages: [...state.messages, message],
+          isAgentThinking: false,
+        };
+      }
       if (message.toolCall) {
         // Tool call message - update or add
         const existingIndex = state.messages.findIndex(

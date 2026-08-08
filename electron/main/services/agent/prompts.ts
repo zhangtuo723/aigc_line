@@ -7,13 +7,20 @@ import type { ChatMessage } from '../../../../src/shared/ipc.types';
  * inspect them with Read/Bash; system instructions live in the system prompt.
  */
 export function buildUserPrompt(userMessage: ChatMessage, folderPath: string): string {
-  let prompt = userMessage.content;
+  const contextBlocks: string[] = [];
+
+  if (userMessage.nodeRefs && userMessage.nodeRefs.length > 0) {
+    const refLines = userMessage.nodeRefs
+      .map((ref) => `- nodeId=${JSON.stringify(ref.id)} title=${JSON.stringify(ref.title)} kind=${ref.kind}`)
+      .join('\n');
+    contextBlocks.push(`用户把以下实时画布节点添加到了本轮对话。它们是本轮修改或讨论的明确对象：\n${refLines}\n\n处理规则：先调用 GetCanvasState 读取节点的最新数据和 revision；修改时使用上述精确 nodeId 调用 UpdateCanvasNodes，并传入最新 revision 作为 expectedRevision。除非用户明确要求，不要把它们替换成新节点，也不要修改未引用的节点。`);
+  }
 
   if (userMessage.artifactRefs && userMessage.artifactRefs.length > 0) {
     const refLines = userMessage.artifactRefs
       .map((r) => `- 《${r.title}》(${r.type})${r.path ? ` at ${r.path}` : ''}`)
       .join('\n');
-    prompt = `用户在画布上选中了以下产物作为本轮消息的引用（说明用户想修改它或参考它；如需修改，直接用 Read/Edit 操作对应文件，改完调用 PushArtifact 重新推送即可，前端会原地更新卡片而不是新增）：\n${refLines}\n\n${prompt}`;
+    contextBlocks.push(`用户在画布上选中了以下产物作为本轮消息的引用（说明用户想修改它或参考它；如需修改，直接用 Read/Edit 操作对应文件，改完调用 PushArtifact 重新推送即可，前端会原地更新卡片而不是新增）：\n${refLines}`);
   }
 
   if (userMessage.attachments && userMessage.attachments.length > 0) {
@@ -26,10 +33,15 @@ export function buildUserPrompt(userMessage: ChatMessage, folderPath: string): s
         return `- ${a.name} (${a.type})${location ? ` at ${location}` : ''}`;
       })
       .join('\n');
-    prompt = `User uploaded files (already inside the workspace, use Read/Bash to inspect them):\n${attachmentLines}\n\n${prompt}`;
+    contextBlocks.push(`User uploaded files (already inside the workspace, use Read/Bash to inspect them):\n${attachmentLines}`);
   }
 
-  return prompt;
+  const content = userMessage.content.trim();
+  // A slash command must remain the first token so Claude Code invokes the
+  // selected skill. Reference and attachment context becomes skill arguments.
+  return content.startsWith('/')
+    ? [content, ...contextBlocks].filter(Boolean).join('\n\n')
+    : [...contextBlocks, content].filter(Boolean).join('\n\n');
 }
 
 /**
@@ -39,6 +51,8 @@ export function buildUserPrompt(userMessage: ChatMessage, folderPath: string): s
 export function buildSystemPromptAppend(folderPath: string): string {
   return `你的工作目录是：${folderPath}
 
+你运行在 AIGC CANVAS 桌面应用中。不要建议用户运行 claude、claude --resume 或其他 Claude Code 终端命令；会话和上下文操作由应用界面负责。
+
 当你完成的任务产出了有意义的结果时（比如编写代码、生成报告、制作可视化页面等），应该使用 PushArtifact 工具把结果展示到用户的画布上。先把结果写入工作目录中的文件，然后再调用 PushArtifact 并传入文件路径——内容会直接从磁盘读取，所以不要把内容粘贴到工具调用的参数里。PushArtifact 工具的参数如下：
 - path：文件路径（相对于工作目录的路径或绝对路径均可）。artifact 类型会根据扩展名自动推断：.html/.htm 渲染为 html，其余一律渲染为 markdown
 - title：artifact 的简短标题
@@ -47,17 +61,13 @@ export function buildSystemPromptAppend(folderPath: string): string {
 
 当 HTML artifact 需要引用工作目录内的文件时（上传的图片、生成的素材、数据文件等），请使用相对于工作目录根目录的相对路径，例如 src="uploads/photo.png" 或 href="./assets/style.css"——渲染时会自动解析。不要把大体积资源以 base64 data URL 的形式内联到代码里。
 
-你具备 AIGC 短剧分镜创作能力。当用户要求创作短剧、编写分镜、拆分镜头时，按以下流程处理：
-1. 根据剧情把内容拆成若干镜头，每个镜头包含这些字段：
-   - index：镜号（数字，从 1 开始）
-   - duration：镜头时长（秒，数字）
-   - scene：画面描述/场景（中文，描述画面中的人物、环境、动作）
-   - dialogue：台词/旁白（可选，没有台词时省略）
-   - camera：运镜/景别（可选，如 特写、中景、推镜、摇镜）
-   - textToImagePrompt：文生图提示词（英文，详细描述画面主体、构图、光线、风格，用于生成该镜头的静态画面）
-   - imageToVideoPrompt：图生视频提示词（英文，描述画面中元素如何运动、镜头如何运动，用于把静态画面生成视频）
-   每个镜头的文生图和图生视频提示词要与 scene 一致且足够具体。
-   另外每个镜头还有 4 个由生成管线维护的字段：imageSource（当前选定的图片路径）、imageSourceHistory（历史抽卡记录）、videoSource（当前选定的视频路径）、videoSourceHistory（历史抽卡记录），值都是相对于工作目录的文件路径。你创建分镜时不用填这些字段；修改已有分镜文件时必须原样保留它们。
-2. 把镜头数组写入工作目录中的 <名称>.storyboard.json 文件（必须是以 .storyboard.json 结尾的 JSON 数组文件，例如 episode1.storyboard.json）。
-3. 调用 PushArtifact 推送该文件（例如 path="episode1.storyboard.json"，title 用分镜名称），建议传 width=720、height=420。前端会把它渲染成可视化的分镜表卡片，所以你不要再把分镜表格粘贴到 markdown 产物里。`;
+你具备 AIGC 短剧分镜创作能力，并且可以通过 Canvas 工具直接读取和修改实时画布。涉及画布时先调用 GetCanvasState，使用返回的 revision 作为后续修改的 expectedRevision；如果版本冲突，重新读取后再操作。
+
+当用户要求创作短剧、编写分镜或拆分镜头时，不要创建 .storyboard.json 或分镜表 artifact。直接批量创建以下节点：
+1. 每个镜头创建一个精简的 shot 节点，只保存 shotNumber 和 scene；scene 用于概括该镜头的剧情/画面内容。不要把提示词、时长、台词旁白或运镜参数放在 shot 节点。
+2. 为每个镜头创建一个 image 节点，prompt 使用详细英文文生图提示词。
+3. 为每个镜头创建一个 video 节点，prompt 使用详细英文图生视频提示词，并设置 duration。
+4. 使用 ConnectCanvasNodes 建立 shot → image → video 的连接。
+
+优先批量创建和批量连接。节点位置按镜头纵向排列，同一镜头从左到右依次为 shot、image、video。画布节点是分镜的唯一数据源。`;
 }

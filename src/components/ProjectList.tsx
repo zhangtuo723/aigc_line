@@ -1,7 +1,7 @@
 import { useAppStore } from '../stores/app.store';
 
 export function ProjectList() {
-  const { projects, currentProject, createProject, selectProject, deleteProject, loadProjects, sidebarCollapsed, setSidebarCollapsed } =
+  const { projects, currentProject, createProject, selectProject, deleteProject, sidebarCollapsed, setSidebarCollapsed } =
     useAppStore();
 
   const handleCreate = async () => {
@@ -15,7 +15,6 @@ export function ProjectList() {
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     await deleteProject(id);
-    await loadProjects();
   };
 
   return (

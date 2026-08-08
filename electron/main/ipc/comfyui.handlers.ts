@@ -5,11 +5,14 @@ import type {
   GenerateImageResult,
   GenerateVideoRequest,
   GenerateVideoResult,
+  UpscaleVideoRequest,
+  UpscaleVideoResult,
 } from '../../../src/shared/ipc.types'
 import {
   generateImageWithComfyUI,
   generateVideoWithComfyUI,
   listComfyWorkflows,
+  upscaleVideoWithComfyUI,
 } from '../services/comfyui.service'
 
 export function registerComfyUIHandlers(): void {
@@ -32,6 +35,19 @@ export function registerComfyUIHandlers(): void {
     async (_event, request: GenerateVideoRequest): Promise<GenerateVideoResult> => {
       try {
         return await generateVideoWithComfyUI(request)
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        }
+      }
+    },
+  )
+  ipcMain.handle(
+    IPC_CHANNELS.comfyui.upscaleVideo,
+    async (_event, request: UpscaleVideoRequest): Promise<UpscaleVideoResult> => {
+      try {
+        return await upscaleVideoWithComfyUI(request)
       } catch (error) {
         return {
           success: false,

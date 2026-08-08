@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "aigc-canvas",
+  "description": "Built-in production workflows for AIGC CANVAS.",
+  "version": "0.2.1",
+  "author": {
+    "name": "AIGC CANVAS"
+  }
+}

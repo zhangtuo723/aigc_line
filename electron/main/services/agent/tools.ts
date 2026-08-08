@@ -7,6 +7,7 @@ import type { Artifact, ChatMessage } from '../../../../src/shared/ipc.types';
 import { messageHub } from '../message-hub';
 import { appendChatMessage } from '../project.store';
 import { pushArtifact } from './artifact';
+import { sendCanvasCommand } from './canvas-bridge';
 
 /** Image extensions -> MIME types supported as image artifacts */
 const IMAGE_MIME: Record<string, string> = {
@@ -25,14 +26,123 @@ const IMAGE_MIME: Record<string, string> = {
  * workspace file path; the file is read from disk and pushed to the canvas.
  */
 export function createPushArtifactServer(projectId: string, folderPath: string) {
+  const positionSchema = z.object({ x: z.number(), y: z.number() });
+  const nodeFields = {
+    title: z.string().optional(),
+    prompt: z.string().optional(),
+    shotNumber: z.number().int().positive().optional(),
+    scene: z.string().optional(),
+    aspectRatio: z.enum(['16:9', '1:1', '4:3']).optional(),
+    sourcePath: z.string().optional(),
+    workflowId: z.string().optional(),
+    duration: z.number().positive().optional(),
+    firstFrameNodeId: z.string().optional(),
+    lastFrameNodeId: z.string().optional(),
+    referenceImageNodeIds: z.array(z.string()).optional(),
+    referenceVideoNodeIds: z.array(z.string()).optional(),
+    referenceAudioNodeIds: z.array(z.string()).optional(),
+    inputNodeId: z.string().optional(),
+    scale: z.number().optional(),
+    quality: z.string().optional(),
+  };
+  const canvasResult = async (action: Parameters<typeof sendCanvasCommand>[1], payload: unknown) => {
+    try {
+      const response = await sendCanvasCommand(projectId, action, payload);
+      return { content: [{ type: 'text', text: JSON.stringify(response.result, null, 2) }] } as any;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { content: [{ type: 'text', text: message }], isError: true } as any;
+    }
+  };
+
   return createSdkMcpServer({
     name: 'push-artifact-server',
     version: '1.0.0',
-    instructions: 'Server for pushing artifacts to the frontend canvas',
+    instructions: 'Tools for reading and editing the live canvas and pushing file artifacts',
     tools: [
       tool(
+        'GetCanvasState',
+        'Read the live canvas state, including node/edge counts and data. Use selectionOnly to inspect only nodes selected by the user.',
+        { selectionOnly: z.boolean().optional() },
+        (args) => canvasResult('get-state', args),
+      ),
+      tool(
+        'GetCanvasCapabilities',
+        'List every registered canvas node kind with its fields (writable and read-only, including resolved dynamic options such as the available generation workflows/models) and its invokable actions. Call this before updating nodes or invoking actions to learn what each node kind supports; newly added node kinds appear here automatically.',
+        {},
+        () => canvasResult('get-capabilities', {}),
+      ),
+      tool(
+        'InvokeNodeAction',
+        'Trigger an action exposed by canvas nodes, e.g. "generate" on image/video nodes (use GetCanvasCapabilities to discover actions). Pass nodeIds to run the action on many nodes at once (batch generation). Async actions are acknowledged immediately and return a statusField per node; poll GetCanvasState until that field leaves the busy state (idle or error), then read sourcePath for the result.',
+        {
+          nodeId: z.string().optional(),
+          nodeIds: z.array(z.string()).min(1).optional(),
+          action: z.string(),
+          params: z.record(z.string(), z.unknown()).optional(),
+        },
+        (args) => canvasResult('invoke-action', args),
+      ),
+      tool(
+        'CreateCanvasNodes',
+        'Create one or more live canvas nodes. A shot node only stores its number and concise scene/content; generation prompts and timing belong to image/video nodes. Normally connect a shot to an image node, then connect the image node to a video node. Only fields registered for the node kind are applied; call GetCanvasCapabilities to discover them.',
+        {
+          nodes: z.array(z.object({
+            id: z.string().optional(),
+            kind: z.enum(['shot', 'text', 'image', 'video', 'audio', 'upscale']),
+            position: positionSchema.optional(),
+            ...nodeFields,
+          })).min(1),
+          expectedRevision: z.number().int().nonnegative().optional(),
+        },
+        (args) => canvasResult('create-nodes', args),
+      ),
+      tool(
+        'UpdateCanvasNodes',
+        'Patch existing live canvas nodes by id. Only supplied fields are changed; kind cannot be changed. Writable fields, allowed values and dynamic options (e.g. workflowId choices such as the generation model) are node-kind specific and validated against the canvas capability registry; call GetCanvasCapabilities first to discover them.',
+        {
+          updates: z.array(z.object({
+            id: z.string(),
+            position: positionSchema.optional(),
+            ...nodeFields,
+          })).min(1),
+          expectedRevision: z.number().int().nonnegative().optional(),
+        },
+        (args) => canvasResult('update-nodes', args),
+      ),
+      tool(
+        'DeleteCanvasNodes',
+        'Delete canvas nodes by id. All edges attached to deleted nodes are removed automatically.',
+        {
+          nodeIds: z.array(z.string()).min(1),
+          expectedRevision: z.number().int().nonnegative().optional(),
+        },
+        (args) => canvasResult('delete-nodes', args),
+      ),
+      tool(
+        'ConnectCanvasNodes',
+        'Connect existing canvas nodes. Duplicate source-target connections are ignored.',
+        {
+          connections: z.array(z.object({
+            source: z.string(),
+            target: z.string(),
+          })).min(1),
+          expectedRevision: z.number().int().nonnegative().optional(),
+        },
+        (args) => canvasResult('connect-nodes', args),
+      ),
+      tool(
+        'DisconnectCanvasEdges',
+        'Remove canvas connections by edge id.',
+        {
+          edgeIds: z.array(z.string()).min(1),
+          expectedRevision: z.number().int().nonnegative().optional(),
+        },
+        (args) => canvasResult('disconnect-edges', args),
+      ),
+      tool(
         'PushArtifact',
-        'Push a file from the workspace (markdown, html, image, or storyboard) to the user\'s canvas. Pass the file path - the file content is read from disk, so you do NOT need to repeat the content. Images (png/jpg/jpeg/gif/webp/svg/bmp/avif) are displayed as picture cards; files ending in .storyboard.json are rendered as a visual storyboard table.',
+        'Push a workspace file (markdown, html, or image) to the canvas. For storyboards, create shot/image/video nodes with the Canvas tools instead of pushing a storyboard table.',
         {
           path: z.string().describe('Path to the file, relative to the workspace or absolute'),
           title: z.string().describe('A short title for the artifact'),
@@ -49,7 +159,6 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
             }
             const ext = path.extname(filePath).toLowerCase();
             const imageMime = IMAGE_MIME[ext];
-            const isStoryboard = filePath.toLowerCase().endsWith('.storyboard.json');
             let type: Artifact['type'];
             let content: string;
             if (imageMime) {
@@ -59,7 +168,7 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
               content = `data:${imageMime};base64,${buf.toString('base64')}`;
             } else {
               content = await fs.readFile(filePath, 'utf-8');
-              type = isStoryboard ? 'storyboard' : ext === '.html' || ext === '.htm' ? 'html' : 'markdown';
+              type = ext === '.html' || ext === '.htm' ? 'html' : 'markdown';
             }
             const artifact = pushArtifact(
               projectId,

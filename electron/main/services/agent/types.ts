@@ -9,7 +9,7 @@ export interface ToolCallInfo {
   id: string;
   toolName: string;
   toolInput: unknown;
-  status: 'running' | 'completed' | 'error';
+  status: 'running' | 'completed' | 'error' | 'interrupted';
   duration?: number;
   error?: string;
 }

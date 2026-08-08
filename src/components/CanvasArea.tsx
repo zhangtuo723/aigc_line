@@ -26,39 +26,36 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { useAppStore } from '../stores/app.store'
-import type { ComfyWorkflowInfo, StoryboardShot } from '../shared/ipc.types'
+import type {
+  CanvasCommandRequest,
+  CanvasCommandResponse,
+  CanvasNodeData,
+  CanvasNodeKind,
+  ComfyWorkflowInfo,
+  StoryboardShot,
+} from '../shared/ipc.types'
+import {
+  getCapabilityField,
+  getNodeAction,
+  getNodeKindAction,
+  getNodeCapabilities,
+  registerNodeKindAction,
+  resolveDynamicOptions,
+  validateNodeFieldValue,
+} from '../shared/node-capabilities'
+import './canvas-capabilities'
 
-type StoryNodeKind = 'text' | 'image' | 'video' | 'audio' | 'storyboard'
+type StoryNodeKind = CanvasNodeKind
 type InteractionMode = 'select' | 'pan'
 
-interface StoryNodeData extends Record<string, unknown> {
-  kind: StoryNodeKind
-  title: string
-  prompt: string
-  preview?: string
-  artifactId?: string
-  shots?: StoryboardShot[]
-  shotIndex?: number
-  aspectRatio?: '16:9' | '1:1' | '4:3'
-  sourcePath?: string
-  sourceHistory?: string[]
-  workflowId?: string
-  duration?: number
-  firstFrameNodeId?: string
-  lastFrameNodeId?: string
-  referenceImageNodeIds?: string[]
-  referenceVideoNodeIds?: string[]
-  referenceAudioNodeIds?: string[]
-  generationStatus?: 'idle' | 'generating' | 'error'
-  generationError?: string
-}
+type StoryNodeData = CanvasNodeData
 
 type StoryNode = Node<StoryNodeData, 'storyNode'>
 type StoryEdge = Edge<Record<string, never>, 'default'>
 
 interface FlowSnapshot {
   type: 'react-flow'
-  version: 1
+  version: 1 | 2
   nodes: StoryNode[]
   edges: StoryEdge[]
   viewport: Viewport
@@ -67,6 +64,36 @@ interface FlowSnapshot {
 
 const SAVE_DEBOUNCE_MS = 700
 const DEFAULT_VIEWPORT: Viewport = { x: 80, y: 70, zoom: 0.86 }
+const KIND_LABELS: Record<StoryNodeKind, string> = {
+  shot: '镜头',
+  text: '文本',
+  image: '图片',
+  video: '视频',
+  audio: '音频',
+  upscale: '视频放大',
+}
+/**
+ * Registry-driven field picking: only fields declared writable for the node
+ * kind in the capability registry are accepted. Unregistered keys are
+ * silently ignored (tolerant, like the old hardcoded whitelist); registered
+ * but invalid values throw so the caller (usually the agent) gets feedback.
+ */
+const pickMutableNodeData = (
+  kind: StoryNodeKind,
+  value: Record<string, unknown>,
+): Partial<StoryNodeData> => {
+  const result: Partial<StoryNodeData> = {}
+  for (const [key, fieldValue] of Object.entries(value)) {
+    if (key === 'id' || key === 'kind' || key === 'position') continue
+    const field = getCapabilityField(kind, key)
+    if (!field) continue
+    if (field.readonly) throw new Error(`字段为只读，不可修改：${key}`)
+    const error = validateNodeFieldValue(field, fieldValue)
+    if (error) throw new Error(`字段 ${key} 无效：${error}`)
+    Object.assign(result, { [key]: fieldValue })
+  }
+  return result
+}
 
 const isFlowSnapshot = (value: unknown): value is FlowSnapshot => {
   if (!value || typeof value !== 'object') return false
@@ -89,8 +116,82 @@ const parseStoryboard = (content: string): StoryboardShot[] => {
   }
 }
 
+/** Upgrade legacy storyboard-table nodes into independent shot nodes. */
+const migrateLegacySnapshot = (snapshot: FlowSnapshot): FlowSnapshot => {
+  const legacyBoards = snapshot.nodes.filter((node) => (node.data.kind as string) === 'storyboard')
+  if (legacyBoards.length === 0) return { ...snapshot, version: 2 }
+
+  const boardIds = new Set(legacyBoards.map((node) => node.id))
+  const nodes = snapshot.nodes.filter((node) => !boardIds.has(node.id))
+  const edges = snapshot.edges.filter((edge) => !boardIds.has(edge.source) && !boardIds.has(edge.target))
+
+  for (const board of legacyBoards) {
+    const shots = Array.isArray((board.data as Record<string, unknown>).shots)
+      ? (board.data as Record<string, unknown>).shots as StoryboardShot[]
+      : []
+    shots.forEach((shot, offset) => {
+      const shotId = `${board.id}-shot-${shot.index}`
+      const imageId = `${board.id}-shot-${shot.index}-image`
+      const videoId = `${board.id}-shot-${shot.index}-video`
+      nodes.push({
+        id: shotId,
+        type: 'storyNode',
+        position: { x: board.position.x, y: board.position.y + offset * 330 },
+        data: {
+          kind: 'shot',
+          title: `镜头 ${shot.index}`,
+          shotNumber: shot.index,
+          scene: shot.scene,
+        },
+      })
+      if (nodes.some((node) => node.id === imageId)) {
+        edges.push(makeLinkedEdge(`edge-${shotId}-${imageId}`, shotId, imageId))
+      }
+      const image = nodes.find((node) => node.id === imageId)
+      if (image) {
+        image.data = {
+          ...image.data,
+          prompt: image.data.prompt || shot.textToImagePrompt || shot.scene,
+          sourcePath: image.data.sourcePath || shot.imageSource,
+          sourceHistory: image.data.sourceHistory || shot.imageSourceHistory,
+        }
+      }
+      const video = nodes.find((node) => node.id === videoId)
+      if (video) {
+        video.data = {
+          ...video.data,
+          prompt: video.data.prompt || shot.imageToVideoPrompt || shot.camera || '',
+          sourcePath: video.data.sourcePath || shot.videoSource,
+          sourceHistory: video.data.sourceHistory || shot.videoSourceHistory,
+        }
+      }
+    })
+  }
+  return { ...snapshot, version: 2, nodes, edges }
+}
+
+/** Remove fields that belonged to the old storyboard-shaped shot model. */
+const simplifyShotNode = (node: StoryNode): StoryNode => {
+  if (node.data.kind !== 'shot') return node
+  const {
+    prompt: _legacyPrompt,
+    duration: _legacyDuration,
+    dialogue: _legacyDialogue,
+    camera: _legacyCamera,
+    ...data
+  } = node.data
+  return { ...node, data: data as StoryNodeData }
+}
+
 const nodeIcon = (kind: StoryNodeKind) => {
-  if (kind === 'storyboard') {
+  if (kind === 'upscale') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="h-3.5 w-3.5">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+      </svg>
+    )
+  }
+  if (kind === 'shot') {
     return (
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="h-3.5 w-3.5">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M4 5h16M4 10h16M4 15h16M4 20h16M8 4v17" />
@@ -147,7 +248,6 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
   const edges = useEdges<StoryEdge>()
   const { setNodes, deleteElements } = useReactFlow<StoryNode, StoryEdge>()
   const currentProject = useAppStore((state) => state.currentProject)
-  const updateArtifactContent = useAppStore((state) => state.updateArtifactContent)
   const [ratioMenuOpen, setRatioMenuOpen] = useState(false)
   const [durationMenuOpen, setDurationMenuOpen] = useState(false)
   const [workflowMenuOpen, setWorkflowMenuOpen] = useState(false)
@@ -239,195 +339,6 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
       .catch(() => { if (active) setWorkflows([]) })
     return () => { active = false }
   }, [])
-
-  const generateImage = async () => {
-    if (kind !== 'image' || !currentProject || !current) return
-    if (!current.data.prompt.trim()) {
-      setNodes((list) => list.map((node) => node.id === id
-        ? { ...node, data: { ...node.data, generationStatus: 'error', generationError: '请先输入文生图提示词' } }
-        : node))
-      return
-    }
-    setNodes((list) => list.map((node) => node.id === id
-      ? { ...node, data: { ...node.data, generationStatus: 'generating', generationError: '' } }
-      : node))
-    try {
-      const result = await window.electronAPI.generateImage({
-        projectId: currentProject.id,
-        nodeId: id,
-        prompt: current.data.prompt,
-        aspectRatio,
-        workflowId: selectedWorkflow?.id,
-        referenceImagePath: incoming.find(({ source }) => source.data.kind === 'image' && source.data.sourcePath)?.source.data.sourcePath,
-      })
-      if (!result.success || !result.relativePath) {
-        throw new Error(result.error || 'ComfyUI 没有返回图片')
-      }
-
-      const relativePath = result.relativePath
-      const preview = `workspace://${currentProject.id}/${relativePath
-        .split('/')
-        .map(encodeURIComponent)
-        .join('/')}`
-      const previousPath = current.data.sourcePath
-      setNodes((list) => list.map((node) => node.id === id
-        ? {
-            ...node,
-            data: {
-              ...node.data,
-              preview,
-              sourcePath: relativePath,
-              sourceHistory: previousPath
-                ? [...(node.data.sourceHistory ?? []), previousPath]
-                : node.data.sourceHistory ?? [],
-              generationStatus: 'idle',
-              generationError: '',
-            },
-          }
-        : node))
-
-      const storyboardSource = incoming.find(({ source }) => source.data.kind === 'storyboard')?.source
-      const artifactId = storyboardSource?.data.artifactId
-      const shotIndex = current.data.shotIndex
-      if (artifactId && typeof shotIndex === 'number') {
-        const artifact = useAppStore.getState().artifacts.find((item) => item.id === artifactId)
-        if (artifact) {
-          const shots = parseStoryboard(artifact.content)
-          const nextShots = shots.map((shot) => shot.index === shotIndex
-            ? {
-                ...shot,
-                textToImagePrompt: current.data.prompt,
-                imageSource: relativePath,
-                imageSourceHistory: shot.imageSource
-                  ? [...(shot.imageSourceHistory ?? []), shot.imageSource]
-                  : shot.imageSourceHistory ?? [],
-              }
-            : shot)
-          const content = JSON.stringify(nextShots, null, 2)
-          updateArtifactContent(artifact.id, content)
-          if (artifact.path) {
-            await window.electronAPI.saveArtifactContent(currentProject.id, artifact.path, content)
-          }
-        }
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      setNodes((list) => list.map((node) => node.id === id
-        ? { ...node, data: { ...node.data, generationStatus: 'error', generationError: message } }
-        : node))
-    }
-  }
-
-  const generateVideo = async () => {
-    if (kind !== 'video' || !currentProject || !current) return
-    if (!current.data.prompt.trim()) {
-      setNodes((list) => list.map((node) => node.id === id
-        ? { ...node, data: { ...node.data, generationStatus: 'error', generationError: '请先输入视频生成提示词' } }
-        : node))
-      return
-    }
-    const referenceNodes = [...referenceImageNodes, ...referenceVideoNodes, ...referenceAudioNodes]
-    const referenceImagePaths = referenceImageNodes.map((source) => source.data.sourcePath!)
-    const referenceVideoPaths = referenceVideoNodes.map((source) => source.data.sourcePath!)
-    const referenceAudioPaths = referenceAudioNodes.map((source) => source.data.sourcePath!)
-    const referenceNode = firstFrameNode ?? referenceImageNodes[0]
-
-    if (isReferenceWorkflow) {
-      const error = referenceImagePaths.length > 9
-        ? '全模态参考图片轨最多放入 9 张图片'
-        : referenceVideoPaths.length > 3
-          ? '全模态参考视频轨最多放入 3 个视频'
-          : referenceAudioPaths.length > 3
-            ? '全模态参考音频轨最多放入 3 段音频'
-            : referenceNodes.length === 0
-              ? '请从候选素材中至少拖一个图片、视频或音频到参考轨道'
-              : ''
-      if (error) {
-        setNodes((list) => list.map((node) => node.id === id
-          ? { ...node, data: { ...node.data, generationStatus: 'error', generationError: error } }
-          : node))
-        return
-      }
-    }
-    setNodes((list) => list.map((node) => node.id === id
-      ? { ...node, data: { ...node.data, generationStatus: 'generating', generationError: '' } }
-      : node))
-    try {
-      const result = await window.electronAPI.generateVideo({
-        projectId: currentProject.id,
-        nodeId: id,
-        prompt: current.data.prompt,
-        aspectRatio,
-        duration: currentDuration,
-        workflowId: selectedWorkflow?.id,
-        referenceImagePath: isFirstLastWorkflow ? firstFrameNode?.data.sourcePath : undefined,
-        lastFrameImagePath: isFirstLastWorkflow ? lastFrameNode?.data.sourcePath : undefined,
-        referenceImagePaths: isReferenceWorkflow ? referenceImagePaths : undefined,
-        referenceVideoPaths: isReferenceWorkflow ? referenceVideoPaths : undefined,
-        referenceAudioPaths: isReferenceWorkflow ? referenceAudioPaths : undefined,
-      })
-      if (!result.success || !result.relativePath) {
-        throw new Error(result.error || 'ComfyUI 没有返回视频')
-      }
-      const relativePath = result.relativePath
-      const preview = `workspace://${currentProject.id}/${relativePath
-        .split('/')
-        .map(encodeURIComponent)
-        .join('/')}`
-      const previousPath = current.data.sourcePath
-      setNodes((list) => list.map((node) => node.id === id
-        ? {
-            ...node,
-            data: {
-              ...node.data,
-              preview,
-              sourcePath: relativePath,
-              sourceHistory: previousPath
-                ? [...(node.data.sourceHistory ?? []), previousPath]
-                : node.data.sourceHistory ?? [],
-              generationStatus: 'idle',
-              generationError: '',
-            },
-          }
-        : node))
-
-      const storyboardEdge = referenceNode
-        ? edges.find((edge) => edge.target === referenceNode.id)
-        : undefined
-      const storyboardSource = storyboardEdge
-        ? nodes.find((node) => node.id === storyboardEdge.source && node.data.kind === 'storyboard')
-        : undefined
-      const artifactId = storyboardSource?.data.artifactId
-      const shotIndex = current.data.shotIndex
-      if (artifactId && typeof shotIndex === 'number') {
-        const artifact = useAppStore.getState().artifacts.find((item) => item.id === artifactId)
-        if (artifact) {
-          const shots = parseStoryboard(artifact.content)
-          const nextShots = shots.map((shot) => shot.index === shotIndex
-            ? {
-                ...shot,
-                duration: currentDuration,
-                imageToVideoPrompt: current.data.prompt,
-                videoSource: relativePath,
-                videoSourceHistory: shot.videoSource
-                  ? [...(shot.videoSourceHistory ?? []), shot.videoSource]
-                  : shot.videoSourceHistory ?? [],
-              }
-            : shot)
-          const content = JSON.stringify(nextShots, null, 2)
-          updateArtifactContent(artifact.id, content)
-          if (artifact.path) {
-            await window.electronAPI.saveArtifactContent(currentProject.id, artifact.path, content)
-          }
-        }
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      setNodes((list) => list.map((node) => node.id === id
-        ? { ...node, data: { ...node.data, generationStatus: 'error', generationError: message } }
-        : node))
-    }
-  }
 
   return (
     <div className="nodrag nowheel mt-3 cursor-default rounded-2xl border border-white/[0.09] bg-[#17171b] p-3 shadow-[0_18px_50px_rgba(0,0,0,0.45)]">
@@ -775,7 +686,7 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
           )}
         </div>
         <button
-          onClick={() => void (kind === 'image' ? generateImage() : generateVideo())}
+          onClick={() => void getNodeKindAction(kind, 'generate')?.(id)}
           disabled={generationState === 'generating' || !selectedWorkflow}
           className="flex h-9 min-w-[72px] items-center justify-center gap-2 rounded-xl bg-[#e8e6df] px-4 text-[11px] font-semibold tracking-wider text-[#17171b] shadow-[0_5px_18px_rgba(255,255,255,0.08)] transition hover:bg-white hover:shadow-[0_7px_22px_rgba(255,255,255,0.13)] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45"
           title={kind === 'image' ? '使用 ComfyUI 生成图片' : '使用 MiniMax H3 生成视频'}
@@ -786,6 +697,175 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
               <span>生成中</span>
             </>
           ) : '生成'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+const UPSCALE_SCALES = [2, 3, 4] as const
+const UPSCALE_QUALITIES = ['FAST', 'MEDIUM', 'HIGH', 'ULTRA'] as const
+const UPSCALE_QUALITY_LABELS: Record<(typeof UPSCALE_QUALITIES)[number], string> = {
+  FAST: '快速',
+  MEDIUM: '均衡',
+  HIGH: '高质量',
+  ULTRA: '极致',
+}
+
+function UpscalePanel({ id }: { id: string }) {
+  const nodes = useNodes<StoryNode>()
+  const edges = useEdges<StoryEdge>()
+  const { setNodes, deleteElements } = useReactFlow<StoryNode, StoryEdge>()
+  const [scaleMenuOpen, setScaleMenuOpen] = useState(false)
+  const [qualityMenuOpen, setQualityMenuOpen] = useState(false)
+  const current = nodes.find((node) => node.id === id)
+  const scale = UPSCALE_SCALES.find((value) => value === current?.data.scale) ?? 2
+  const quality = UPSCALE_QUALITIES.find((value) => value === current?.data.quality) ?? 'ULTRA'
+  const generationState = current?.data.generationStatus ?? 'idle'
+  const generationError = current?.data.generationError ?? ''
+  const inputCandidates = edges
+    .filter((edge) => edge.target === id)
+    .map((edge) => ({ edge, source: nodes.find((node) => node.id === edge.source) }))
+    .filter((item): item is { edge: StoryEdge; source: StoryNode } => (
+      !!item.source &&
+      (item.source.data.kind === 'video' || item.source.data.kind === 'upscale') &&
+      !!item.source.data.sourcePath
+    ))
+  const inputNode = inputCandidates.find(({ source }) => source.id === current?.data.inputNodeId)?.source
+    ?? inputCandidates[0]?.source
+
+  const selectInput = (nodeId: string) => {
+    setNodes((list) => list.map((node) => node.id === id
+      ? { ...node, data: { ...node.data, inputNodeId: nodeId } }
+      : node))
+  }
+
+  return (
+    <div className="nodrag nowheel mt-3 cursor-default rounded-2xl border border-white/[0.09] bg-[#17171b] p-3 shadow-[0_18px_50px_rgba(0,0,0,0.45)]">
+      <div className="mb-2.5 rounded-xl border border-dashed border-white/15 bg-black/15 p-2">
+        <div className="mb-1.5 flex items-center gap-1.5 text-[9px] text-white/45">
+          {nodeIcon('video')}
+          <span>输入视频</span>
+          {inputCandidates.length > 1 && <span className="text-white/25">点击切换</span>}
+        </div>
+        {inputCandidates.length > 0 ? (
+          <div className="flex flex-wrap gap-1.5">
+            {inputCandidates.map(({ edge, source }) => {
+              const active = inputNode?.id === source.id
+              return (
+                <div
+                  key={edge.id}
+                  className={`group/ref relative flex h-9 min-w-9 max-w-[150px] items-center gap-2 rounded-lg border px-2.5 text-[10px] transition ${active ? 'border-[#d4af37]/55 bg-[#d4af37]/[0.1] text-[#f0d98c]' : 'border-white/10 bg-white/[0.06] text-white/55 hover:border-white/25 hover:text-white/85'}`}
+                >
+                  <button
+                    className="flex min-w-0 items-center gap-2"
+                    onClick={() => selectInput(source.id)}
+                    title={active ? `当前输入：${source.data.title}` : `切换输入为：${source.data.title}`}
+                  >
+                    {nodeIcon('video')}
+                    <span className="truncate">{source.data.title}</span>
+                    {active && <span className="flex-shrink-0 text-[8px] text-[#e8c766]">✓</span>}
+                  </button>
+                  <button
+                    className="ml-auto flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-black/40 text-white/45 opacity-0 transition hover:text-white group-hover/ref:opacity-100"
+                    onClick={() => void deleteElements({ edges: [edge] })}
+                    title="断开连线"
+                  >
+                    ×
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+        ) : (
+          <div className="py-1 text-center text-[10px] text-white/35">连接一个已有视频节点作为输入</div>
+        )}
+      </div>
+
+      {generationError && (
+        <div className="mb-2 rounded-lg border border-rose-500/20 bg-rose-500/[0.07] px-2.5 py-2 text-[10px] leading-4 text-rose-300">
+          {generationError}
+        </div>
+      )}
+
+      <div className="flex items-center justify-between text-[10px] text-white/40">
+        <div className="flex items-center gap-1.5">
+          <div className="nodrag relative">
+            <button
+              onClick={() => setScaleMenuOpen((open) => !open)}
+              className={`flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[10px] outline-none transition ${scaleMenuOpen ? 'border-[#d4af37]/50 bg-[#d4af37]/10 text-[#f0d98c]' : 'border-white/[0.08] bg-white/[0.05] text-white/55 hover:border-[#d4af37]/35 hover:text-white'}`}
+              title="放大倍数"
+            >
+              <span>{scale}x</span>
+              <svg viewBox="0 0 12 12" fill="currentColor" className={`h-2.5 w-2.5 transition-transform ${scaleMenuOpen ? 'rotate-180' : ''}`}>
+                <path d="m2.2 4 3.8 4 3.8-4H2.2Z" />
+              </svg>
+            </button>
+            {scaleMenuOpen && (
+              <div className="absolute bottom-full left-0 z-[100] mb-1.5 min-w-[72px] overflow-hidden rounded-xl border border-white/[0.12] bg-[#242429] p-1 shadow-[0_12px_32px_rgba(0,0,0,0.65)]">
+                {UPSCALE_SCALES.map((value) => (
+                  <button
+                    key={value}
+                    onClick={() => {
+                      setNodes((list) => list.map((node) => node.id === id
+                        ? { ...node, data: { ...node.data, scale: value } }
+                        : node))
+                      setScaleMenuOpen(false)
+                    }}
+                    className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-[10px] transition ${scale === value ? 'bg-[#d4af37]/15 text-[#f0d98c]' : 'text-white/60 hover:bg-white/[0.08] hover:text-white'}`}
+                  >
+                    <span>{value}x</span>
+                    {scale === value && <span className="text-[#e8c766]">✓</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <span>·</span>
+          <div className="nodrag relative">
+            <button
+              onClick={() => setQualityMenuOpen((open) => !open)}
+              className={`flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[10px] outline-none transition ${qualityMenuOpen ? 'border-[#d4af37]/50 bg-[#d4af37]/10 text-[#f0d98c]' : 'border-white/[0.08] bg-white/[0.05] text-white/55 hover:border-[#d4af37]/35 hover:text-white'}`}
+              title="放大质量"
+            >
+              <span>{UPSCALE_QUALITY_LABELS[quality]}</span>
+              <svg viewBox="0 0 12 12" fill="currentColor" className={`h-2.5 w-2.5 transition-transform ${qualityMenuOpen ? 'rotate-180' : ''}`}>
+                <path d="m2.2 4 3.8 4 3.8-4H2.2Z" />
+              </svg>
+            </button>
+            {qualityMenuOpen && (
+              <div className="absolute bottom-full left-0 z-[100] mb-1.5 min-w-[88px] overflow-hidden rounded-xl border border-white/[0.12] bg-[#242429] p-1 shadow-[0_12px_32px_rgba(0,0,0,0.65)]">
+                {UPSCALE_QUALITIES.map((value) => (
+                  <button
+                    key={value}
+                    onClick={() => {
+                      setNodes((list) => list.map((node) => node.id === id
+                        ? { ...node, data: { ...node.data, quality: value } }
+                        : node))
+                      setQualityMenuOpen(false)
+                    }}
+                    className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-[10px] transition ${quality === value ? 'bg-[#d4af37]/15 text-[#f0d98c]' : 'text-white/60 hover:bg-white/[0.08] hover:text-white'}`}
+                  >
+                    <span>{UPSCALE_QUALITY_LABELS[value]}</span>
+                    {quality === value && <span className="text-[#e8c766]">✓</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+        <button
+          onClick={() => void getNodeKindAction('upscale', 'generate')?.(id)}
+          disabled={generationState === 'generating' || !inputNode}
+          className="flex h-9 min-w-[72px] items-center justify-center gap-2 rounded-xl bg-[#e8e6df] px-4 text-[11px] font-semibold tracking-wider text-[#17171b] shadow-[0_5px_18px_rgba(255,255,255,0.08)] transition hover:bg-white hover:shadow-[0_7px_22px_rgba(255,255,255,0.13)] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45"
+          title="使用 RTX Video Super Resolution 放大视频"
+        >
+          {generationState === 'generating' ? (
+            <>
+              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-[#17171b]/30 border-t-[#17171b]" />
+              <span>放大中</span>
+            </>
+          ) : '放大'}
         </button>
       </div>
     </div>
@@ -808,62 +888,18 @@ function NodeDeleteButton({ id }: { id: string }) {
   )
 }
 
-function StoryboardNodeCard({ id, data, selected }: { id: string; data: StoryNodeData; selected: boolean }) {
-  const shots = data.shots ?? []
-
-  return (
-    <div className="w-[620px]">
-      <div className="mb-1.5 flex items-center gap-1 text-[11px] text-white/48">
-        {nodeIcon('storyboard')}
-        <span>{data.title}</span>
-        <span className="ml-auto text-white/25">{shots.length} 个镜头</span>
-        <NodeDeleteButton id={id} />
-      </div>
-      <div className={`overflow-visible rounded-xl border bg-[#17171b] shadow-[0_10px_35px_rgba(0,0,0,0.3)] ${selected ? 'border-[#e8c766]/75' : 'border-white/[0.13]'}`}>
-        <Handle type="target" position={Position.Left} className="story-handle" />
-        <div className="grid grid-cols-[52px_1fr_80px_110px] rounded-t-[11px] border-b border-white/[0.08] bg-white/[0.045] px-3 py-2 text-[10px] font-medium text-white/38">
-          <span>镜号</span>
-          <span>画面 / 台词</span>
-          <span>时长</span>
-          <span>运镜</span>
-        </div>
-        {shots.length > 0 ? shots.map((shot) => (
-          <div
-            key={shot.index}
-            className="relative grid min-h-[86px] grid-cols-[52px_1fr_80px_110px] items-start border-b border-white/[0.06] px-3 py-3 text-[11px] last:rounded-b-[11px] last:border-b-0"
-          >
-            <span className="font-medium text-[#e8c766]">#{shot.index}</span>
-            <div className="pr-4">
-              <p className="line-clamp-2 leading-5 text-white/76">{shot.scene}</p>
-              {shot.dialogue && <p className="mt-1 line-clamp-1 text-white/38">{shot.dialogue}</p>}
-            </div>
-            <span className="text-white/52">{shot.duration}s</span>
-            <span className="truncate text-white/52">{shot.camera || '—'}</span>
-            <Handle
-              id={`shot-${shot.index}`}
-              type="source"
-              position={Position.Right}
-              className="story-handle"
-              title={`连接镜头 ${shot.index}`}
-            />
-          </div>
-        )) : (
-          <div className="px-4 py-10 text-center text-xs text-white/30">分镜数据为空或格式不正确</div>
-        )}
-      </div>
-    </div>
-  )
-}
-
 function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
   const { setNodes } = useReactFlow<StoryNode, StoryEdge>()
   const currentProject = useAppStore((state) => state.currentProject)
+  const addCanvasNodeReference = useAppStore((state) => state.addCanvasNodeReference)
+  const isReferencedInChat = useAppStore((state) => state.referencedCanvasNodes.some((ref) => ref.id === id))
   const [audioImporting, setAudioImporting] = useState(false)
-  if (data.kind === 'storyboard') {
-    return <StoryboardNodeCard id={id} data={data} selected={selected} />
-  }
-  const visualMediaKind = data.kind === 'image' || data.kind === 'video' ? data.kind : null
+  const isUpscale = data.kind === 'upscale'
+  const visualMediaKind = data.kind === 'image' || data.kind === 'video'
+    ? data.kind
+    : isUpscale ? 'video' : null
   const isAudio = data.kind === 'audio'
+  const isShot = data.kind === 'shot'
   const isMedia = !!visualMediaKind || isAudio
   const aspectRatio = data.aspectRatio ?? '16:9'
   const aspectRatioValue = aspectRatio === '1:1' ? '1 / 1' : aspectRatio === '4:3' ? '4 / 3' : '16 / 9'
@@ -906,7 +942,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
     <div className={isMedia ? 'w-[420px]' : 'w-[250px]'}>
       <div className="mb-1.5 flex items-center gap-1 text-[11px] text-white/48">
         {nodeIcon(data.kind)}
-        <span>{data.title}</span>
+        <span className="min-w-0 truncate">{data.title}</span>
         {data.generationStatus === 'generating' && (
           <span className="ml-1 flex items-center gap-1 text-[9px] text-[#e8c766]">
             <span className="h-2 w-2 animate-pulse rounded-full bg-[#e8c766]" />
@@ -914,6 +950,19 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
           </span>
         )}
         <span className="ml-auto" />
+        {selected && (
+          <button
+            className={`nodrag flex h-6 flex-shrink-0 items-center gap-1 rounded-md border px-2 text-[10px] transition ${isReferencedInChat ? 'border-sky-400/30 bg-sky-400/10 text-sky-200' : 'border-white/10 bg-white/[0.04] text-white/55 hover:border-[#d4af37]/35 hover:text-[#e8c766]'}`}
+            onClick={(event) => {
+              event.stopPropagation()
+              addCanvasNodeReference({ id, title: data.title, kind: data.kind })
+            }}
+            title={isReferencedInChat ? '该节点已添加到对话' : '把该节点作为附件添加到下一条对话'}
+          >
+            <span>{isReferencedInChat ? '✓' : '+'}</span>
+            <span>{isReferencedInChat ? '已添加到对话' : '添加到对话'}</span>
+          </button>
+        )}
         <NodeDeleteButton id={id} />
       </div>
       <div
@@ -978,6 +1027,13 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
             </button>
             {data.generationError && <p className="text-[10px] text-rose-300">{data.generationError}</p>}
           </div>
+        ) : isShot ? (
+          <div className="min-h-[150px] space-y-3 p-5">
+            <div className="text-[10px] uppercase tracking-wider text-[#e8c766]">#{data.shotNumber ?? '—'}</div>
+            <p className="whitespace-pre-wrap text-[12px] leading-6 text-white/75">
+              {data.scene || '概括这个镜头的剧情或画面内容。'}
+            </p>
+          </div>
         ) : (
           <div className="min-h-[190px] p-5">
             <div className="mb-5 flex justify-center text-white/25">{nodeIcon('text')}</div>
@@ -988,7 +1044,8 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
         )}
         <Handle type="source" position={Position.Right} className="story-handle" />
       </div>
-      {selected && visualMediaKind && <PromptPanel id={id} kind={visualMediaKind} />}
+      {selected && visualMediaKind && !isUpscale && <PromptPanel id={id} kind={visualMediaKind} />}
+      {selected && isUpscale && <UpscalePanel id={id} />}
     </div>
   )
 }
@@ -1001,10 +1058,13 @@ const makeNode = (kind: StoryNodeKind, index: number, position?: { x: number; y:
   position: position ?? { x: 120 + index * 45, y: 100 + index * 35 },
   data: {
     kind,
-    title: `${kind === 'image' ? '图片' : kind === 'video' ? '视频' : kind === 'audio' ? '音频' : kind === 'storyboard' ? '分镜表' : '文本'}节点 ${index}`,
-    prompt: '',
-    aspectRatio: kind === 'image' || kind === 'video' ? '16:9' : undefined,
+    title: `${KIND_LABELS[kind]}节点 ${index}`,
+    ...(kind === 'text' || kind === 'image' || kind === 'video' ? { prompt: '' } : {}),
+    shotNumber: kind === 'shot' ? index : undefined,
+    aspectRatio: kind === 'image' || kind === 'video' || kind === 'upscale' ? '16:9' : undefined,
     duration: kind === 'video' ? 5 : undefined,
+    scale: kind === 'upscale' ? 2 : undefined,
+    quality: kind === 'upscale' ? 'ULTRA' : undefined,
   },
 })
 
@@ -1035,11 +1095,473 @@ function CanvasFlow() {
   const loadedFolderRef = useRef<string | null>(null)
   const readyToSaveRef = useRef(false)
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const nodesRef = useRef<StoryNode[]>([])
+  const edgesRef = useRef<StoryEdge[]>([])
+  const revisionRef = useRef(0)
+
+  useEffect(() => {
+    if (nodesRef.current !== nodes) revisionRef.current += 1
+    nodesRef.current = nodes
+  }, [nodes])
+  useEffect(() => {
+    if (edgesRef.current !== edges) revisionRef.current += 1
+    edgesRef.current = edges
+  }, [edges])
+
+  // Kind-level 'generate' handlers. They read live state from refs and the
+  // store instead of component closures, so they work for every node id,
+  // including off-screen nodes React Flow has virtualized away.
+  const patchNodeData = (nodeId: string, patch: Partial<StoryNodeData>) => {
+    setNodes((list) => list.map((node) => node.id === nodeId
+      ? { ...node, data: { ...node.data, ...patch } }
+      : node))
+  }
+
+  const applyGenerationResult = (nodeId: string, projectId: string, relativePath: string) => {
+    const preview = `workspace://${projectId}/${relativePath
+      .split('/')
+      .map(encodeURIComponent)
+      .join('/')}`
+    setNodes((list) => list.map((node) => node.id === nodeId
+      ? {
+          ...node,
+          data: {
+            ...node.data,
+            preview,
+            sourcePath: relativePath,
+            sourceHistory: node.data.sourcePath
+              ? [...(node.data.sourceHistory ?? []), node.data.sourcePath]
+              : node.data.sourceHistory ?? [],
+            generationStatus: 'idle',
+            generationError: '',
+          },
+        }
+      : node))
+  }
+
+  const generateImageNode = async (nodeId: string) => {
+    const project = useAppStore.getState().currentProject
+    const current = nodesRef.current.find((node) => node.id === nodeId)
+    if (!project || !current || current.data.kind !== 'image') return
+    if (!(current.data.prompt ?? '').trim()) {
+      patchNodeData(nodeId, { generationStatus: 'error', generationError: '请先输入文生图提示词' })
+      return
+    }
+    patchNodeData(nodeId, { generationStatus: 'generating', generationError: '' })
+    try {
+      const workflows: ComfyWorkflowInfo[] = await window.electronAPI.listComfyWorkflows()
+      const available = workflows.filter((item) => item.kind === 'text-to-image' || item.kind === 'image-to-image')
+      const selectedWorkflow = available.find((item) => item.id === current.data.workflowId) ?? available[0]
+      const referenceImagePath = edgesRef.current
+        .filter((edge) => edge.target === nodeId)
+        .map((edge) => nodesRef.current.find((node) => node.id === edge.source))
+        .find((source) => source?.data.kind === 'image' && source.data.sourcePath)
+        ?.data.sourcePath
+      const result = await window.electronAPI.generateImage({
+        projectId: project.id,
+        nodeId,
+        prompt: current.data.prompt ?? '',
+        aspectRatio: current.data.aspectRatio ?? '16:9',
+        workflowId: selectedWorkflow?.id,
+        referenceImagePath,
+      })
+      if (!result.success || !result.relativePath) {
+        throw new Error(result.error || 'ComfyUI 没有返回图片')
+      }
+      applyGenerationResult(nodeId, project.id, result.relativePath)
+    } catch (error) {
+      patchNodeData(nodeId, {
+        generationStatus: 'error',
+        generationError: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  const generateVideoNode = async (nodeId: string) => {
+    const project = useAppStore.getState().currentProject
+    const current = nodesRef.current.find((node) => node.id === nodeId)
+    if (!project || !current || current.data.kind !== 'video') return
+    if (!(current.data.prompt ?? '').trim()) {
+      patchNodeData(nodeId, { generationStatus: 'error', generationError: '请先输入视频生成提示词' })
+      return
+    }
+    patchNodeData(nodeId, { generationStatus: 'generating', generationError: '' })
+    try {
+      const workflows: ComfyWorkflowInfo[] = await window.electronAPI.listComfyWorkflows()
+      const available = workflows.filter((item) => item.kind === 'image-to-video')
+      const selectedWorkflow = available.find((item) => item.id === current.data.workflowId) ?? available[0]
+      const isReferenceWorkflow = selectedWorkflow?.id === 'minimax-h3-r2v'
+      const isFirstLastWorkflow = selectedWorkflow?.id === 'minimax-h3-t2v-flf2v'
+      const incomingSources = edgesRef.current
+        .filter((edge) => edge.target === nodeId)
+        .map((edge) => nodesRef.current.find((node) => node.id === edge.source))
+        .filter((source): source is StoryNode => !!source)
+      const imageCandidates = incomingSources.filter((source) => source.data.kind === 'image' && source.data.sourcePath)
+      const referenceCandidates = incomingSources.filter((source) => (
+        source.data.kind === 'image' || source.data.kind === 'video' || source.data.kind === 'audio'
+      ) && source.data.sourcePath)
+      const resolveTrackPaths = (nodeIds: string[] | undefined, trackKind: 'image' | 'video' | 'audio') =>
+        (nodeIds ?? [])
+          .map((trackNodeId) => referenceCandidates.find((source) => source.id === trackNodeId))
+          .filter((source): source is StoryNode => !!source && source.data.kind === trackKind)
+          .map((source) => source.data.sourcePath!)
+      const referenceImagePaths = resolveTrackPaths(current.data.referenceImageNodeIds, 'image')
+      const referenceVideoPaths = resolveTrackPaths(current.data.referenceVideoNodeIds, 'video')
+      const referenceAudioPaths = resolveTrackPaths(current.data.referenceAudioNodeIds, 'audio')
+      if (isReferenceWorkflow) {
+        const error = referenceImagePaths.length > 9
+          ? '全模态参考图片轨最多放入 9 张图片'
+          : referenceVideoPaths.length > 3
+            ? '全模态参考视频轨最多放入 3 个视频'
+            : referenceAudioPaths.length > 3
+              ? '全模态参考音频轨最多放入 3 段音频'
+              : referenceImagePaths.length + referenceVideoPaths.length + referenceAudioPaths.length === 0
+                ? '请从候选素材中至少拖一个图片、视频或音频到参考轨道'
+                : ''
+        if (error) {
+          patchNodeData(nodeId, { generationStatus: 'error', generationError: error })
+          return
+        }
+      }
+      const firstFrameNode = imageCandidates.find((source) => source.id === current.data.firstFrameNodeId)
+      const lastFrameNode = imageCandidates.find((source) => source.id === current.data.lastFrameNodeId)
+      const result = await window.electronAPI.generateVideo({
+        projectId: project.id,
+        nodeId,
+        prompt: current.data.prompt ?? '',
+        aspectRatio: current.data.aspectRatio ?? '16:9',
+        duration: ([5, 10, 15] as const).find((value) => value === current.data.duration) ?? 5,
+        workflowId: selectedWorkflow?.id,
+        referenceImagePath: isFirstLastWorkflow ? firstFrameNode?.data.sourcePath : undefined,
+        lastFrameImagePath: isFirstLastWorkflow ? lastFrameNode?.data.sourcePath : undefined,
+        referenceImagePaths: isReferenceWorkflow ? referenceImagePaths : undefined,
+        referenceVideoPaths: isReferenceWorkflow ? referenceVideoPaths : undefined,
+        referenceAudioPaths: isReferenceWorkflow ? referenceAudioPaths : undefined,
+      })
+      if (!result.success || !result.relativePath) {
+        throw new Error(result.error || 'ComfyUI 没有返回视频')
+      }
+      applyGenerationResult(nodeId, project.id, result.relativePath)
+    } catch (error) {
+      patchNodeData(nodeId, {
+        generationStatus: 'error',
+        generationError: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  const upscaleVideoNode = async (nodeId: string) => {
+    const project = useAppStore.getState().currentProject
+    const current = nodesRef.current.find((node) => node.id === nodeId)
+    if (!project || !current || current.data.kind !== 'upscale') return
+    const inputCandidates = edgesRef.current
+      .filter((edge) => edge.target === nodeId)
+      .map((edge) => nodesRef.current.find((node) => node.id === edge.source))
+      .filter((source): source is StoryNode => (
+        !!source &&
+        (source.data.kind === 'video' || source.data.kind === 'upscale') &&
+        !!source.data.sourcePath
+      ))
+    const inputNode = inputCandidates.find((source) => source.id === current.data.inputNodeId)
+      ?? inputCandidates[0]
+    if (!inputNode?.data.sourcePath) {
+      patchNodeData(nodeId, { generationStatus: 'error', generationError: '请连接一个已有视频节点作为输入' })
+      return
+    }
+    patchNodeData(nodeId, { generationStatus: 'generating', generationError: '' })
+    try {
+      const result = await window.electronAPI.upscaleVideo({
+        projectId: project.id,
+        nodeId,
+        sourceVideoPath: inputNode.data.sourcePath,
+        scale: UPSCALE_SCALES.find((value) => value === current.data.scale) ?? 2,
+        quality: UPSCALE_QUALITIES.find((value) => value === current.data.quality) ?? 'ULTRA',
+      })
+      if (!result.success || !result.relativePath) {
+        throw new Error(result.error || 'ComfyUI 没有返回放大后的视频')
+      }
+      applyGenerationResult(nodeId, project.id, result.relativePath)
+    } catch (error) {
+      patchNodeData(nodeId, {
+        generationStatus: 'error',
+        generationError: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  useEffect(() => {
+    const unregisterImage = registerNodeKindAction('image', 'generate', (nodeId) => generateImageNode(nodeId))
+    const unregisterVideo = registerNodeKindAction('video', 'generate', (nodeId) => generateVideoNode(nodeId))
+    const unregisterUpscale = registerNodeKindAction('upscale', 'generate', (nodeId) => upscaleVideoNode(nodeId))
+    return () => {
+      unregisterImage()
+      unregisterVideo()
+      unregisterUpscale()
+    }
+    // Handlers only touch stable refs/setters, so registering once is safe.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    if (!currentProject) return
+    return window.electronAPI.onCanvasCommand((command: CanvasCommandRequest) => {
+      if (command.projectId !== currentProject.id) return
+      const respond = (response: Omit<CanvasCommandResponse, 'requestId'>) => {
+        window.electronAPI.sendCanvasCommandResult({ requestId: command.requestId, ...response })
+      }
+      try {
+        const payload = (command.payload && typeof command.payload === 'object'
+          ? command.payload
+          : {}) as Record<string, unknown>
+        const expectedRevision = payload.expectedRevision
+        if (typeof expectedRevision === 'number' && expectedRevision !== revisionRef.current) {
+          throw new Error(`画布版本已变化：期望 ${expectedRevision}，当前 ${revisionRef.current}`)
+        }
+
+        if (command.action === 'get-state') {
+          const selectionOnly = payload.selectionOnly === true
+          const visibleNodes = selectionOnly
+            ? nodesRef.current.filter((node) => node.selected)
+            : nodesRef.current
+          const visibleIds = new Set(visibleNodes.map((node) => node.id))
+          const visibleEdges = selectionOnly
+            ? edgesRef.current.filter((edge) => visibleIds.has(edge.source) || visibleIds.has(edge.target))
+            : edgesRef.current
+          respond({
+            success: true,
+            revision: revisionRef.current,
+            result: {
+              revision: revisionRef.current,
+              nodeCount: visibleNodes.length,
+              edgeCount: visibleEdges.length,
+              nodes: visibleNodes.map((node) => ({
+                ...node,
+                data: {
+                  ...node.data,
+                  preview: typeof node.data.preview === 'string' && node.data.preview.startsWith('data:')
+                    ? '[inline preview omitted]'
+                    : node.data.preview,
+                },
+              })),
+              edges: visibleEdges,
+              viewport: getViewport(),
+            },
+          })
+          return
+        }
+
+        if (command.action === 'get-capabilities') {
+          // Dynamic options (e.g. the live ComfyUI workflow list) are resolved
+          // asynchronously, so this branch responds from an async task.
+          void (async () => {
+            try {
+              const nodeKinds = []
+              for (const descriptor of getNodeCapabilities()) {
+                const fields = []
+                for (const field of descriptor.fields) {
+                  if (!field.dynamicOptions) {
+                    fields.push(field)
+                    continue
+                  }
+                  const options = await resolveDynamicOptions(field).catch(() => [])
+                  const { dynamicOptions: _, ...rest } = field
+                  fields.push({ ...rest, options })
+                }
+                nodeKinds.push({ ...descriptor, fields })
+              }
+              respond({
+                success: true,
+                revision: revisionRef.current,
+                result: { revision: revisionRef.current, nodeKinds },
+              })
+            } catch (error) {
+              respond({
+                success: false,
+                error: error instanceof Error ? error.message : String(error),
+              })
+            }
+          })()
+          return
+        }
+
+        if (command.action === 'invoke-action') {
+          const rawIds = Array.isArray(payload.nodeIds) ? payload.nodeIds : [payload.nodeId]
+          const nodeIds = rawIds
+            .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+          if (nodeIds.length === 0) throw new Error('请提供 nodeId 或 nodeIds')
+          const actionId = String(payload.action ?? '')
+          const params = payload.params && typeof payload.params === 'object'
+            ? payload.params as Record<string, unknown>
+            : undefined
+          const results = nodeIds.map((nodeId) => {
+            const node = nodesRef.current.find((item) => item.id === nodeId)
+            if (!node) return { nodeId, accepted: false as const, error: `找不到节点：${nodeId}` }
+            const actionDescriptor = getNodeCapabilities(node.data.kind)
+              ?.actions.find((item) => item.id === actionId)
+            if (!actionDescriptor) {
+              return { nodeId, accepted: false as const, error: `该节点类型（${node.data.kind}）不支持动作：${actionId || '(未提供 action)'}` }
+            }
+            // Prefer a live per-node handler; fall back to the kind-level
+            // handler, which works even when the node component is unmounted.
+            const nodeHandler = getNodeAction(nodeId, actionId)
+            const kindHandler = getNodeKindAction(node.data.kind, actionId)
+            if (!nodeHandler && !kindHandler) {
+              return { nodeId, accepted: false as const, error: '动作处理器尚未注册（画布未就绪）' }
+            }
+            // Fire-and-forget: async action progress and errors surface through
+            // the node's data (statusField), which the caller polls via get-state.
+            void Promise.resolve(
+              nodeHandler ? nodeHandler(params) : kindHandler!(nodeId, params),
+            ).catch(() => undefined)
+            return {
+              nodeId,
+              accepted: true as const,
+              async: actionDescriptor.async === true,
+              statusField: actionDescriptor.statusField,
+            }
+          })
+          const acceptedCount = results.filter((item) => item.accepted).length
+          respond({
+            success: acceptedCount > 0,
+            revision: revisionRef.current,
+            result: {
+              action: actionId,
+              accepted: acceptedCount,
+              total: nodeIds.length,
+              results,
+            },
+          })
+          return
+        }
+
+        if (command.action === 'create-nodes') {
+          const inputs = Array.isArray(payload.nodes) ? payload.nodes as Record<string, unknown>[] : []
+          if (inputs.length === 0) throw new Error('至少需要创建一个节点')
+          const occupied = new Set(nodesRef.current.map((node) => node.id))
+          const created = inputs.map((input, index) => {
+            const kind = input.kind as StoryNodeKind
+            if (!['shot', 'text', 'image', 'video', 'audio', 'upscale'].includes(kind)) throw new Error(`无效节点类型：${String(kind)}`)
+            const id = typeof input.id === 'string' && input.id.trim()
+              ? input.id.trim()
+              : `${kind}-${Date.now().toString(36)}-${index}-${Math.random().toString(36).slice(2, 7)}`
+            if (occupied.has(id)) throw new Error(`节点 ID 已存在：${id}`)
+            occupied.add(id)
+            const position = input.position && typeof input.position === 'object'
+              ? input.position as { x: number; y: number }
+              : { x: 120 + (nodesRef.current.length + index) * 45, y: 100 + index * 280 }
+            const base = makeNode(kind, nodesRef.current.length + index + 1, position)
+            const data: StoryNodeData = {
+              ...base.data,
+              ...pickMutableNodeData(kind, input),
+              kind,
+              title: typeof input.title === 'string' ? input.title : base.data.title,
+            }
+            if (
+              (kind === 'image' || kind === 'video' || kind === 'audio' || kind === 'upscale') &&
+              data.sourcePath && !data.preview
+            ) {
+              data.preview = `workspace://${currentProject.id}/${data.sourcePath.split('/').map(encodeURIComponent).join('/')}`
+            }
+            return {
+              ...base,
+              id,
+              data,
+            }
+          })
+          nodesRef.current = [...nodesRef.current, ...created]
+          setNodes(nodesRef.current)
+          revisionRef.current += 1
+          respond({ success: true, revision: revisionRef.current, result: { createdNodeIds: created.map((node) => node.id), revision: revisionRef.current } })
+          return
+        }
+
+        if (command.action === 'update-nodes') {
+          const updates = Array.isArray(payload.updates) ? payload.updates as Record<string, unknown>[] : []
+          const ids = new Set(updates.map((update) => String(update.id)))
+          const missing = [...ids].filter((id) => !nodesRef.current.some((node) => node.id === id))
+          if (missing.length > 0) throw new Error(`找不到节点：${missing.join(', ')}`)
+          nodesRef.current = nodesRef.current.map((node) => {
+            const update = updates.find((item) => item.id === node.id)
+            if (!update) return node
+            const position = update.position && typeof update.position === 'object'
+              ? update.position as { x: number; y: number }
+              : node.position
+            const data = { ...node.data, ...pickMutableNodeData(node.data.kind, update), kind: node.data.kind }
+            if (
+              (node.data.kind === 'image' || node.data.kind === 'video' || node.data.kind === 'audio' || node.data.kind === 'upscale') &&
+              typeof update.sourcePath === 'string' && !('preview' in update)
+            ) {
+              data.preview = update.sourcePath
+                ? `workspace://${currentProject.id}/${update.sourcePath.split('/').map(encodeURIComponent).join('/')}`
+                : undefined
+            }
+            return { ...node, position, data }
+          })
+          setNodes(nodesRef.current)
+          revisionRef.current += 1
+          respond({ success: true, revision: revisionRef.current, result: { updatedNodeIds: [...ids], revision: revisionRef.current } })
+          return
+        }
+
+        if (command.action === 'delete-nodes') {
+          const ids = new Set(Array.isArray(payload.nodeIds) ? payload.nodeIds.map(String) : [])
+          const deletedNodeIds = nodesRef.current.filter((node) => ids.has(node.id)).map((node) => node.id)
+          nodesRef.current = nodesRef.current.filter((node) => !ids.has(node.id))
+          edgesRef.current = edgesRef.current.filter((edge) => !ids.has(edge.source) && !ids.has(edge.target))
+          setNodes(nodesRef.current)
+          setEdges(edgesRef.current)
+          for (const nodeId of deletedNodeIds) {
+            useAppStore.getState().removeCanvasNodeReference(nodeId)
+          }
+          revisionRef.current += 1
+          respond({ success: true, revision: revisionRef.current, result: { deletedNodeIds, revision: revisionRef.current } })
+          return
+        }
+
+        if (command.action === 'connect-nodes') {
+          const connections = Array.isArray(payload.connections) ? payload.connections as { source: string; target: string }[] : []
+          const nodeIds = new Set(nodesRef.current.map((node) => node.id))
+          const createdEdgeIds: string[] = []
+          for (const connection of connections) {
+            if (!nodeIds.has(connection.source) || !nodeIds.has(connection.target)) {
+              throw new Error(`连接包含不存在的节点：${connection.source} → ${connection.target}`)
+            }
+            if (connection.source === connection.target) throw new Error('不能连接节点自身')
+            if (edgesRef.current.some((edge) => edge.source === connection.source && edge.target === connection.target)) continue
+            const id = `edge-${connection.source}-${connection.target}-${Date.now().toString(36)}`
+            edgesRef.current = [...edgesRef.current, makeLinkedEdge(id, connection.source, connection.target)]
+            createdEdgeIds.push(id)
+          }
+          setEdges(edgesRef.current)
+          revisionRef.current += 1
+          respond({ success: true, revision: revisionRef.current, result: { createdEdgeIds, revision: revisionRef.current } })
+          return
+        }
+
+        if (command.action === 'disconnect-edges') {
+          const ids = new Set(Array.isArray(payload.edgeIds) ? payload.edgeIds.map(String) : [])
+          const deletedEdgeIds = edgesRef.current.filter((edge) => ids.has(edge.id)).map((edge) => edge.id)
+          edgesRef.current = edgesRef.current.filter((edge) => !ids.has(edge.id))
+          setEdges(edgesRef.current)
+          revisionRef.current += 1
+          respond({ success: true, revision: revisionRef.current, result: { deletedEdgeIds, revision: revisionRef.current } })
+          return
+        }
+
+        throw new Error(`不支持的画布命令：${command.action}`)
+      } catch (error) {
+        respond({ success: false, revision: revisionRef.current, error: error instanceof Error ? error.message : String(error) })
+      }
+    })
+  }, [currentProject, getViewport, setEdges, setNodes])
 
   useEffect(() => {
     if (!folderPath || loadedFolderRef.current === folderPath) return
     loadedFolderRef.current = folderPath
     readyToSaveRef.current = false
+    nodesRef.current = []
+    edgesRef.current = []
+    revisionRef.current = 0
     setNodes([])
     setEdges([])
     setDismissedArtifacts({})
@@ -1047,12 +1569,20 @@ function CanvasFlow() {
     void window.electronAPI.loadCanvasSnapshot(folderPath)
       .then((snapshot: unknown) => {
         if (isFlowSnapshot(snapshot)) {
-          setNodes(snapshot.nodes.map((node) => node.data.generationStatus === 'generating'
-            ? { ...node, data: { ...node.data, generationStatus: 'idle', generationError: '' } }
-            : node))
-          setEdges(snapshot.edges.map((edge) => ({ ...edge, type: 'default' as const })))
-          setDismissedArtifacts(snapshot.dismissedArtifacts ?? {})
-          void setViewport(snapshot.viewport ?? DEFAULT_VIEWPORT)
+          const migrated = migrateLegacySnapshot(snapshot)
+          const restoredNodes = migrated.nodes.map<StoryNode>((node) => {
+            const currentNode = simplifyShotNode(node)
+            return currentNode.data.generationStatus === 'generating'
+              ? { ...currentNode, data: { ...currentNode.data, generationStatus: 'idle' as const, generationError: '' } }
+              : currentNode
+          })
+          const restoredEdges = migrated.edges.map((edge) => ({ ...edge, type: 'default' as const }))
+          nodesRef.current = restoredNodes
+          edgesRef.current = restoredEdges
+          setNodes(restoredNodes)
+          setEdges(restoredEdges)
+          setDismissedArtifacts(migrated.dismissedArtifacts ?? {})
+          void setViewport(migrated.viewport ?? DEFAULT_VIEWPORT)
         } else {
           void setViewport(DEFAULT_VIEWPORT)
         }
@@ -1067,7 +1597,7 @@ function CanvasFlow() {
     saveTimeoutRef.current = setTimeout(() => {
       const snapshot: FlowSnapshot = {
         type: 'react-flow',
-        version: 1,
+        version: 2,
         nodes,
         edges,
         viewport: getViewport(),
@@ -1083,77 +1613,76 @@ function CanvasFlow() {
     if (!readyToSaveRef.current || artifacts.length === 0) return
     const additions: StoryNode[] = []
     const linkedEdges: StoryEdge[] = []
-    const dataUpdates = new Map<string, StoryNodeData>()
 
     for (const artifact of artifacts) {
       if ((dismissedArtifacts[artifact.id] ?? -1) >= artifact.timestamp) continue
       const matchingArtifactNodes = nodes.filter((node) => node.data.artifactId === artifact.id)
-      const existingArtifactNode = matchingArtifactNodes.find((node) => node.data.kind === 'storyboard') ?? matchingArtifactNodes[0]
+      const existingArtifactNode = matchingArtifactNodes[0]
       const sequence = nodes.length + additions.length + 1
 
       if (artifact.type === 'storyboard') {
+        if (existingArtifactNode) continue
         const shots = parseStoryboard(artifact.content)
         const originY = 80 + Math.floor(sequence / 2) * 80
-        const boardNode: StoryNode = existingArtifactNode?.data.kind === 'storyboard'
-          ? existingArtifactNode
-          : {
-              ...makeNode('storyboard', sequence, { x: 80, y: originY }),
-              data: {
-                kind: 'storyboard',
-                title: artifact.title,
-                prompt: '',
-                artifactId: artifact.id,
-                shots,
-              },
-            }
-        if (existingArtifactNode?.data.kind !== 'storyboard') {
-          additions.push(boardNode)
-        } else {
-          const nextData: StoryNodeData = { ...boardNode.data, title: artifact.title, shots }
-          if (JSON.stringify(boardNode.data.shots) !== JSON.stringify(shots) || boardNode.data.title !== artifact.title) {
-            dataUpdates.set(boardNode.id, nextData)
-          }
-        }
-
         shots.forEach((shot, shotOffset) => {
-          const imageId = `${boardNode.id}-shot-${shot.index}-image`
-          const videoId = `${boardNode.id}-shot-${shot.index}-video`
+          const shotId = `${artifact.id}-shot-${shot.index}`
+          const imageId = `${shotId}-image`
+          const videoId = `${shotId}-video`
+          const shotNode: StoryNode = {
+            ...makeNode('shot', shot.index, { x: 100, y: originY + shotOffset * 330 }),
+            id: shotId,
+            data: {
+              kind: 'shot',
+              title: `镜头 ${shot.index}`,
+              shotNumber: shot.index,
+              scene: shot.scene,
+              artifactId: artifact.id,
+            },
+          }
           const existingImage = nodes.find((node) => node.id === imageId)
           const existingVideo = nodes.find((node) => node.id === videoId)
           const imageNode: StoryNode = {
-            ...makeNode('image', shot.index, { x: 800, y: originY + shotOffset * 330 }),
+            ...makeNode('image', shot.index, { x: 560, y: originY + shotOffset * 330 }),
             id: imageId,
             data: {
               kind: 'image',
               title: `镜头 ${shot.index} · 图片`,
               prompt: shot.textToImagePrompt || shot.scene,
-              shotIndex: shot.index,
               aspectRatio: '16:9',
+              sourcePath: shot.imageSource,
+              sourceHistory: shot.imageSourceHistory,
+              preview: shot.imageSource && currentProject
+                ? `workspace://${currentProject.id}/${shot.imageSource.split('/').map(encodeURIComponent).join('/')}`
+                : undefined,
             },
           }
           const videoNode: StoryNode = {
-            ...makeNode('video', shot.index, { x: 1320, y: originY + shotOffset * 330 }),
+            ...makeNode('video', shot.index, { x: 1080, y: originY + shotOffset * 330 }),
             id: videoId,
             data: {
               kind: 'video',
               title: `镜头 ${shot.index} · 视频`,
               prompt: shot.imageToVideoPrompt || shot.camera || '',
-              shotIndex: shot.index,
               aspectRatio: '16:9',
               duration: ([5, 10, 15] as const).includes(shot.duration as 5 | 10 | 15) ? shot.duration : 5,
+              sourcePath: shot.videoSource,
+              sourceHistory: shot.videoSourceHistory,
+              preview: shot.videoSource && currentProject
+                ? `workspace://${currentProject.id}/${shot.videoSource.split('/').map(encodeURIComponent).join('/')}`
+                : undefined,
             },
           }
+          additions.push(shotNode)
           if (!existingImage) additions.push(imageNode)
           if (!existingVideo) additions.push(videoNode)
           linkedEdges.push(
             makeLinkedEdge(
-              `${boardNode.id}-shot-${shot.index}-to-image`,
-              boardNode.id,
+              `${shotId}-to-image`,
+              shotId,
               imageNode.id,
-              `shot-${shot.index}`,
             ),
             makeLinkedEdge(
-              `${boardNode.id}-shot-${shot.index}-image-to-video`,
+              `${shotId}-image-to-video`,
               imageNode.id,
               videoNode.id,
             ),
@@ -1182,11 +1711,8 @@ function CanvasFlow() {
       })
     }
 
-    if (additions.length > 0 || dataUpdates.size > 0) {
-      setNodes((current) => [
-        ...current.map((node) => dataUpdates.has(node.id) ? { ...node, data: dataUpdates.get(node.id)! } : node),
-        ...additions,
-      ])
+    if (additions.length > 0) {
+      setNodes((current) => [...current, ...additions])
     }
     if (linkedEdges.length > 0) {
       setEdges((current) => {
@@ -1206,24 +1732,9 @@ function CanvasFlow() {
       return
     }
 
-    for (const node of nodes) {
-      if (removedIds.has(node.id) && node.data.kind === 'storyboard') {
-        const childPrefix = `${node.id}-shot-`
-        for (const candidate of nodes) {
-          if (candidate.id.startsWith(childPrefix)) removedIds.add(candidate.id)
-        }
-      }
+    for (const nodeId of removedIds) {
+      useAppStore.getState().removeCanvasNodeReference(nodeId)
     }
-
-    const explicitRemovedIds = new Set(
-      changes.filter((change) => change.type === 'remove').map((change) => change.id),
-    )
-    const expandedChanges: NodeChange<StoryNode>[] = [
-      ...changes,
-      ...[...removedIds]
-        .filter((id) => !explicitRemovedIds.has(id))
-        .map((id) => ({ type: 'remove' as const, id })),
-    ]
 
     const removedArtifacts = nodes
       .filter((node) => removedIds.has(node.id) && node.data.artifactId)
@@ -1239,7 +1750,7 @@ function CanvasFlow() {
       })
     }
 
-    onNodesChange(expandedChanges)
+    onNodesChange(changes)
     setEdges((current) => current.filter((edge) => !removedIds.has(edge.source) && !removedIds.has(edge.target)))
   }, [artifacts, nodes, onNodesChange, setEdges])
 
@@ -1293,15 +1804,15 @@ function CanvasFlow() {
         </svg>
       </button>
       <div className="mx-1 h-5 w-px bg-white/10" />
-      {(['text', 'image', 'video', 'audio'] as StoryNodeKind[]).map((kind) => (
+      {(['shot', 'text', 'image', 'video', 'audio', 'upscale'] as StoryNodeKind[]).map((kind) => (
         <button
           key={kind}
           onClick={() => addNode(kind)}
           className="flex items-center gap-2 rounded-xl px-3 py-2 text-[11px] text-white/60 transition hover:bg-white/[0.08] hover:text-white"
-          title={`添加${kind === 'image' ? '图片' : kind === 'video' ? '视频' : kind === 'audio' ? '音频' : '文本'}节点`}
+          title={`添加${KIND_LABELS[kind]}节点`}
         >
           {nodeIcon(kind)}
-          {kind === 'image' ? '图片' : kind === 'video' ? '视频' : kind === 'audio' ? '音频' : '文本'}
+          {KIND_LABELS[kind]}
         </button>
       ))}
       <div className="mx-1 h-5 w-px bg-white/10" />
@@ -1340,7 +1851,7 @@ function CanvasFlow() {
           position="bottom-right"
           pannable
           zoomable
-          nodeColor={(node) => node.data.kind === 'image' ? '#8b7355' : node.data.kind === 'video' ? '#566b7f' : node.data.kind === 'audio' ? '#7f6656' : '#67636e'}
+          nodeColor={(node) => node.data.kind === 'image' ? '#8b7355' : node.data.kind === 'video' ? '#566b7f' : node.data.kind === 'audio' ? '#7f6656' : node.data.kind === 'upscale' ? '#4f7f74' : '#67636e'}
           maskColor="rgba(5,5,8,0.72)"
         />
       </ReactFlow>
@@ -1349,7 +1860,7 @@ function CanvasFlow() {
           <div className="mb-20 text-center">
             <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border border-[#d4af37]/20 bg-[#d4af37]/[0.06] text-2xl text-[#e8c766]">✦</div>
             <p className="mt-4 text-sm tracking-[0.2em] text-white/65">创建你的第一个分镜节点</p>
-            <p className="mt-2 text-xs text-white/30">从下方添加文本、图片、视频或音频节点</p>
+            <p className="mt-2 text-xs text-white/30">从下方添加镜头、文本、图片、视频或音频节点</p>
           </div>
         </div>
       )}

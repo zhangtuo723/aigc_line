@@ -30,7 +30,7 @@ export interface Attachment {
 }
 
 // Tool call tracking
-export type ToolStatus = 'running' | 'completed' | 'error';
+export type ToolStatus = 'running' | 'completed' | 'error' | 'interrupted';
 
 export interface ToolCall {
   id: string;
@@ -43,9 +43,10 @@ export interface ToolCall {
 }
 
 // Artifact types
+/** `storyboard` remains only so older chat histories can be imported into shot nodes. */
 export type ArtifactType = 'markdown' | 'html' | 'image' | 'storyboard';
 
-/** One shot in a short-drama storyboard (stored as a `.storyboard.json` array) */
+/** Legacy storyboard import shape. New projects store this data directly on canvas nodes. */
 export interface StoryboardShot {
   index: number; // 镜号
   duration: number; // 时长（秒）
@@ -65,7 +66,7 @@ export interface Artifact {
   type: ArtifactType;
   title: string;
   content: string;
-  /** Workspace-relative source file path (for storyboard artifacts, edits are saved back to it) */
+  /** Workspace-relative source file path. */
   path?: string;
   width: number;
   height: number;
@@ -81,6 +82,10 @@ export interface ChatMessage {
   attachments?: Attachment[];
   /** Canvas artifacts the user referenced (clicked) for this message */
   artifactRefs?: ArtifactRef[];
+  /** Live canvas nodes the user explicitly attached to this message */
+  nodeRefs?: CanvasNodeRef[];
+  /** Persistent UI event marking that Claude started with empty context here. */
+  event?: 'context-cleared';
   // For tool call messages
   toolCall?: ToolCall;
   // For artifact messages
@@ -94,6 +99,112 @@ export interface ArtifactRef {
   type: ArtifactType;
   /** Workspace-relative source file path, if the artifact has one */
   path?: string;
+}
+
+export interface ClearAgentContextResult {
+  success: boolean;
+  error?: string;
+}
+
+export type AvailableSkillSource = 'builtin' | 'project' | 'user' | 'sdk';
+
+export interface AvailableSkill {
+  /** Invocation name without the leading slash. */
+  name: string;
+  description: string;
+  argumentHint?: string;
+  source: AvailableSkillSource;
+}
+
+/** A stable pointer to a live canvas node. Its current data is read by the Agent. */
+export interface CanvasNodeRef {
+  id: string;
+  title: string;
+  kind: CanvasNodeKind;
+}
+
+// Live canvas bridge used by the Agent's Canvas MCP tools.
+export type CanvasNodeKind = 'shot' | 'text' | 'image' | 'video' | 'audio' | 'upscale';
+
+export interface CanvasPoint {
+  x: number;
+  y: number;
+}
+
+export interface CanvasNodeData extends Record<string, unknown> {
+  kind: CanvasNodeKind;
+  title: string;
+  prompt?: string;
+  shotNumber?: number;
+  scene?: string;
+  preview?: string;
+  artifactId?: string;
+  aspectRatio?: ImageAspectRatio;
+  sourcePath?: string;
+  sourceHistory?: string[];
+  workflowId?: string;
+  duration?: number;
+  firstFrameNodeId?: string;
+  lastFrameNodeId?: string;
+  referenceImageNodeIds?: string[];
+  referenceVideoNodeIds?: string[];
+  referenceAudioNodeIds?: string[];
+  inputNodeId?: string;
+  scale?: number;
+  quality?: string;
+  generationStatus?: 'idle' | 'generating' | 'error';
+  generationError?: string;
+}
+
+export interface CanvasNodeSnapshot {
+  id: string;
+  type: 'storyNode';
+  position: CanvasPoint;
+  selected?: boolean;
+  data: CanvasNodeData;
+}
+
+export interface CanvasEdgeSnapshot {
+  id: string;
+  source: string;
+  target: string;
+  sourceHandle?: string | null;
+  targetHandle?: string | null;
+  selected?: boolean;
+}
+
+export interface CanvasStateSnapshot {
+  revision: number;
+  nodeCount: number;
+  edgeCount: number;
+  nodes: CanvasNodeSnapshot[];
+  edges: CanvasEdgeSnapshot[];
+  viewport: { x: number; y: number; zoom: number };
+}
+
+export type CanvasCommandAction =
+  | 'get-state'
+  | 'get-capabilities'
+  | 'create-nodes'
+  | 'update-nodes'
+  | 'delete-nodes'
+  | 'connect-nodes'
+  | 'disconnect-edges'
+  | 'invoke-action';
+
+export interface CanvasCommandRequest {
+  requestId: string;
+  projectId: string;
+  action: CanvasCommandAction;
+  payload: unknown;
+}
+
+export interface CanvasCommandResponse {
+  requestId: string;
+  success: boolean;
+  revision?: number;
+  result?: unknown;
+  error?: string;
 }
 
 // ComfyUI image generation
@@ -159,6 +270,22 @@ export interface GenerateVideoRequest {
 }
 
 export interface GenerateVideoResult {
+  success: boolean;
+  relativePath?: string;
+  promptId?: string;
+  error?: string;
+}
+
+// ComfyUI video upscale (RTX Video Super Resolution)
+export interface UpscaleVideoRequest {
+  projectId: string;
+  nodeId: string;
+  sourceVideoPath: string;
+  scale?: number;
+  quality?: string;
+}
+
+export interface UpscaleVideoResult {
   success: boolean;
   relativePath?: string;
   promptId?: string;

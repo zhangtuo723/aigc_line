@@ -1,0 +1,4 @@
+interface:
+  display_name: "剪映草稿"
+  short_description: "用 Python 脚本生成剪映草稿，实现自动化视频剪辑"
+  default_prompt: "用 pyJianYingDraft 帮我生成一个剪映草稿"

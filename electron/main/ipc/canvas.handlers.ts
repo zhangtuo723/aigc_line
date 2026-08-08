@@ -2,8 +2,14 @@ import { ipcMain } from 'electron';
 import { IPC_CHANNELS } from '../../../src/shared/ipc.channels';
 import * as projectStore from '../services/project.store';
 import log from 'electron-log/main';
+import type { CanvasCommandResponse } from '../../../src/shared/ipc.types';
+import { resolveCanvasCommand } from '../services/agent/canvas-bridge';
 
 export function registerCanvasHandlers(): void {
+  ipcMain.on(
+    IPC_CHANNELS.canvas.commandResult,
+    (_event, response: CanvasCommandResponse) => resolveCanvasCommand(response),
+  );
   // Save canvas snapshot to project folder
   ipcMain.handle(
     IPC_CHANNELS.canvas.save,
