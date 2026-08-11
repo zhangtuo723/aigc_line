@@ -14,6 +14,8 @@ import {
   listComfyWorkflows,
   upscaleVideoWithComfyUI,
 } from '../services/comfyui.service'
+import { generateImageWithGoogle, isGoogleImageWorkflow } from '../services/google-image.service'
+import { getRuntimeSettings } from '../services/settings.service'
 
 export function registerComfyUIHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.comfyui.listWorkflows, () => listComfyWorkflows())
@@ -21,7 +23,11 @@ export function registerComfyUIHandlers(): void {
     IPC_CHANNELS.comfyui.generateImage,
     async (_event, request: GenerateImageRequest): Promise<GenerateImageResult> => {
       try {
-        return await generateImageWithComfyUI(request)
+        const workflowId = request.workflowId || (await getRuntimeSettings()).defaultImageWorkflowId
+        const resolvedRequest = { ...request, workflowId }
+        return isGoogleImageWorkflow(workflowId)
+          ? await generateImageWithGoogle(resolvedRequest)
+          : await generateImageWithComfyUI(resolvedRequest)
       } catch (error) {
         return {
           success: false,

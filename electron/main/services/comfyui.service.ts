@@ -13,6 +13,7 @@ import type {
 } from '../../../src/shared/ipc.types'
 import { loadProject } from './project.store'
 import { getRuntimeSettings } from './settings.service'
+import { GOOGLE_IMAGE_MODELS } from './google-image.service'
 
 type WorkflowNode = {
   class_type: string
@@ -116,7 +117,12 @@ const VIDEO_WORKFLOWS: VideoWorkflowTemplate[] = [
 
 export const listComfyWorkflows = async (): Promise<ComfyWorkflowInfo[]> => {
   const { defaultImageWorkflowId } = await getRuntimeSettings()
-  return [...WORKFLOW_TEMPLATES, ...VIDEO_WORKFLOWS]
+  const googleImageWorkflows: ComfyWorkflowInfo[] = GOOGLE_IMAGE_MODELS.map(({ id, name }) => ({
+    id,
+    name,
+    kind: 'text-to-image',
+  }))
+  return [...WORKFLOW_TEMPLATES, ...googleImageWorkflows, ...VIDEO_WORKFLOWS]
     .sort((a, b) => Number(b.id === defaultImageWorkflowId) - Number(a.id === defaultImageWorkflowId))
     .map(({ id, name, kind }) => ({ id, name, kind }))
 }

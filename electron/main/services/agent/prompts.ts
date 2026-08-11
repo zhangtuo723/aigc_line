@@ -13,7 +13,7 @@ export function buildUserPrompt(userMessage: ChatMessage, folderPath: string): s
     const refLines = userMessage.nodeRefs
       .map((ref) => `- nodeId=${JSON.stringify(ref.id)} title=${JSON.stringify(ref.title)} kind=${ref.kind}`)
       .join('\n');
-    contextBlocks.push(`用户把以下实时画布节点添加到了本轮对话。它们是本轮修改或讨论的明确对象：\n${refLines}\n\n处理规则：先调用 GetCanvasState 读取节点的最新数据和 revision；修改时使用上述精确 nodeId 调用 UpdateCanvasNodes，并传入最新 revision 作为 expectedRevision。除非用户明确要求，不要把它们替换成新节点，也不要修改未引用的节点。`);
+    contextBlocks.push(`用户把以下实时画布节点添加到了本轮对话。它们是本轮修改或讨论的明确对象：\n${refLines}\n\n处理规则：直接用上述精确 nodeId 调用 GetCanvasNode 读取节点的完整最新数据，不要先读取全画布概览；修改时使用相同 nodeId 调用 UpdateCanvasNodes。画布写入采用最后写入者生效，不需要传版本号。除非用户明确要求，不要把它们替换成新节点，也不要修改未引用的节点。`);
   }
 
   if (userMessage.artifactRefs && userMessage.artifactRefs.length > 0) {
@@ -61,7 +61,9 @@ export function buildSystemPromptAppend(folderPath: string): string {
 
 当 HTML artifact 需要引用工作目录内的文件时（上传的图片、生成的素材、数据文件等），请使用相对于工作目录根目录的相对路径，例如 src="uploads/photo.png" 或 href="./assets/style.css"——渲染时会自动解析。不要把大体积资源以 base64 data URL 的形式内联到代码里。
 
-你具备 AIGC 短剧分镜创作能力，并且可以通过 Canvas 工具直接读取和修改实时画布。涉及画布时先调用 GetCanvasState，使用返回的 revision 作为后续修改的 expectedRevision；如果版本冲突，重新读取后再操作。
+你具备 AIGC 短剧分镜创作能力，并且可以通过 Canvas 工具直接读取和修改实时画布。需要了解画布规模或查找节点 ID 时调用 GetCanvasOverview，它只返回轻量摘要；需要某个节点的 prompt、媒体路径、生成状态、引用或连接详情时，用精确 nodeId 调用 GetCanvasNode。用户已经引用节点时直接读取该节点，不要先获取全画布概览。画布写入采用最后写入者生效，不要传版本号。
+
+审核分镜视频时，只需用对应 shot 节点 ID 调用 ReviewStoryboardVideo；工具会沿画布连线自动查找 video、原始提示词、参考图和媒体路径（也接受 image/video 节点 ID）。工具直接返回 Markdown 纯文本，包含九个独立维度的分数、时间戳证据、问题和修改建议，不返回结构化数据、不计算总分，也不判定通过或重做。你必须结合剧情重要性、问题可见程度、修改成本和用户要求，自行决定接受、局部修复提示词或重新生成，并说明依据。
 
 当用户要求创作短剧、编写分镜或拆分镜头时，不要创建 .storyboard.json 或分镜表 artifact。直接批量创建以下节点：
 1. 每个镜头创建一个精简的 shot 节点，只保存 shotNumber 和 scene；scene 用于概括该镜头的剧情/画面内容。不要把提示词、时长、台词旁白或运镜参数放在 shot 节点。

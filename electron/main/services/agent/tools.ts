@@ -3,11 +3,12 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { z } from 'zod';
 import log from 'electron-log/main';
-import type { Artifact, ChatMessage } from '../../../../src/shared/ipc.types';
+import type { Artifact, CanvasStateSnapshot, ChatMessage } from '../../../../src/shared/ipc.types';
 import { messageHub } from '../message-hub';
 import { appendChatMessage } from '../project.store';
 import { pushArtifact } from './artifact';
 import { sendCanvasCommand } from './canvas-bridge';
+import { resolveVideoReviewRequest, reviewVideoWithQwen } from '../qwen-video-review.service';
 
 /** Image extensions -> MIME types supported as image artifacts */
 const IMAGE_MIME: Record<string, string> = {
@@ -61,10 +62,16 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
     instructions: 'Tools for reading and editing the live canvas and pushing file artifacts',
     tools: [
       tool(
-        'GetCanvasState',
-        'Read the live canvas state, including node/edge counts and data. Use selectionOnly to inspect only nodes selected by the user.',
-        { selectionOnly: z.boolean().optional() },
-        (args) => canvasResult('get-state', args),
+        'GetCanvasOverview',
+        'Read a compact overview of the live canvas: node/edge counts, counts by kind and generation status, plus each node id, kind, title, generation status and output availability. It omits revisions, prompts, media paths, positions and full edge data to keep context small.',
+        {},
+        () => canvasResult('get-overview', {}),
+      ),
+      tool(
+        'GetCanvasNode',
+        'Read one live canvas node by exact id with its complete data, position, and compact incoming/outgoing connection summaries. Use this when you need prompts, media paths, generation errors, reference ids or other details. If the user attached a node to the conversation, call this directly with that node id instead of reading the canvas overview first.',
+        { nodeId: z.string().min(1) },
+        (args) => canvasResult('get-node', args),
       ),
       tool(
         'GetCanvasCapabilities',
@@ -74,7 +81,7 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
       ),
       tool(
         'InvokeNodeAction',
-        'Trigger an action exposed by canvas nodes, e.g. "generate" on image/video nodes (use GetCanvasCapabilities to discover actions). Pass nodeIds to run the action on many nodes at once (batch generation). Async actions are acknowledged immediately and return a statusField per node; poll GetCanvasState until that field leaves the busy state (idle or error), then read sourcePath for the result.',
+        'Trigger an action exposed by canvas nodes, e.g. "generate" on image/video nodes (use GetCanvasCapabilities to discover actions). Pass nodeIds to run the action on many nodes at once (batch generation). Async actions are acknowledged immediately and return a statusField per node; poll each target with GetCanvasNode until that field leaves the busy state (idle or error), then read sourcePath for the result.',
         {
           nodeId: z.string().optional(),
           nodeIds: z.array(z.string()).min(1).optional(),
@@ -85,7 +92,7 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
       ),
       tool(
         'CreateCanvasNodes',
-        'Create one or more live canvas nodes. A shot node only stores its number and concise scene/content; generation prompts and timing belong to image/video nodes. Normally connect a shot to an image node, then connect the image node to a video node. Only fields registered for the node kind are applied; call GetCanvasCapabilities to discover them.',
+        'Create one or more live canvas nodes. A shot node only stores its number and concise scene/content; generation prompts and timing belong to image/video nodes. Normally connect a shot to an image node, then connect the image node to a video node. Only fields registered for the node kind are applied; call GetCanvasCapabilities to discover them. Canvas writes use last-write-wins and do not accept a revision precondition.',
         {
           nodes: z.array(z.object({
             id: z.string().optional(),
@@ -93,20 +100,18 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
             position: positionSchema.optional(),
             ...nodeFields,
           })).min(1),
-          expectedRevision: z.number().int().nonnegative().optional(),
         },
         (args) => canvasResult('create-nodes', args),
       ),
       tool(
         'UpdateCanvasNodes',
-        'Patch existing live canvas nodes by id. Only supplied fields are changed; kind cannot be changed. Writable fields, allowed values and dynamic options (e.g. workflowId choices such as the generation model) are node-kind specific and validated against the canvas capability registry; call GetCanvasCapabilities first to discover them.',
+        'Patch existing live canvas nodes by id. Only supplied fields are changed; kind cannot be changed. Writable fields, allowed values and dynamic options (e.g. workflowId choices such as the generation model) are node-kind specific and validated against the canvas capability registry; call GetCanvasCapabilities first to discover them. Canvas writes use last-write-wins and do not accept a revision precondition.',
         {
           updates: z.array(z.object({
             id: z.string(),
             position: positionSchema.optional(),
             ...nodeFields,
           })).min(1),
-          expectedRevision: z.number().int().nonnegative().optional(),
         },
         (args) => canvasResult('update-nodes', args),
       ),
@@ -115,7 +120,6 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
         'Delete canvas nodes by id. All edges attached to deleted nodes are removed automatically.',
         {
           nodeIds: z.array(z.string()).min(1),
-          expectedRevision: z.number().int().nonnegative().optional(),
         },
         (args) => canvasResult('delete-nodes', args),
       ),
@@ -127,7 +131,6 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
             source: z.string(),
             target: z.string(),
           })).min(1),
-          expectedRevision: z.number().int().nonnegative().optional(),
         },
         (args) => canvasResult('connect-nodes', args),
       ),
@@ -136,9 +139,38 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
         'Remove canvas connections by edge id.',
         {
           edgeIds: z.array(z.string()).min(1),
-          expectedRevision: z.number().int().nonnegative().optional(),
         },
         (args) => canvasResult('disconnect-edges', args),
+      ),
+      tool(
+        'ReviewStoryboardVideo',
+        'Review one shot with qwen3.5-omni-plus. Pass only one canvas node id (normally the shot id; image or video id is also accepted). The tool follows canvas connections to resolve the generated video, original prompt, related shot, and ordered reference images. It returns a plain-text Markdown review with nine independent scores, timestamped evidence, findings, and recommendations. It does not return structured data, calculate an overall score, or decide whether to accept, repair, or regenerate.',
+        {
+          nodeId: z.string().min(1).describe('Exact canvas shot node id; a connected image or video node id is also accepted'),
+        },
+        async (args) => {
+          log.info('[ReviewStoryboardVideo] Reviewing node:', args.nodeId);
+          try {
+            const canvasResponse = await sendCanvasCommand(projectId, 'get-state', {});
+            const state = canvasResponse.result as CanvasStateSnapshot;
+            if (!state?.nodes || !state?.edges) throw new Error('无法读取实时画布状态');
+            const request = resolveVideoReviewRequest(state, args.nodeId);
+            const result = await reviewVideoWithQwen(folderPath, request);
+            return {
+              content: [{
+                type: 'text',
+                text: `${result.reviewText}\n\n---\n审核报告已保存：${result.reportPath}`,
+              }],
+            } as any;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            log.error('[ReviewStoryboardVideo] Failed:', message);
+            return {
+              content: [{ type: 'text', text: message }],
+              isError: true,
+            } as any;
+          }
+        },
       ),
       tool(
         'PushArtifact',

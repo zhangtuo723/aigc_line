@@ -43,6 +43,7 @@ import {
   resolveDynamicOptions,
   validateNodeFieldValue,
 } from '../shared/node-capabilities'
+import { buildCanvasNodeDetail, buildCanvasOverview } from '../shared/canvas-read-model'
 import './canvas-capabilities'
 
 type StoryNodeKind = CanvasNodeKind
@@ -347,7 +348,7 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
             <button
               onClick={() => setWorkflowMenuOpen((open) => !open)}
               className={`flex max-w-[190px] items-center gap-1.5 rounded-full border px-2.5 py-1 transition ${workflowMenuOpen ? 'border-[#d4af37]/45 bg-[#d4af37]/10 text-[#f0d98c]' : 'border-white/[0.06] bg-white/[0.05] text-white/48 hover:text-white/75'}`}
-              title="选择 ComfyUI 工作流"
+              title={kind === 'image' ? '选择图片生成模型' : '选择 ComfyUI 工作流'}
             >
               <span className="truncate">
                 {selectedWorkflow?.name ?? (kind === 'video' ? '视频工作流待配置' : '加载工作流…')}
@@ -369,7 +370,7 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
                   >
                     <span className="min-w-0 flex-1 truncate">{workflow.name}</span>
                     <span className="flex-shrink-0 rounded bg-white/[0.06] px-1.5 py-0.5 text-[8px] text-white/35">
-                      {workflow.id === 'minimax-h3-r2v' ? '全模态' : workflow.kind === 'image-to-video' ? '视频' : workflow.kind === 'image-to-image' ? '图生图' : '文生图'}
+                      {workflow.id.startsWith('google-') ? 'Google · 文/图' : workflow.id === 'minimax-h3-r2v' ? '全模态' : workflow.kind === 'image-to-video' ? '视频' : workflow.kind === 'image-to-image' ? '图生图' : '文生图'}
                     </span>
                   </button>
                 ))}
@@ -689,7 +690,7 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
           onClick={() => void getNodeKindAction(kind, 'generate')?.(id)}
           disabled={generationState === 'generating' || !selectedWorkflow}
           className="flex h-9 min-w-[72px] items-center justify-center gap-2 rounded-xl bg-[#e8e6df] px-4 text-[11px] font-semibold tracking-wider text-[#17171b] shadow-[0_5px_18px_rgba(255,255,255,0.08)] transition hover:bg-white hover:shadow-[0_7px_22px_rgba(255,255,255,0.13)] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-45"
-          title={kind === 'image' ? '使用 ComfyUI 生成图片' : '使用 MiniMax H3 生成视频'}
+          title={kind === 'image' ? '使用所选模型生成图片' : '使用 MiniMax H3 生成视频'}
         >
           {generationState === 'generating' ? (
             <>
@@ -1004,7 +1005,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
             {data.generationStatus === 'generating' && (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-[#101014]/75 text-[#e8c766] backdrop-blur-[2px]">
                 <span className="h-7 w-7 animate-spin rounded-full border-2 border-[#e8c766]/20 border-t-[#e8c766]" />
-                <span className="text-[11px] tracking-wider">ComfyUI 生成中</span>
+                <span className="text-[11px] tracking-wider">{data.kind === 'image' ? '图片生成中' : '视频生成中'}</span>
               </div>
             )}
           </div>
@@ -1166,7 +1167,7 @@ function CanvasFlow() {
         referenceImagePath,
       })
       if (!result.success || !result.relativePath) {
-        throw new Error(result.error || 'ComfyUI 没有返回图片')
+        throw new Error(result.error || '图片生成服务没有返回图片')
       }
       applyGenerationResult(nodeId, project.id, result.relativePath)
     } catch (error) {
@@ -1313,9 +1314,21 @@ function CanvasFlow() {
         const payload = (command.payload && typeof command.payload === 'object'
           ? command.payload
           : {}) as Record<string, unknown>
-        const expectedRevision = payload.expectedRevision
-        if (typeof expectedRevision === 'number' && expectedRevision !== revisionRef.current) {
-          throw new Error(`画布版本已变化：期望 ${expectedRevision}，当前 ${revisionRef.current}`)
+        if (command.action === 'get-overview') {
+          respond({
+            success: true,
+            result: buildCanvasOverview(nodesRef.current, edgesRef.current),
+          })
+          return
+        }
+
+        if (command.action === 'get-node') {
+          const nodeId = typeof payload.nodeId === 'string' ? payload.nodeId.trim() : ''
+          if (!nodeId) throw new Error('请提供 nodeId')
+          const detail = buildCanvasNodeDetail(nodesRef.current, edgesRef.current, nodeId)
+          if (!detail) throw new Error(`找不到节点：${nodeId}`)
+          respond({ success: true, result: detail })
+          return
         }
 
         if (command.action === 'get-state') {
@@ -1371,8 +1384,7 @@ function CanvasFlow() {
               }
               respond({
                 success: true,
-                revision: revisionRef.current,
-                result: { revision: revisionRef.current, nodeKinds },
+                result: { nodeKinds },
               })
             } catch (error) {
               respond({
@@ -1409,7 +1421,7 @@ function CanvasFlow() {
               return { nodeId, accepted: false as const, error: '动作处理器尚未注册（画布未就绪）' }
             }
             // Fire-and-forget: async action progress and errors surface through
-            // the node's data (statusField), which the caller polls via get-state.
+            // the node's data (statusField), which the caller polls via get-node.
             void Promise.resolve(
               nodeHandler ? nodeHandler(params) : kindHandler!(nodeId, params),
             ).catch(() => undefined)
@@ -1471,7 +1483,7 @@ function CanvasFlow() {
           nodesRef.current = [...nodesRef.current, ...created]
           setNodes(nodesRef.current)
           revisionRef.current += 1
-          respond({ success: true, revision: revisionRef.current, result: { createdNodeIds: created.map((node) => node.id), revision: revisionRef.current } })
+          respond({ success: true, revision: revisionRef.current, result: { createdNodeIds: created.map((node) => node.id) } })
           return
         }
 
@@ -1499,7 +1511,7 @@ function CanvasFlow() {
           })
           setNodes(nodesRef.current)
           revisionRef.current += 1
-          respond({ success: true, revision: revisionRef.current, result: { updatedNodeIds: [...ids], revision: revisionRef.current } })
+          respond({ success: true, revision: revisionRef.current, result: { updatedNodeIds: [...ids] } })
           return
         }
 
@@ -1514,7 +1526,7 @@ function CanvasFlow() {
             useAppStore.getState().removeCanvasNodeReference(nodeId)
           }
           revisionRef.current += 1
-          respond({ success: true, revision: revisionRef.current, result: { deletedNodeIds, revision: revisionRef.current } })
+          respond({ success: true, revision: revisionRef.current, result: { deletedNodeIds } })
           return
         }
 
@@ -1534,7 +1546,7 @@ function CanvasFlow() {
           }
           setEdges(edgesRef.current)
           revisionRef.current += 1
-          respond({ success: true, revision: revisionRef.current, result: { createdEdgeIds, revision: revisionRef.current } })
+          respond({ success: true, revision: revisionRef.current, result: { createdEdgeIds } })
           return
         }
 
@@ -1544,7 +1556,7 @@ function CanvasFlow() {
           edgesRef.current = edgesRef.current.filter((edge) => !ids.has(edge.id))
           setEdges(edgesRef.current)
           revisionRef.current += 1
-          respond({ success: true, revision: revisionRef.current, result: { deletedEdgeIds, revision: revisionRef.current } })
+          respond({ success: true, revision: revisionRef.current, result: { deletedEdgeIds } })
           return
         }
 

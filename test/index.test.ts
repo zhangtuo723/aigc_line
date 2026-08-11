@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildUserPrompt } from '../electron/main/services/agent/prompts'
+import { buildSystemPromptAppend, buildUserPrompt } from '../electron/main/services/agent/prompts'
 import {
   createBuiltinPluginConfig,
   resolveBuiltinPluginPath,
@@ -14,6 +14,18 @@ import {
   makeSkillCommand,
 } from '../src/shared/skill-command'
 import { normalizeInterruptedToolCalls } from '../src/shared/tool-call-status'
+import {
+  resolveVideoReviewRequest,
+} from '../electron/main/services/qwen-video-review.service'
+import {
+  buildCanvasNodeDetail,
+  buildCanvasOverview,
+} from '../src/shared/canvas-read-model'
+import type {
+  CanvasEdgeSnapshot,
+  CanvasNodeSnapshot,
+  CanvasStateSnapshot,
+} from '../src/shared/ipc.types'
 
 describe('vitest smoke', () => {
   it('runs a normal unit test', () => {
@@ -36,9 +48,88 @@ describe('canvas node references', () => {
     }, 'E:\\workspace')
 
     expect(prompt).toContain('nodeId="image-node-7"')
-    expect(prompt).toContain('GetCanvasState')
+    expect(prompt).toContain('GetCanvasNode')
+    expect(prompt).not.toContain('GetCanvasOverview')
     expect(prompt).toContain('UpdateCanvasNodes')
+    expect(prompt).toContain('最后写入者生效')
+    expect(prompt).not.toContain('expectedRevision')
     expect(prompt).toContain('把提示词改成夜景')
+  })
+
+  it('describes canvas writes without global revision preconditions', () => {
+    const prompt = buildSystemPromptAppend('E:\\workspace')
+
+    expect(prompt).toContain('GetCanvasOverview')
+    expect(prompt).toContain('GetCanvasNode')
+    expect(prompt).toContain('最后写入者生效')
+    expect(prompt).not.toContain('expectedRevision')
+    expect(prompt).not.toContain('版本冲突')
+  })
+})
+
+describe('canvas read models', () => {
+  const nodes: CanvasNodeSnapshot[] = [
+    {
+      id: 'shot-1',
+      type: 'storyNode',
+      position: { x: 10, y: 20 },
+      data: { kind: 'shot', title: '镜头 1', shotNumber: 1, scene: '很长的剧情详情' },
+    },
+    {
+      id: 'image-1',
+      type: 'storyNode',
+      position: { x: 30, y: 40 },
+      data: {
+        kind: 'image',
+        title: '镜头 1 · 图片',
+        prompt: '完整图片提示词',
+        sourcePath: 'generated/images/image-1.png',
+        preview: 'data:image/png;base64,very-large-payload',
+        generationStatus: 'idle',
+      },
+    },
+  ]
+  const edges: CanvasEdgeSnapshot[] = [
+    { id: 'edge-1', source: 'shot-1', target: 'image-1' },
+  ]
+
+  it('returns a compact canvas overview without revisions or long node fields', () => {
+    const overview = buildCanvasOverview(nodes, edges)
+
+    expect(overview).toMatchObject({
+      nodeCount: 2,
+      edgeCount: 1,
+      countsByKind: { shot: 1, image: 1 },
+      nodes: [
+        { id: 'shot-1', kind: 'shot', title: '镜头 1', shotNumber: 1, hasOutput: false },
+        { id: 'image-1', kind: 'image', title: '镜头 1 · 图片', generationStatus: 'idle', hasOutput: true },
+      ],
+    })
+    expect(overview).not.toHaveProperty('revision')
+    expect(JSON.stringify(overview)).not.toContain('完整图片提示词')
+    expect(JSON.stringify(overview)).not.toContain('generated/images/image-1.png')
+    expect(JSON.stringify(overview)).not.toContain('position')
+  })
+
+  it('returns one full node with compact incoming and outgoing connections', () => {
+    const detail = buildCanvasNodeDetail(nodes, edges, 'image-1')
+
+    expect(detail).toMatchObject({
+      id: 'image-1',
+      position: { x: 30, y: 40 },
+      data: {
+        prompt: '完整图片提示词',
+        sourcePath: 'generated/images/image-1.png',
+        preview: '[inline preview omitted]',
+      },
+      incomingConnections: [{
+        edgeId: 'edge-1',
+        nodeId: 'shot-1',
+        kind: 'shot',
+        title: '镜头 1',
+      }],
+      outgoingConnections: [],
+    })
   })
 })
 
@@ -173,4 +264,32 @@ describe('tool call status recovery', () => {
     expect(result.changed).toBe(false)
     expect(result.messages[0]).toBe(messages[0])
   })
+})
+
+describe('storyboard video review', () => {
+  it('resolves a shot id to its generated video and reference image', () => {
+    const state: CanvasStateSnapshot = {
+      revision: 1,
+      nodeCount: 3,
+      edgeCount: 2,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'shot-1', type: 'storyNode', position: { x: 0, y: 0 }, data: { kind: 'shot', title: '镜头 1', shotNumber: 1, scene: '主角进入房间' } },
+        { id: 'image-1', type: 'storyNode', position: { x: 100, y: 0 }, data: { kind: 'image', title: '角色参考', sourcePath: 'generated/images/shot-1.png' } },
+        { id: 'video-1', type: 'storyNode', position: { x: 200, y: 0 }, data: { kind: 'video', title: '镜头 1 视频', prompt: '主角进入房间并说你好', sourcePath: 'generated/videos/shot-1.mp4', referenceImageNodeIds: ['image-1'] } },
+      ],
+      edges: [
+        { id: 'edge-1', source: 'shot-1', target: 'image-1' },
+        { id: 'edge-2', source: 'image-1', target: 'video-1' },
+      ],
+    }
+
+    const request = resolveVideoReviewRequest(state, 'shot-1')
+    expect(request.videoNodeId).toBe('video-1')
+    expect(request.sourcePath).toBe('generated/videos/shot-1.mp4')
+    expect(request.referenceImagePaths).toEqual(['generated/images/shot-1.png'])
+    expect(request.relatedShotNodeIds).toEqual(['shot-1'])
+    expect(request.expectedContent).toContain('主角进入房间并说你好')
+  })
+
 })

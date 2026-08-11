@@ -33,7 +33,8 @@ import { mergeDiscoveredSkills } from './skill-metadata';
 /** MCP tools exposed to every session (bare names match mcp__push-artifact__*). */
 const CANVAS_MCP_TOOLS = [
   'PushArtifact',
-  'GetCanvasState',
+  'GetCanvasOverview',
+  'GetCanvasNode',
   'GetCanvasCapabilities',
   'CreateCanvasNodes',
   'UpdateCanvasNodes',
@@ -41,6 +42,7 @@ const CANVAS_MCP_TOOLS = [
   'ConnectCanvasNodes',
   'DisconnectCanvasEdges',
   'InvokeNodeAction',
+  'ReviewStoryboardVideo',
 ];
 
 /** Delay before restarting a dead stream that still has pending work. */

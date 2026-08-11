@@ -78,7 +78,7 @@ registerNodeCapabilities({
       key: 'workflowId',
       type: 'enum',
       dynamicOptions: 'comfy-image-workflows',
-      description: '图片生成工作流（可选值见 options）',
+      description: '图片生成模型或工作流（包含 ComfyUI、Nano Banana 2、Nano Banana Pro；可选值见 options）',
     },
     { key: 'sourcePath', type: 'string', description: '生成结果的 workspace 相对路径' },
     ...generationStatusFields,
@@ -89,7 +89,7 @@ registerNodeCapabilities({
       label: '生成',
       async: true,
       statusField: 'generationStatus',
-      description: '使用所选工作流生成图片，完成后结果路径写入 sourcePath',
+      description: '使用所选图片模型或工作流生成图片；连接已有图片时支持图生图，完成后结果路径写入 sourcePath',
     },
   ],
 })

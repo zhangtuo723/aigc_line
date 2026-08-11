@@ -9,7 +9,7 @@ description: 在 AIGC CANVAS 画布中创建和修改可直接用于生产的短
 
 ## 工作流程
 
-1. 读取或修改画布前，先调用 `GetCanvasState`。执行修改时，把返回的最新 `revision` 作为 `expectedRevision`；发生版本冲突后重新读取画布。
+1. 需要了解画布规模或查找节点 ID 时调用 `GetCanvasOverview`；修改现有节点前用 `GetCanvasNode` 按精确 ID 读取完整数据。画布写入采用最后写入者生效，不传版本号。
 2. 不确定节点字段或可执行动作时，调用 `GetCanvasCapabilities` 查询。
 3. 保留用户明确引用的节点 ID。除非用户明确要求替换，否则更新原节点，不要重新创建。
 4. 将每个镜头转换为包含三个节点的链路：

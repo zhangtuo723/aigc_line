@@ -33,6 +33,8 @@ export const IPC_CHANNELS = {
     get: 'settings:get',
     save: 'settings:save',
     testComfyUI: 'settings:testComfyUI',
+    testQwen: 'settings:testQwen',
+    testGoogleAi: 'settings:testGoogleAi',
   },
   push: {
     chatMessage: 'chat:receiveMessage',

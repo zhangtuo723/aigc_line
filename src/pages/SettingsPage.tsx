@@ -3,6 +3,19 @@ import type { AppSettingsView, ComfyWorkflowInfo } from '../shared/ipc.types';
 import { useAppStore } from '../stores/app.store';
 
 const fieldClass = 'w-full rounded-lg border border-white/[0.1] bg-[#09090e] px-3.5 py-3 text-sm text-[#e8e6df] outline-none transition placeholder:text-[#4f4c59] focus:border-[#d4af37]/60 focus:ring-2 focus:ring-[#d4af37]/10';
+const DEFAULT_QWEN_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+
+function hasQwenSettingsSupport(settings: AppSettingsView): boolean {
+  return typeof settings.qwenBaseUrl === 'string'
+    && typeof settings.qwenApiKey === 'string'
+    && typeof settings.qwenApiKeyConfigured === 'boolean';
+}
+
+function hasGoogleAiSettingsSupport(settings: AppSettingsView): boolean {
+  return typeof settings.googleAiApiKey === 'string'
+    && typeof settings.googleAiApiKeyConfigured === 'boolean'
+    && typeof settings.googleAiProxyUrl === 'string';
+}
 
 export function SettingsPage() {
   const setCurrentPage = useAppStore((state) => state.setCurrentPage);
@@ -13,21 +26,42 @@ export function SettingsPage() {
   const [agentToken, setAgentToken] = useState('');
   const [showToken, setShowToken] = useState(false);
   const [clearAgentToken, setClearAgentToken] = useState(false);
+  const [qwenBaseUrl, setQwenBaseUrl] = useState(DEFAULT_QWEN_BASE_URL);
+  const [qwenApiKey, setQwenApiKey] = useState('');
+  const [showQwenApiKey, setShowQwenApiKey] = useState(false);
+  const [clearQwenApiKey, setClearQwenApiKey] = useState(false);
+  const [googleAiApiKey, setGoogleAiApiKey] = useState('');
+  const [showGoogleAiApiKey, setShowGoogleAiApiKey] = useState(false);
+  const [clearGoogleAiApiKey, setClearGoogleAiApiKey] = useState(false);
+  const [googleAiProxyUrl, setGoogleAiProxyUrl] = useState('');
   const [defaultImageWorkflowId, setDefaultImageWorkflowId] = useState('flux2-klein-9b-t2i');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [testingQwen, setTestingQwen] = useState(false);
+  const [testingGoogleAi, setTestingGoogleAi] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [qwenTestResult, setQwenTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [googleAiTestResult, setGoogleAiTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [notice, setNotice] = useState('');
 
   useEffect(() => {
     Promise.all([window.electronAPI.getAppSettings(), window.electronAPI.listComfyWorkflows()])
       .then(([settings, availableWorkflows]) => {
+        const qwenSettingsSupported = hasQwenSettingsSupport(settings);
+        const googleAiSettingsSupported = hasGoogleAiSettingsSupport(settings);
         setSavedSettings(settings);
         setComfyuiBaseUrl(settings.comfyuiBaseUrl);
         setAgentBaseUrl(settings.agentBaseUrl);
+        setQwenBaseUrl(qwenSettingsSupported ? settings.qwenBaseUrl : DEFAULT_QWEN_BASE_URL);
+        setQwenApiKey(qwenSettingsSupported ? settings.qwenApiKey : '');
+        setGoogleAiApiKey(googleAiSettingsSupported ? settings.googleAiApiKey : '');
+        setGoogleAiProxyUrl(googleAiSettingsSupported ? settings.googleAiProxyUrl : '');
         setDefaultImageWorkflowId(settings.defaultImageWorkflowId);
         setWorkflows(availableWorkflows);
+        if (!qwenSettingsSupported || !googleAiSettingsSupported) {
+          setNotice('检测到 Electron 主进程仍是旧版本，新配置暂时无法保存。请完全退出应用后重新启动。');
+        }
       })
       .finally(() => setLoading(false));
   }, []);
@@ -54,18 +88,69 @@ export function SettingsPage() {
       const next = await window.electronAPI.saveAppSettings({
         comfyuiBaseUrl,
         agentBaseUrl,
+        qwenBaseUrl,
         defaultImageWorkflowId,
         agentToken: agentToken.trim() || undefined,
         clearAgentToken,
+        qwenApiKey: qwenApiKey.trim() || undefined,
+        clearQwenApiKey,
+        googleAiApiKey: googleAiApiKey.trim() || undefined,
+        clearGoogleAiApiKey,
+        googleAiProxyUrl,
       });
+      if (!hasQwenSettingsSupport(next)) {
+        throw new Error('Electron 主进程仍是旧版本，未接收 Qwen 配置。请完全退出应用后重新启动，再重新保存。');
+      }
+      if (!hasGoogleAiSettingsSupport(next)) {
+        throw new Error('Electron 主进程仍是旧版本，未接收 Google AI 配置。请完全退出应用后重新启动，再重新保存。');
+      }
+      if (qwenApiKey.trim() && !next.qwenApiKeyConfigured) {
+        throw new Error('Qwen API Key 保存后校验失败，输入内容已保留，请重试。');
+      }
+      if (googleAiApiKey.trim() && !next.googleAiApiKeyConfigured) {
+        throw new Error('Google AI Studio API Key 保存后校验失败，输入内容已保留，请重试。');
+      }
       setSavedSettings(next);
       setAgentToken('');
       setClearAgentToken(false);
-      setNotice('配置已保存，将在下一次生成或 Agent 对话时生效');
+      setQwenApiKey(next.qwenApiKey);
+      setClearQwenApiKey(false);
+      setGoogleAiApiKey(next.googleAiApiKey);
+      setClearGoogleAiApiKey(false);
+      setGoogleAiProxyUrl(next.googleAiProxyUrl);
+      setNotice(next.qwenApiKeyConfigured || next.googleAiApiKeyConfigured
+        ? '配置已保存，API Key 已通过系统安全存储校验'
+        : '配置已保存，将在下一次生成或 Agent 对话时生效');
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '保存失败');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleQwenTest = async () => {
+    setTestingQwen(true);
+    setQwenTestResult(null);
+    try {
+      setQwenTestResult(await window.electronAPI.testQwenConnection({
+        baseUrl: qwenBaseUrl,
+        apiKey: qwenApiKey.trim() || undefined,
+      }));
+    } finally {
+      setTestingQwen(false);
+    }
+  };
+
+  const handleGoogleAiTest = async () => {
+    setTestingGoogleAi(true);
+    setGoogleAiTestResult(null);
+    try {
+      setGoogleAiTestResult(await window.electronAPI.testGoogleAiConnection({
+        apiKey: googleAiApiKey.trim() || undefined,
+        proxyUrl: googleAiProxyUrl,
+      }));
+    } finally {
+      setTestingGoogleAi(false);
     }
   };
 
@@ -91,7 +176,7 @@ export function SettingsPage() {
         <div className="mx-auto max-w-4xl space-y-5 px-8 py-9">
           {notice && <div className="rounded-lg border border-[#d4af37]/25 bg-[#d4af37]/[0.07] px-4 py-3 text-sm text-[#d9c178]">{notice}</div>}
 
-          <SettingsCard title="ComfyUI 服务" description="图片生成请求将发送到此服务器。修改后可先测试连接。">
+          <SettingsCard title="ComfyUI 服务" description="本地图片工作流、视频生成与视频放大请求发送到此服务器。修改后可先测试连接。">
             <label className="text-xs tracking-wider text-[#9a97a3]">HTTP 地址</label>
             <div className="mt-2 flex gap-3">
               <input value={comfyuiBaseUrl} onChange={(event) => { setComfyuiBaseUrl(event.target.value); setTestResult(null); }} className={fieldClass} placeholder="http://127.0.0.1:8188" spellCheck={false} />
@@ -125,6 +210,75 @@ export function SettingsPage() {
                 )}
                 <p className="mt-2 text-[11px] leading-5 text-[#5f5c68]">Token 使用操作系统安全存储加密，保存后不会在页面中回显。</p>
               </div>
+            </div>
+          </SettingsCard>
+
+          <SettingsCard title="Qwen 音视频审查" description="固定使用 Qwen3.5-Omni Plus 同时理解视频画面、对白、环境音和音效，并输出带时间戳的审查报告。API Key 保存在本机，重新打开设置页时会自动回填。">
+            <div className="grid gap-5">
+              <div>
+                <label className="text-xs tracking-wider text-[#9a97a3]">OpenAI 兼容 API 地址</label>
+                <input value={qwenBaseUrl} onChange={(event) => { setQwenBaseUrl(event.target.value); setQwenTestResult(null); }} className={`${fieldClass} mt-2`} placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" spellCheck={false} />
+              </div>
+              <div>
+                <label className="text-xs tracking-wider text-[#9a97a3]">固定模型</label>
+                <div className="mt-2 rounded-lg border border-[#d4af37]/20 bg-[#d4af37]/[0.06] px-3.5 py-3 font-mono text-sm text-[#e8c766]">qwen3.5-omni-plus</div>
+              </div>
+              <div>
+                <div className="flex items-center justify-between">
+                  <label className="text-xs tracking-wider text-[#9a97a3]">DASHSCOPE_API_KEY</label>
+                  {savedSettings?.qwenApiKeyConfigured && !clearQwenApiKey && <span className="text-[11px] text-emerald-400">已安全配置</span>}
+                </div>
+                <div className="relative mt-2">
+                  <input type={showQwenApiKey ? 'text' : 'password'} value={qwenApiKey} onChange={(event) => { setQwenApiKey(event.target.value); setClearQwenApiKey(false); setQwenTestResult(null); }} className={`${fieldClass} pr-16`} placeholder="输入 API Key" autoComplete="off" spellCheck={false} />
+                  <button type="button" onClick={() => setShowQwenApiKey((value) => !value)} className="absolute inset-y-0 right-0 px-4 text-xs text-[#777482] hover:text-[#e8c766]">{showQwenApiKey ? '隐藏' : '显示'}</button>
+                </div>
+                {savedSettings?.qwenApiKeyConfigured && (
+                  <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-[#777482]">
+                    <input type="checkbox" checked={clearQwenApiKey} onChange={(event) => { setClearQwenApiKey(event.target.checked); if (event.target.checked) setQwenApiKey(''); }} className="accent-[#d4af37]" />
+                    清除已保存的 API Key
+                  </label>
+                )}
+              </div>
+              <div className="flex items-center gap-3">
+                <button onClick={handleQwenTest} disabled={testingQwen || !qwenBaseUrl.trim() || (clearQwenApiKey && !qwenApiKey.trim())} className="rounded-lg border border-white/[0.12] bg-white/[0.05] px-5 py-2.5 text-sm text-[#d7d4cb] transition hover:border-[#d4af37]/40 hover:text-[#e8c766] disabled:opacity-40">
+                  {testingQwen ? '测试中…' : '测试 Qwen 连接'}
+                </button>
+                {qwenTestResult && <p className={`text-xs ${qwenTestResult.success ? 'text-emerald-400' : 'text-rose-400'}`}>{qwenTestResult.message}</p>}
+              </div>
+              <p className="text-[11px] leading-5 text-[#5f5c68]">审查服务固定使用 qwen3.5-omni-plus，同时理解画面与完整音轨。默认使用中国大陆 DashScope 端点；其他地域需填写与 API Key 所属地域一致的 Base URL。</p>
+            </div>
+          </SettingsCard>
+
+          <SettingsCard title="Google AI 图片生成" description="Nano Banana 2 与 Nano Banana Pro 共用一个 Google AI Studio API Key；两个模型均以 2K 输出，并支持文生图和连接参考图后的图生图。">
+            <div className="grid gap-5">
+              <div>
+                <div className="flex items-center justify-between">
+                  <label className="text-xs tracking-wider text-[#9a97a3]">GEMINI_API_KEY</label>
+                  {savedSettings?.googleAiApiKeyConfigured && !clearGoogleAiApiKey && <span className="text-[11px] text-emerald-400">已安全配置</span>}
+                </div>
+                <div className="relative mt-2">
+                  <input type={showGoogleAiApiKey ? 'text' : 'password'} value={googleAiApiKey} onChange={(event) => { setGoogleAiApiKey(event.target.value); setClearGoogleAiApiKey(false); setGoogleAiTestResult(null); }} className={`${fieldClass} pr-16`} placeholder="输入 Google AI Studio API Key" autoComplete="off" spellCheck={false} />
+                  <button type="button" onClick={() => setShowGoogleAiApiKey((value) => !value)} className="absolute inset-y-0 right-0 px-4 text-xs text-[#777482] hover:text-[#e8c766]">{showGoogleAiApiKey ? '隐藏' : '显示'}</button>
+                </div>
+                {savedSettings?.googleAiApiKeyConfigured && (
+                  <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-[#777482]">
+                    <input type="checkbox" checked={clearGoogleAiApiKey} onChange={(event) => { setClearGoogleAiApiKey(event.target.checked); if (event.target.checked) setGoogleAiApiKey(''); }} className="accent-[#d4af37]" />
+                    清除已保存的 API Key
+                  </label>
+                )}
+              </div>
+              <div>
+                <label className="text-xs tracking-wider text-[#9a97a3]">Google API 代理（可选）</label>
+                <input value={googleAiProxyUrl} onChange={(event) => { setGoogleAiProxyUrl(event.target.value); setGoogleAiTestResult(null); }} className={`${fieldClass} mt-2`} placeholder="例如 http://127.0.0.1:7890" spellCheck={false} />
+                <p className="mt-2 text-[11px] leading-5 text-[#5f5c68]">留空时使用 Electron/系统网络配置；无法直连 Google 时可填写本地 HTTP、HTTPS 或 SOCKS 代理。</p>
+              </div>
+              <div className="flex items-center gap-3">
+                <button onClick={handleGoogleAiTest} disabled={testingGoogleAi || (clearGoogleAiApiKey && !googleAiApiKey.trim())} className="rounded-lg border border-white/[0.12] bg-white/[0.05] px-5 py-2.5 text-sm text-[#d7d4cb] transition hover:border-[#d4af37]/40 hover:text-[#e8c766] disabled:opacity-40">
+                  {testingGoogleAi ? '测试中…' : '测试 Google AI 连接'}
+                </button>
+                {googleAiTestResult && <p className={`text-xs ${googleAiTestResult.success ? 'text-emerald-400' : 'text-rose-400'}`}>{googleAiTestResult.message}</p>}
+              </div>
+              <p className="text-[11px] leading-5 text-[#5f5c68]">调用 Google Gemini API：gemini-3.1-flash-image 与 gemini-3-pro-image。API Key 使用操作系统安全存储加密。</p>
             </div>
           </SettingsCard>
 

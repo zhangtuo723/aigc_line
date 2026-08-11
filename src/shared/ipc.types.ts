@@ -184,6 +184,8 @@ export interface CanvasStateSnapshot {
 
 export type CanvasCommandAction =
   | 'get-state'
+  | 'get-overview'
+  | 'get-node'
   | 'get-capabilities'
   | 'create-nodes'
   | 'update-nodes'
@@ -232,15 +234,37 @@ export interface AppSettingsView {
   comfyuiBaseUrl: string;
   agentBaseUrl: string;
   agentTokenConfigured: boolean;
+  qwenBaseUrl: string;
+  qwenApiKey: string;
+  qwenApiKeyConfigured: boolean;
+  googleAiApiKey: string;
+  googleAiApiKeyConfigured: boolean;
+  googleAiProxyUrl: string;
   defaultImageWorkflowId: string;
 }
 
 export interface SaveAppSettingsRequest {
   comfyuiBaseUrl: string;
   agentBaseUrl: string;
+  qwenBaseUrl: string;
   defaultImageWorkflowId: string;
   agentToken?: string;
   clearAgentToken?: boolean;
+  qwenApiKey?: string;
+  clearQwenApiKey?: boolean;
+  googleAiApiKey?: string;
+  clearGoogleAiApiKey?: boolean;
+  googleAiProxyUrl?: string;
+}
+
+export interface TestQwenConnectionRequest {
+  baseUrl: string;
+  apiKey?: string;
+}
+
+export interface TestGoogleAiConnectionRequest {
+  apiKey?: string;
+  proxyUrl?: string;
 }
 
 export interface ConnectionTestResult {

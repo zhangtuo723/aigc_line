@@ -15,6 +15,8 @@ import type {
   ComfyWorkflowInfo,
   AppSettingsView,
   SaveAppSettingsRequest,
+  TestQwenConnectionRequest,
+  TestGoogleAiConnectionRequest,
   ConnectionTestResult,
   ImportAudioResult,
   CanvasCommandRequest,
@@ -49,6 +51,8 @@ export interface ElectronAPI {
   getAppSettings: () => Promise<AppSettingsView>;
   saveAppSettings: (request: SaveAppSettingsRequest) => Promise<AppSettingsView>;
   testComfyUIConnection: (baseUrl: string) => Promise<ConnectionTestResult>;
+  testQwenConnection: (request: TestQwenConnectionRequest) => Promise<ConnectionTestResult>;
+  testGoogleAiConnection: (request: TestGoogleAiConnectionRequest) => Promise<ConnectionTestResult>;
   onChatMessage: (callback: (message: ChatMessage) => void) => () => void;
   onArtifact: (callback: (artifact: Artifact) => void) => () => void;
   onTurnEnd: (callback: () => void) => () => void;
@@ -94,6 +98,8 @@ const api: ElectronAPI = {
   getAppSettings: () => invoke(IPC_CHANNELS.settings.get),
   saveAppSettings: (request) => invoke(IPC_CHANNELS.settings.save, request),
   testComfyUIConnection: (baseUrl) => invoke(IPC_CHANNELS.settings.testComfyUI, baseUrl),
+  testQwenConnection: (request) => invoke(IPC_CHANNELS.settings.testQwen, request),
+  testGoogleAiConnection: (request) => invoke(IPC_CHANNELS.settings.testGoogleAi, request),
   onChatMessage: (callback) => onPush(IPC_CHANNELS.push.chatMessage, callback),
   onArtifact: (callback) => onPush(IPC_CHANNELS.push.artifact, callback),
   onTurnEnd: (callback) => onPush(IPC_CHANNELS.push.turnEnd, callback),
