@@ -1,5 +1,5 @@
 import type { Attachment, ChatMessage } from '../shared/ipc.types';
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import { Markdown } from './Markdown';
 
 interface ChatMessageProps {
@@ -7,6 +7,30 @@ interface ChatMessageProps {
 }
 
 type ToolCall = NonNullable<ChatMessage['toolCall']>;
+
+const TOOL_LABELS: Record<string, string> = {
+  Bash: '运行命令',
+  Edit: '编辑文件',
+  Read: '读取文件',
+  Write: '写入文件',
+  Glob: '查找文件',
+  Grep: '搜索内容',
+  TaskUpdate: '更新任务',
+  'mcp__push-artifact__PushArtifact': '推送产物',
+};
+
+const displayToolName = (name: string) => (
+  TOOL_LABELS[name]
+  ?? name.replace(/^mcp__[^_]+__/, '').replaceAll('_', ' ')
+);
+const formatDuration = (duration: number) => (
+  duration >= 1000 ? `${(duration / 1000).toFixed(duration >= 10000 ? 0 : 1)}s` : `${duration}ms`
+);
+const formatTime = (timestamp: number, withSeconds = false) => new Date(timestamp).toLocaleTimeString('zh-CN', {
+  hour: '2-digit',
+  minute: '2-digit',
+  ...(withSeconds ? { second: '2-digit' } : {}),
+});
 
 const ATTACHMENT_ICONS: Record<string, string> = {
   srt: '📝',
@@ -85,43 +109,43 @@ function ToolCallBlock({ toolCall }: { toolCall: ToolCall }) {
   const [expanded, setExpanded] = useState(!!toolCall.error);
 
   return (
-    <div className='mb-2 text-xs'>
+    <div className='min-w-0 text-xs'>
       <button
         type='button'
         onClick={() => hasDetails && setExpanded((v) => !v)}
         className={[
-          'flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left',
-          hasDetails ? 'cursor-pointer hover:bg-white/5' : 'cursor-default',
+          'flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left transition',
+          hasDetails ? 'cursor-pointer hover:bg-white/[0.05]' : 'cursor-default',
         ].join(' ')}
       >
         {toolCall.status === 'running' ? (
           <>
-            <div className='h-3 w-3 animate-spin rounded-full border-2 border-[#e8c766] border-t-transparent' />
-            <span className='text-[#e8c766]'>正在执行: {toolCall.toolName}</span>
+            <div className='h-3 w-3 flex-none animate-spin rounded-full border-2 border-[#e8c766] border-t-transparent' />
+            <span className='truncate text-[#e8c766]'>正在执行 · {displayToolName(toolCall.toolName)}</span>
           </>
         ) : toolCall.status === 'completed' ? (
           <>
             <svg className='h-3 w-3 text-emerald-400' fill='none' viewBox='0 0 24 24' stroke='currentColor'>
               <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M5 13l4 4L19 7' />
             </svg>
-            <span className='text-emerald-400'>
-              {toolCall.toolName}
-              {toolCall.duration && ` (${toolCall.duration}ms)`}
-            </span>
+            <span className='truncate text-[#b9b7c1]'>{displayToolName(toolCall.toolName)}</span>
+            {toolCall.duration !== undefined && (
+              <span className='flex-none tabular-nums text-[10px] text-[#666370]'>{formatDuration(toolCall.duration)}</span>
+            )}
           </>
         ) : toolCall.status === 'interrupted' ? (
           <>
             <svg className='h-3 w-3 text-amber-400' fill='none' viewBox='0 0 24 24' stroke='currentColor'>
               <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M6 6l12 12M18 6L6 18' />
             </svg>
-            <span className='text-amber-400'>已中断: {toolCall.toolName}</span>
+            <span className='truncate text-amber-400'>已中断 · {displayToolName(toolCall.toolName)}</span>
           </>
         ) : (
           <>
             <svg className='h-3 w-3 text-rose-400' fill='none' viewBox='0 0 24 24' stroke='currentColor'>
               <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M6 6l12 12M18 6L6 18' />
             </svg>
-            <span className='text-rose-400'>执行失败: {toolCall.toolName}</span>
+            <span className='truncate text-rose-400'>执行失败 · {displayToolName(toolCall.toolName)}</span>
           </>
         )}
         {hasDetails && (
@@ -162,7 +186,7 @@ function ToolCallBlock({ toolCall }: { toolCall: ToolCall }) {
   );
 }
 
-export function ChatMessageItem({ message }: ChatMessageProps) {
+function ChatMessageItemComponent({ message }: ChatMessageProps) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
   const isToolCall = !!message.toolCall;
@@ -192,15 +216,40 @@ export function ChatMessageItem({ message }: ChatMessageProps) {
     );
   }
 
+  // Tool events form a compact execution timeline instead of full chat bubbles.
+  if (isToolCall && message.toolCall) {
+    return (
+      <div className='group relative ml-3 flex min-h-8 items-start gap-2.5 py-0.5 pl-4'>
+        <div className='absolute bottom-0 left-[5px] top-0 w-px bg-white/[0.07]' />
+        <div className={[
+          'relative z-10 mt-2 h-2.5 w-2.5 flex-none rounded-full border-2 border-[#0f0f16]',
+          message.toolCall.status === 'running'
+            ? 'animate-pulse bg-[#e8c766]'
+            : message.toolCall.status === 'completed'
+              ? 'bg-emerald-400/80'
+              : message.toolCall.status === 'interrupted'
+                ? 'bg-amber-400/80'
+                : 'bg-rose-400/80',
+        ].join(' ')} />
+        <div className='min-w-0 flex-1 rounded-lg border border-transparent px-1 py-0.5 transition group-hover:border-white/[0.06] group-hover:bg-white/[0.025]'>
+          <ToolCallBlock toolCall={message.toolCall} />
+        </div>
+        <time className='mt-2 flex-none text-[9px] tabular-nums text-[#4f4c58]'>
+          {formatTime(message.timestamp, true)}
+        </time>
+      </div>
+    );
+  }
+
   // Artifact messages - rendered as a compact card in chat
   if (isArtifact && message.artifact) {
     const art = message.artifact;
     return (
-      <div className='flex gap-3 py-3'>
+      <div className='flex gap-2.5 py-1.5'>
         <div className='flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-[#d4af37]/30 bg-[#d4af37]/10 text-xs font-medium text-[#e8c766]'>
           AI
         </div>
-        <div className='max-w-[70%] rounded-2xl rounded-tl-sm border border-white/10 bg-white/[0.04] px-4 py-2.5 text-sm leading-relaxed text-[#e8e6df]'>
+        <div className='min-w-0 max-w-[90%] flex-1 rounded-2xl rounded-tl-sm border border-[#d4af37]/15 bg-gradient-to-br from-white/[0.045] to-[#d4af37]/[0.025] px-4 py-3 text-sm leading-relaxed text-[#e8e6df]'>
           <div className='mb-1 text-xs text-[#8a8794]'>生成了产物:</div>
           <div className='flex items-center gap-2 rounded-lg border border-[#d4af37]/20 bg-[#d4af37]/[0.06] px-3 py-2'>
             <svg className='h-4 w-4 text-[#e8c766]' fill='none' stroke='currentColor' viewBox='0 0 24 24'>
@@ -212,7 +261,7 @@ export function ChatMessageItem({ message }: ChatMessageProps) {
             </span>
           </div>
           <div className='mt-1 text-xs text-[#6d6a78]'>
-            {new Date(message.timestamp).toLocaleTimeString()}
+            {formatTime(message.timestamp)}
           </div>
         </div>
       </div>
@@ -229,7 +278,7 @@ export function ChatMessageItem({ message }: ChatMessageProps) {
     (message.nodeRefs?.length ?? 0) > 0;
 
   return (
-    <div className={['flex gap-3 py-3', isUser ? 'flex-row-reverse' : 'flex-row'].join(' ')}>
+    <div className={['flex gap-2.5 py-1.5', isUser ? 'flex-row-reverse' : 'flex-row'].join(' ')}>
       {/* Avatar */}
       <div
         className={[
@@ -245,7 +294,8 @@ export function ChatMessageItem({ message }: ChatMessageProps) {
       {/* Image attachments: small thumbnails perched above the bubble, sender-aligned */}
       <div
         className={[
-          'flex max-w-[70%] flex-col gap-1',
+          'flex flex-col gap-1',
+          isUser ? 'max-w-[82%]' : 'max-w-[90%]',
           isUser ? 'items-end' : 'items-start',
         ].join(' ')}
       >
@@ -266,10 +316,10 @@ export function ChatMessageItem({ message }: ChatMessageProps) {
         {hasBubbleContent ? (
           <div
             className={[
-              'rounded-2xl border px-4 py-2.5 text-sm leading-relaxed',
+              'rounded-2xl border px-4 py-3 text-sm leading-6',
               isUser
                 ? 'rounded-tr-sm border-[#d4af37]/30 bg-[#d4af37]/[0.12] text-[#f5f3ea]'
-                : 'rounded-tl-sm border-white/10 bg-white/[0.04] text-[#e8e6df]',
+                : 'rounded-tl-sm border-white/[0.09] bg-gradient-to-br from-white/[0.045] to-white/[0.025] text-[#e8e6df]',
             ].join(' ')}
           >
           {/* Tool call indicator */}
@@ -320,7 +370,7 @@ export function ChatMessageItem({ message }: ChatMessageProps) {
                   className='flex items-center gap-1.5 rounded-lg border border-sky-400/30 bg-sky-400/[0.08] px-2 py-1 text-xs text-sky-200'
                   title={`节点 ID：${ref.id}`}
                 >
-                  <span>{ref.kind === 'shot' ? '🎬' : ref.kind === 'image' ? '🖼️' : ref.kind === 'video' ? '🎞️' : ref.kind === 'audio' ? '🎵' : ref.kind === 'upscale' ? '✨' : '📄'}</span>
+                  <span>{ref.kind === 'image' ? '🖼️' : ref.kind === 'video' ? '🎞️' : ref.kind === 'audio' ? '🎵' : ref.kind === 'upscale' ? '✨' : '📄'}</span>
                   <span className='max-w-[140px] truncate'>{ref.title}</span>
                 </div>
               ))}
@@ -343,16 +393,18 @@ export function ChatMessageItem({ message }: ChatMessageProps) {
               isUser ? 'text-[#a09258]' : 'text-[#6d6a78]',
             ].join(' ')}
           >
-            {new Date(message.timestamp).toLocaleTimeString()}
+            {formatTime(message.timestamp)}
           </div>
           </div>
         ) : (
           /* Image-only message: bare timestamp under the thumbnails */
           <div className='mt-1 text-xs text-[#6d6a78]'>
-            {new Date(message.timestamp).toLocaleTimeString()}
+            {formatTime(message.timestamp)}
           </div>
         )}
       </div>
     </div>
   );
 }
+
+export const ChatMessageItem = memo(ChatMessageItemComponent);

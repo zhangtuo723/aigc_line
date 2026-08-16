@@ -17,12 +17,18 @@ import type {
   SaveAppSettingsRequest,
   TestQwenConnectionRequest,
   TestGoogleAiConnectionRequest,
+  TestSeedreamConnectionRequest,
   ConnectionTestResult,
   ImportAudioResult,
+  ImportProjectMediaResult,
+  ListProjectMediaResult,
   CanvasCommandRequest,
   CanvasCommandResponse,
   AvailableSkill,
   ClearAgentContextResult,
+  ProjectChatMessagePush,
+  ProjectArtifactPush,
+  ProjectTurnEndPush,
 } from '../../src/shared/ipc.types';
 
 export interface ElectronAPI {
@@ -32,6 +38,8 @@ export interface ElectronAPI {
   loadProject: (id: string) => Promise<Project | null>;
   deleteProject: (id: string) => Promise<void>;
   importAudio: (projectId: string) => Promise<ImportAudioResult>;
+  importProjectMedia: (projectId: string) => Promise<ImportProjectMediaResult>;
+  listProjectMedia: (projectId: string) => Promise<ListProjectMediaResult>;
   sendChatMessage: (projectId: string, message: ChatMessage) => Promise<void>;
   interruptAgent: (projectId: string) => Promise<void>;
   loadChatHistory: (folderPath: string) => Promise<ChatMessage[]>;
@@ -53,9 +61,10 @@ export interface ElectronAPI {
   testComfyUIConnection: (baseUrl: string) => Promise<ConnectionTestResult>;
   testQwenConnection: (request: TestQwenConnectionRequest) => Promise<ConnectionTestResult>;
   testGoogleAiConnection: (request: TestGoogleAiConnectionRequest) => Promise<ConnectionTestResult>;
-  onChatMessage: (callback: (message: ChatMessage) => void) => () => void;
-  onArtifact: (callback: (artifact: Artifact) => void) => () => void;
-  onTurnEnd: (callback: () => void) => () => void;
+  testSeedreamConnection: (request: TestSeedreamConnectionRequest) => Promise<ConnectionTestResult>;
+  onChatMessage: (callback: (event: ProjectChatMessagePush) => void) => () => void;
+  onArtifact: (callback: (event: ProjectArtifactPush) => void) => () => void;
+  onTurnEnd: (callback: (event: ProjectTurnEndPush) => void) => () => void;
   onCanvasCommand: (callback: (command: CanvasCommandRequest) => void) => () => void;
   sendCanvasCommandResult: (response: CanvasCommandResponse) => void;
   showOpenDialog: (options?: Electron.OpenDialogOptions) => Promise<string[]>;
@@ -80,6 +89,8 @@ const api: ElectronAPI = {
   loadProject: (id) => invoke(IPC_CHANNELS.project.load, id),
   deleteProject: (id) => invoke(IPC_CHANNELS.project.delete, id),
   importAudio: (projectId) => invoke(IPC_CHANNELS.project.importAudio, projectId),
+  importProjectMedia: (projectId) => invoke(IPC_CHANNELS.project.importMedia, projectId),
+  listProjectMedia: (projectId) => invoke(IPC_CHANNELS.project.listMedia, projectId),
   sendChatMessage: (projectId, message) =>
     invoke(IPC_CHANNELS.chat.sendMessage, projectId, message),
   interruptAgent: (projectId) =>
@@ -100,6 +111,7 @@ const api: ElectronAPI = {
   testComfyUIConnection: (baseUrl) => invoke(IPC_CHANNELS.settings.testComfyUI, baseUrl),
   testQwenConnection: (request) => invoke(IPC_CHANNELS.settings.testQwen, request),
   testGoogleAiConnection: (request) => invoke(IPC_CHANNELS.settings.testGoogleAi, request),
+  testSeedreamConnection: (request) => invoke(IPC_CHANNELS.settings.testSeedream, request),
   onChatMessage: (callback) => onPush(IPC_CHANNELS.push.chatMessage, callback),
   onArtifact: (callback) => onPush(IPC_CHANNELS.push.artifact, callback),
   onTurnEnd: (callback) => onPush(IPC_CHANNELS.push.turnEnd, callback),

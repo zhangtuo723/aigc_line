@@ -8,7 +8,8 @@ const MAX_CHAT_WIDTH = 800
 const DEFAULT_CHAT_WIDTH = 420
 
 export function ProjectPage() {
-  const { currentProject, setCurrentPage } = useAppStore()
+  const currentProject = useAppStore((state) => state.currentProject)
+  const setCurrentPage = useAppStore((state) => state.setCurrentPage)
   const [chatWidth, setChatWidth] = useState(DEFAULT_CHAT_WIDTH)
   const dragState = useRef<{ startX: number; startWidth: number } | null>(null)
 
@@ -67,6 +68,19 @@ export function ProjectPage() {
         {/* Drag divider */}
         <div
           onMouseDown={onDividerMouseDown}
+          onKeyDown={(event) => {
+            if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+            event.preventDefault()
+            const delta = event.key === 'ArrowLeft' ? 16 : -16
+            setChatWidth((width) => Math.min(MAX_CHAT_WIDTH, Math.max(MIN_CHAT_WIDTH, width + delta)))
+          }}
+          role="separator"
+          aria-label="调整画布与聊天区域宽度"
+          aria-orientation="vertical"
+          aria-valuemin={MIN_CHAT_WIDTH}
+          aria-valuemax={MAX_CHAT_WIDTH}
+          aria-valuenow={chatWidth}
+          tabIndex={0}
           className="group w-1 flex-shrink-0 cursor-col-resize bg-white/[0.08] transition-colors hover:bg-[#d4af37]/60 active:bg-[#d4af37]"
         />
 

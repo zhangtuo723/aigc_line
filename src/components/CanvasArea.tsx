@@ -26,12 +26,15 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { useAppStore } from '../stores/app.store'
+import { listCachedComfyWorkflows } from '../shared/comfy-workflows'
 import type {
   CanvasCommandRequest,
   CanvasCommandResponse,
   CanvasNodeData,
   CanvasNodeKind,
   ComfyWorkflowInfo,
+  ProjectMediaAsset,
+  ProjectMediaKind,
   StoryboardShot,
 } from '../shared/ipc.types'
 import {
@@ -56,7 +59,7 @@ type StoryEdge = Edge<Record<string, never>, 'default'>
 
 interface FlowSnapshot {
   type: 'react-flow'
-  version: 1 | 2
+  version: 1 | 2 | 3 | 4
   nodes: StoryNode[]
   edges: StoryEdge[]
   viewport: Viewport
@@ -65,9 +68,8 @@ interface FlowSnapshot {
 
 const SAVE_DEBOUNCE_MS = 700
 const DEFAULT_VIEWPORT: Viewport = { x: 80, y: 70, zoom: 0.86 }
+const PROJECT_ASSET_DRAG_TYPE = 'application/x-aigc-project-media'
 const KIND_LABELS: Record<StoryNodeKind, string> = {
-  shot: '镜头',
-  text: '文本',
   image: '图片',
   video: '视频',
   audio: '音频',
@@ -117,71 +119,79 @@ const parseStoryboard = (content: string): StoryboardShot[] => {
   }
 }
 
-/** Upgrade legacy storyboard-table nodes into independent shot nodes. */
+/** Remove retired shot/text nodes and upgrade legacy storyboard tables to image → video chains. */
 const migrateLegacySnapshot = (snapshot: FlowSnapshot): FlowSnapshot => {
   const legacyBoards = snapshot.nodes.filter((node) => (node.data.kind as string) === 'storyboard')
-  if (legacyBoards.length === 0) return { ...snapshot, version: 2 }
+  const retiredShots = snapshot.nodes.filter((node) => (node.data.kind as string) === 'shot')
+  const retiredTexts = snapshot.nodes.filter((node) => (node.data.kind as string) === 'text')
+  const retiredNodes = [...retiredShots, ...retiredTexts]
+  const removedIds = new Set([...legacyBoards, ...retiredNodes].map((node) => node.id))
+  const nodes = snapshot.nodes.filter((node) => !removedIds.has(node.id))
+  const edges = snapshot.edges.filter((edge) => !removedIds.has(edge.source) && !removedIds.has(edge.target))
 
-  const boardIds = new Set(legacyBoards.map((node) => node.id))
-  const nodes = snapshot.nodes.filter((node) => !boardIds.has(node.id))
-  const edges = snapshot.edges.filter((edge) => !boardIds.has(edge.source) && !boardIds.has(edge.target))
+  for (const retired of retiredNodes) {
+    const legacyData = retired.data as Record<string, unknown>
+    const legacyPrompt = (retired.data.kind as string) === 'shot' ? legacyData.scene : legacyData.prompt
+    const incoming = snapshot.edges.filter((edge) => edge.target === retired.id && !removedIds.has(edge.source))
+    const outgoing = snapshot.edges.filter((edge) => edge.source === retired.id && !removedIds.has(edge.target))
+    if (typeof legacyPrompt === 'string' && legacyPrompt.trim()) {
+      for (const edge of outgoing) {
+        const target = nodes.find((node) => node.id === edge.target)
+        if (target && (target.data.kind === 'image' || target.data.kind === 'video') && !target.data.prompt) {
+          target.data = { ...target.data, prompt: legacyPrompt }
+        }
+      }
+    }
+    for (const source of incoming) {
+      for (const target of outgoing) {
+        if (source.source === target.target || edges.some((edge) => edge.source === source.source && edge.target === target.target)) continue
+        edges.push(makeLinkedEdge(`edge-${source.source}-${target.target}-migrated`, source.source, target.target))
+      }
+    }
+  }
 
   for (const board of legacyBoards) {
     const shots = Array.isArray((board.data as Record<string, unknown>).shots)
       ? (board.data as Record<string, unknown>).shots as StoryboardShot[]
       : []
     shots.forEach((shot, offset) => {
-      const shotId = `${board.id}-shot-${shot.index}`
       const imageId = `${board.id}-shot-${shot.index}-image`
       const videoId = `${board.id}-shot-${shot.index}-video`
-      nodes.push({
-        id: shotId,
-        type: 'storyNode',
-        position: { x: board.position.x, y: board.position.y + offset * 330 },
-        data: {
-          kind: 'shot',
-          title: `镜头 ${shot.index}`,
-          shotNumber: shot.index,
-          scene: shot.scene,
-        },
-      })
-      if (nodes.some((node) => node.id === imageId)) {
-        edges.push(makeLinkedEdge(`edge-${shotId}-${imageId}`, shotId, imageId))
+      let image = nodes.find((node) => node.id === imageId)
+      if (!image) {
+        image = makeNode('image', shot.index, { x: board.position.x, y: board.position.y + offset * 330 })
+        image.id = imageId
+        image.data.title = `镜头 ${shot.index} · 图片`
+        nodes.push(image)
       }
-      const image = nodes.find((node) => node.id === imageId)
-      if (image) {
-        image.data = {
-          ...image.data,
-          prompt: image.data.prompt || shot.textToImagePrompt || shot.scene,
-          sourcePath: image.data.sourcePath || shot.imageSource,
-          sourceHistory: image.data.sourceHistory || shot.imageSourceHistory,
-        }
+      image.data = {
+        ...image.data,
+        title: image.data.title || `镜头 ${shot.index} · 图片`,
+        prompt: image.data.prompt || shot.textToImagePrompt || shot.scene,
+        sourcePath: image.data.sourcePath || shot.imageSource,
+        sourceHistory: image.data.sourceHistory || shot.imageSourceHistory,
       }
-      const video = nodes.find((node) => node.id === videoId)
-      if (video) {
-        video.data = {
-          ...video.data,
-          prompt: video.data.prompt || shot.imageToVideoPrompt || shot.camera || '',
-          sourcePath: video.data.sourcePath || shot.videoSource,
-          sourceHistory: video.data.sourceHistory || shot.videoSourceHistory,
-        }
+      let video = nodes.find((node) => node.id === videoId)
+      if (!video) {
+        video = makeNode('video', shot.index, { x: board.position.x + 520, y: board.position.y + offset * 330 })
+        video.id = videoId
+        video.data.title = `镜头 ${shot.index} · 视频`
+        nodes.push(video)
+      }
+      video.data = {
+        ...video.data,
+        title: video.data.title || `镜头 ${shot.index} · 视频`,
+        prompt: video.data.prompt || shot.imageToVideoPrompt || shot.camera || shot.scene,
+        duration: ([5, 10, 15] as const).includes(shot.duration as 5 | 10 | 15) ? shot.duration : 5,
+        sourcePath: video.data.sourcePath || shot.videoSource,
+        sourceHistory: video.data.sourceHistory || shot.videoSourceHistory,
+      }
+      if (!edges.some((edge) => edge.source === imageId && edge.target === videoId)) {
+        edges.push(makeLinkedEdge(`edge-${imageId}-${videoId}`, imageId, videoId))
       }
     })
   }
-  return { ...snapshot, version: 2, nodes, edges }
-}
-
-/** Remove fields that belonged to the old storyboard-shaped shot model. */
-const simplifyShotNode = (node: StoryNode): StoryNode => {
-  if (node.data.kind !== 'shot') return node
-  const {
-    prompt: _legacyPrompt,
-    duration: _legacyDuration,
-    dialogue: _legacyDialogue,
-    camera: _legacyCamera,
-    ...data
-  } = node.data
-  return { ...node, data: data as StoryNodeData }
+  return { ...snapshot, version: 4, nodes, edges }
 }
 
 const nodeIcon = (kind: StoryNodeKind) => {
@@ -189,13 +199,6 @@ const nodeIcon = (kind: StoryNodeKind) => {
     return (
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="h-3.5 w-3.5">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
-      </svg>
-    )
-  }
-  if (kind === 'shot') {
-    return (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="h-3.5 w-3.5">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M4 5h16M4 10h16M4 15h16M4 20h16M8 4v17" />
       </svg>
     )
   }
@@ -221,11 +224,7 @@ const nodeIcon = (kind: StoryNodeKind) => {
       </svg>
     )
   }
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="h-3.5 w-3.5">
-      <path strokeLinecap="round" strokeWidth="1.8" d="M5 6h14M5 10h14M5 14h10M5 18h8" />
-    </svg>
-  )
+  return null
 }
 
 function EmptyPreview({ kind }: { kind: 'image' | 'video' }) {
@@ -263,7 +262,7 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
     : item.kind === 'text-to-image' || item.kind === 'image-to-image')
   const selectedWorkflow = availableWorkflows.find((item) => item.id === current?.data.workflowId)
     ?? availableWorkflows[0]
-  const isReferenceWorkflow = selectedWorkflow?.id === 'minimax-h3-r2v'
+  const isReferenceWorkflow = selectedWorkflow?.id.startsWith('minimax-h3-r2v') ?? false
   const isFirstLastWorkflow = kind === 'video' && selectedWorkflow?.id === 'minimax-h3-t2v-flf2v'
   const incoming = edges
     .filter((edge) => edge.target === id)
@@ -335,7 +334,7 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
 
   useEffect(() => {
     let active = true
-    window.electronAPI.listComfyWorkflows()
+    listCachedComfyWorkflows()
       .then((items: ComfyWorkflowInfo[]) => { if (active) setWorkflows(items) })
       .catch(() => { if (active) setWorkflows([]) })
     return () => { active = false }
@@ -370,7 +369,7 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
                   >
                     <span className="min-w-0 flex-1 truncate">{workflow.name}</span>
                     <span className="flex-shrink-0 rounded bg-white/[0.06] px-1.5 py-0.5 text-[8px] text-white/35">
-                      {workflow.id.startsWith('google-') ? 'Google · 文/图' : workflow.id === 'minimax-h3-r2v' ? '全模态' : workflow.kind === 'image-to-video' ? '视频' : workflow.kind === 'image-to-image' ? '图生图' : '文生图'}
+                      {workflow.id.startsWith('google-') ? 'Google · 文/图' : workflow.id.startsWith('minimax-h3-r2v') ? (workflow.id.endsWith('-turbo') ? '全模态 · 加速' : '全模态') : workflow.kind === 'image-to-video' ? '视频' : workflow.kind === 'image-to-image' ? '图生图' : '文生图'}
                     </span>
                   </button>
                 ))}
@@ -583,15 +582,6 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
         </div>
       )}
 
-      {kind === 'video' && isReferenceWorkflow && (
-        <div className="mb-2.5 rounded-lg border border-[#d4af37]/15 bg-[#d4af37]/[0.05] px-2.5 py-2 text-[9px] leading-4 text-white/42">
-          最多 9 张图片、3 个视频、3 段音频。按轨道中的顺序在提示词中使用
-          {' '}<span className="text-[#e8c766]">&lt;Picture 1&gt;</span>、
-          <span className="text-[#e8c766]">&lt;Video 1&gt;</span>、
-          <span className="text-[#e8c766]">&lt;Audio 1&gt;</span>。参考视频建议为 24fps、2–15 秒；视频自带音轨时会占用一个 Audio 编号。
-        </div>
-      )}
-
       <textarea
         value={current?.data.prompt ?? ''}
         onChange={(event) => {
@@ -603,7 +593,7 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
           : isReferenceWorkflow
             ? '描述视频并用 <Picture 1>、<Video 1>、<Audio 1> 指定参考素材…'
             : '描述视频的运动、镜头和节奏，连接图片节点可作为首尾帧参考…'}
-        className="min-h-20 w-full resize-none border-0 bg-transparent px-1 text-[12px] leading-5 text-[#e8e6df] outline-none placeholder:text-white/25"
+        className="min-h-[140px] w-full resize-none border-0 bg-transparent px-1 text-[12px] leading-5 text-[#e8e6df] outline-none placeholder:text-white/25"
       />
 
       {generationError && (
@@ -900,8 +890,6 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
     ? data.kind
     : isUpscale ? 'video' : null
   const isAudio = data.kind === 'audio'
-  const isShot = data.kind === 'shot'
-  const isMedia = !!visualMediaKind || isAudio
   const aspectRatio = data.aspectRatio ?? '16:9'
   const aspectRatioValue = aspectRatio === '1:1' ? '1 / 1' : aspectRatio === '4:3' ? '4 / 3' : '16 / 9'
 
@@ -940,7 +928,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
   }
 
   return (
-    <div className={isMedia ? 'w-[420px]' : 'w-[250px]'}>
+    <div className={data.kind === 'image' || data.kind === 'video' ? 'w-[620px]' : 'w-[420px]'}>
       <div className="mb-1.5 flex items-center gap-1 text-[11px] text-white/48">
         {nodeIcon(data.kind)}
         <span className="min-w-0 truncate">{data.title}</span>
@@ -1028,21 +1016,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
             </button>
             {data.generationError && <p className="text-[10px] text-rose-300">{data.generationError}</p>}
           </div>
-        ) : isShot ? (
-          <div className="min-h-[150px] space-y-3 p-5">
-            <div className="text-[10px] uppercase tracking-wider text-[#e8c766]">#{data.shotNumber ?? '—'}</div>
-            <p className="whitespace-pre-wrap text-[12px] leading-6 text-white/75">
-              {data.scene || '概括这个镜头的剧情或画面内容。'}
-            </p>
-          </div>
-        ) : (
-          <div className="min-h-[190px] p-5">
-            <div className="mb-5 flex justify-center text-white/25">{nodeIcon('text')}</div>
-            <p className="whitespace-pre-wrap text-[12px] leading-6 text-white/70">
-              {data.prompt || '在这里编写剧情、旁白或镜头说明。文本节点可以连接到图片节点作为提示词参考。'}
-            </p>
-          </div>
-        )}
+        ) : null}
         <Handle type="source" position={Position.Right} className="story-handle" />
       </div>
       {selected && visualMediaKind && !isUpscale && <PromptPanel id={id} kind={visualMediaKind} />}
@@ -1060,14 +1034,41 @@ const makeNode = (kind: StoryNodeKind, index: number, position?: { x: number; y:
   data: {
     kind,
     title: `${KIND_LABELS[kind]}节点 ${index}`,
-    ...(kind === 'text' || kind === 'image' || kind === 'video' ? { prompt: '' } : {}),
-    shotNumber: kind === 'shot' ? index : undefined,
+    ...(kind === 'image' || kind === 'video' ? { prompt: '' } : {}),
     aspectRatio: kind === 'image' || kind === 'video' || kind === 'upscale' ? '16:9' : undefined,
     duration: kind === 'video' ? 5 : undefined,
     scale: kind === 'upscale' ? 2 : undefined,
     quality: kind === 'upscale' ? 'ULTRA' : undefined,
   },
 })
+
+const workspacePreview = (projectId: string, relativePath: string): string => (
+  `workspace://${projectId}/${relativePath.split('/').map(encodeURIComponent).join('/')}`
+)
+
+const makeProjectMediaNode = (
+  asset: ProjectMediaAsset,
+  projectId: string,
+  index: number,
+  position: { x: number; y: number },
+): StoryNode => {
+  const node = makeNode(asset.kind, index, position)
+  return {
+    ...node,
+    data: {
+      ...node.data,
+      title: asset.name,
+      sourcePath: asset.relativePath,
+      preview: workspacePreview(projectId, asset.relativePath),
+    },
+  }
+}
+
+const formatAssetSize = (bytes: number): string => {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
 
 const makeLinkedEdge = (
   id: string,
@@ -1086,19 +1087,106 @@ const makeLinkedEdge = (
 })
 
 function CanvasFlow() {
-  const { currentProject, artifacts } = useAppStore()
+  const currentProject = useAppStore((state) => state.currentProject)
+  const artifacts = useAppStore((state) => state.artifacts)
   const folderPath = currentProject?.folderPath
   const [nodes, setNodes, onNodesChange] = useNodesState<StoryNode>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<StoryEdge>([])
   const [dismissedArtifacts, setDismissedArtifacts] = useState<Record<string, number>>({})
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('select')
+  const [assetPanelOpen, setAssetPanelOpen] = useState(false)
+  const [assetFilter, setAssetFilter] = useState<'all' | ProjectMediaKind>('all')
+  const [projectAssets, setProjectAssets] = useState<ProjectMediaAsset[]>([])
+  const [assetsLoading, setAssetsLoading] = useState(false)
+  const [assetError, setAssetError] = useState('')
+  const [uploadingMedia, setUploadingMedia] = useState(false)
   const { screenToFlowPosition, setViewport, getViewport, fitView } = useReactFlow<StoryNode, StoryEdge>()
   const loadedFolderRef = useRef<string | null>(null)
   const readyToSaveRef = useRef(false)
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const nodesRef = useRef<StoryNode[]>([])
   const edgesRef = useRef<StoryEdge[]>([])
+  const projectIdRef = useRef<string | null>(currentProject?.id ?? null)
   const revisionRef = useRef(0)
+  projectIdRef.current = currentProject?.id ?? null
+
+  const loadProjectAssets = useCallback(async () => {
+    if (!currentProject) return
+    setAssetsLoading(true)
+    setAssetError('')
+    try {
+      const result = await window.electronAPI.listProjectMedia(currentProject.id)
+      if (!result.success) throw new Error(result.error || '无法读取项目资产')
+      if (projectIdRef.current !== currentProject.id) return
+      setProjectAssets(result.assets)
+    } catch (error) {
+      if (projectIdRef.current === currentProject.id) {
+        setAssetError(error instanceof Error ? error.message : String(error))
+      }
+    } finally {
+      if (projectIdRef.current === currentProject.id) setAssetsLoading(false)
+    }
+  }, [currentProject])
+
+  const appendProjectAssets = useCallback((assets: ProjectMediaAsset[], origin: { x: number; y: number }) => {
+    if (!currentProject || assets.length === 0) return
+    setNodes((current) => [
+      ...current,
+      ...assets.map((asset, index) => makeProjectMediaNode(
+        asset,
+        currentProject.id,
+        current.length + index + 1,
+        { x: origin.x + index * 36, y: origin.y + index * 36 },
+      )),
+    ])
+  }, [currentProject, setNodes])
+
+  const uploadProjectMedia = useCallback(async () => {
+    if (!currentProject || uploadingMedia) return
+    setUploadingMedia(true)
+    setAssetError('')
+    try {
+      const result = await window.electronAPI.importProjectMedia(currentProject.id)
+      if (result.canceled) return
+      if (!result.success || !result.assets?.length) throw new Error(result.error || '没有导入任何媒体')
+      if (projectIdRef.current !== currentProject.id) return
+      const center = screenToFlowPosition({ x: window.innerWidth * 0.38, y: window.innerHeight * 0.45 })
+      appendProjectAssets(result.assets, center)
+      if (assetPanelOpen) await loadProjectAssets()
+    } catch (error) {
+      if (projectIdRef.current === currentProject.id) {
+        setAssetError(error instanceof Error ? error.message : String(error))
+      }
+    } finally {
+      if (projectIdRef.current === currentProject.id) setUploadingMedia(false)
+    }
+  }, [appendProjectAssets, assetPanelOpen, currentProject, loadProjectAssets, screenToFlowPosition, uploadingMedia])
+
+  const toggleAssetPanel = useCallback(() => {
+    setAssetPanelOpen((open) => {
+      if (!open) void loadProjectAssets()
+      return !open
+    })
+  }, [loadProjectAssets])
+
+  const handleAssetDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes(PROJECT_ASSET_DRAG_TYPE)) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+  }, [])
+
+  const handleAssetDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
+    const serialized = event.dataTransfer.getData(PROJECT_ASSET_DRAG_TYPE)
+    if (!serialized) return
+    event.preventDefault()
+    try {
+      const asset = JSON.parse(serialized) as ProjectMediaAsset
+      if (!['image', 'video', 'audio'].includes(asset.kind) || !asset.relativePath) return
+      appendProjectAssets([asset], screenToFlowPosition({ x: event.clientX, y: event.clientY }))
+    } catch {
+      setAssetError('无法读取拖拽的项目资产')
+    }
+  }, [appendProjectAssets, screenToFlowPosition])
 
   useEffect(() => {
     if (nodesRef.current !== nodes) revisionRef.current += 1
@@ -1119,6 +1207,7 @@ function CanvasFlow() {
   }
 
   const applyGenerationResult = (nodeId: string, projectId: string, relativePath: string) => {
+    if (projectIdRef.current !== projectId) return
     const preview = `workspace://${projectId}/${relativePath
       .split('/')
       .map(encodeURIComponent)
@@ -1150,7 +1239,7 @@ function CanvasFlow() {
     }
     patchNodeData(nodeId, { generationStatus: 'generating', generationError: '' })
     try {
-      const workflows: ComfyWorkflowInfo[] = await window.electronAPI.listComfyWorkflows()
+      const workflows: ComfyWorkflowInfo[] = await listCachedComfyWorkflows()
       const available = workflows.filter((item) => item.kind === 'text-to-image' || item.kind === 'image-to-image')
       const selectedWorkflow = available.find((item) => item.id === current.data.workflowId) ?? available[0]
       const referenceImagePath = edgesRef.current
@@ -1171,6 +1260,7 @@ function CanvasFlow() {
       }
       applyGenerationResult(nodeId, project.id, result.relativePath)
     } catch (error) {
+      if (projectIdRef.current !== project.id) return
       patchNodeData(nodeId, {
         generationStatus: 'error',
         generationError: error instanceof Error ? error.message : String(error),
@@ -1188,10 +1278,10 @@ function CanvasFlow() {
     }
     patchNodeData(nodeId, { generationStatus: 'generating', generationError: '' })
     try {
-      const workflows: ComfyWorkflowInfo[] = await window.electronAPI.listComfyWorkflows()
+      const workflows: ComfyWorkflowInfo[] = await listCachedComfyWorkflows()
       const available = workflows.filter((item) => item.kind === 'image-to-video')
       const selectedWorkflow = available.find((item) => item.id === current.data.workflowId) ?? available[0]
-      const isReferenceWorkflow = selectedWorkflow?.id === 'minimax-h3-r2v'
+      const isReferenceWorkflow = selectedWorkflow?.id.startsWith('minimax-h3-r2v') ?? false
       const isFirstLastWorkflow = selectedWorkflow?.id === 'minimax-h3-t2v-flf2v'
       const incomingSources = edgesRef.current
         .filter((edge) => edge.target === nodeId)
@@ -1244,6 +1334,7 @@ function CanvasFlow() {
       }
       applyGenerationResult(nodeId, project.id, result.relativePath)
     } catch (error) {
+      if (projectIdRef.current !== project.id) return
       patchNodeData(nodeId, {
         generationStatus: 'error',
         generationError: error instanceof Error ? error.message : String(error),
@@ -1283,6 +1374,7 @@ function CanvasFlow() {
       }
       applyGenerationResult(nodeId, project.id, result.relativePath)
     } catch (error) {
+      if (projectIdRef.current !== project.id) return
       patchNodeData(nodeId, {
         generationStatus: 'error',
         generationError: error instanceof Error ? error.message : String(error),
@@ -1452,7 +1544,7 @@ function CanvasFlow() {
           const occupied = new Set(nodesRef.current.map((node) => node.id))
           const created = inputs.map((input, index) => {
             const kind = input.kind as StoryNodeKind
-            if (!['shot', 'text', 'image', 'video', 'audio', 'upscale'].includes(kind)) throw new Error(`无效节点类型：${String(kind)}`)
+            if (!['image', 'video', 'audio', 'upscale'].includes(kind)) throw new Error(`无效节点类型：${String(kind)}`)
             const id = typeof input.id === 'string' && input.id.trim()
               ? input.id.trim()
               : `${kind}-${Date.now().toString(36)}-${index}-${Math.random().toString(36).slice(2, 7)}`
@@ -1577,16 +1669,20 @@ function CanvasFlow() {
     setNodes([])
     setEdges([])
     setDismissedArtifacts({})
+    setAssetPanelOpen(false)
+    setProjectAssets([])
+    setAssetError('')
 
-    void window.electronAPI.loadCanvasSnapshot(folderPath)
+    const requestedFolderPath = folderPath
+    void window.electronAPI.loadCanvasSnapshot(requestedFolderPath)
       .then((snapshot: unknown) => {
+        if (loadedFolderRef.current !== requestedFolderPath) return
         if (isFlowSnapshot(snapshot)) {
           const migrated = migrateLegacySnapshot(snapshot)
           const restoredNodes = migrated.nodes.map<StoryNode>((node) => {
-            const currentNode = simplifyShotNode(node)
-            return currentNode.data.generationStatus === 'generating'
-              ? { ...currentNode, data: { ...currentNode.data, generationStatus: 'idle' as const, generationError: '' } }
-              : currentNode
+            return node.data.generationStatus === 'generating'
+              ? { ...node, data: { ...node.data, generationStatus: 'idle' as const, generationError: '' } }
+              : node
           })
           const restoredEdges = migrated.edges.map((edge) => ({ ...edge, type: 'default' as const }))
           nodesRef.current = restoredNodes
@@ -1599,8 +1695,14 @@ function CanvasFlow() {
           void setViewport(DEFAULT_VIEWPORT)
         }
       })
-      .catch((error: unknown) => console.error('Failed to load canvas snapshot:', error))
-      .finally(() => { readyToSaveRef.current = true })
+      .catch((error: unknown) => {
+        if (loadedFolderRef.current === requestedFolderPath) {
+          console.error('Failed to load canvas snapshot:', error)
+        }
+      })
+      .finally(() => {
+        if (loadedFolderRef.current === requestedFolderPath) readyToSaveRef.current = true
+      })
   }, [folderPath, setEdges, setNodes, setViewport])
 
   useEffect(() => {
@@ -1609,7 +1711,7 @@ function CanvasFlow() {
     saveTimeoutRef.current = setTimeout(() => {
       const snapshot: FlowSnapshot = {
         type: 'react-flow',
-        version: 2,
+        version: 4,
         nodes,
         edges,
         viewport: getViewport(),
@@ -1637,29 +1739,18 @@ function CanvasFlow() {
         const shots = parseStoryboard(artifact.content)
         const originY = 80 + Math.floor(sequence / 2) * 80
         shots.forEach((shot, shotOffset) => {
-          const shotId = `${artifact.id}-shot-${shot.index}`
-          const imageId = `${shotId}-image`
-          const videoId = `${shotId}-video`
-          const shotNode: StoryNode = {
-            ...makeNode('shot', shot.index, { x: 100, y: originY + shotOffset * 330 }),
-            id: shotId,
-            data: {
-              kind: 'shot',
-              title: `镜头 ${shot.index}`,
-              shotNumber: shot.index,
-              scene: shot.scene,
-              artifactId: artifact.id,
-            },
-          }
+          const imageId = `${artifact.id}-shot-${shot.index}-image`
+          const videoId = `${artifact.id}-shot-${shot.index}-video`
           const existingImage = nodes.find((node) => node.id === imageId)
           const existingVideo = nodes.find((node) => node.id === videoId)
           const imageNode: StoryNode = {
-            ...makeNode('image', shot.index, { x: 560, y: originY + shotOffset * 330 }),
+            ...makeNode('image', shot.index, { x: 100, y: originY + shotOffset * 330 }),
             id: imageId,
             data: {
               kind: 'image',
               title: `镜头 ${shot.index} · 图片`,
               prompt: shot.textToImagePrompt || shot.scene,
+              artifactId: artifact.id,
               aspectRatio: '16:9',
               sourcePath: shot.imageSource,
               sourceHistory: shot.imageSourceHistory,
@@ -1669,12 +1760,12 @@ function CanvasFlow() {
             },
           }
           const videoNode: StoryNode = {
-            ...makeNode('video', shot.index, { x: 1080, y: originY + shotOffset * 330 }),
+            ...makeNode('video', shot.index, { x: 620, y: originY + shotOffset * 330 }),
             id: videoId,
             data: {
               kind: 'video',
               title: `镜头 ${shot.index} · 视频`,
-              prompt: shot.imageToVideoPrompt || shot.camera || '',
+              prompt: shot.imageToVideoPrompt || shot.camera || shot.scene,
               aspectRatio: '16:9',
               duration: ([5, 10, 15] as const).includes(shot.duration as 5 | 10 | 15) ? shot.duration : 5,
               sourcePath: shot.videoSource,
@@ -1684,17 +1775,11 @@ function CanvasFlow() {
                 : undefined,
             },
           }
-          additions.push(shotNode)
           if (!existingImage) additions.push(imageNode)
           if (!existingVideo) additions.push(videoNode)
           linkedEdges.push(
             makeLinkedEdge(
-              `${shotId}-to-image`,
-              shotId,
-              imageNode.id,
-            ),
-            makeLinkedEdge(
-              `${shotId}-image-to-video`,
+              `${imageId}-to-video`,
               imageNode.id,
               videoNode.id,
             ),
@@ -1705,7 +1790,8 @@ function CanvasFlow() {
 
       if (existingArtifactNode) continue
 
-      const kind: StoryNodeKind = artifact.type === 'image' ? 'image' : 'text'
+      if (artifact.type !== 'image') continue
+      const kind: StoryNodeKind = 'image'
       additions.push({
         ...makeNode(kind, sequence, {
           x: 100 + (sequence % 3) * 470,
@@ -1714,11 +1800,11 @@ function CanvasFlow() {
         data: {
           kind,
           title: artifact.title,
-          prompt: kind === 'text' ? artifact.content.slice(0, 500) : '',
-          preview: kind === 'image' ? artifact.content : undefined,
+          prompt: '',
+          preview: artifact.content,
           artifactId: artifact.id,
-          sourcePath: kind === 'image' ? artifact.path : undefined,
-          aspectRatio: kind === 'image' ? '16:9' : undefined,
+          sourcePath: artifact.path,
+          aspectRatio: '16:9',
         },
       })
     }
@@ -1816,7 +1902,7 @@ function CanvasFlow() {
         </svg>
       </button>
       <div className="mx-1 h-5 w-px bg-white/10" />
-      {(['shot', 'text', 'image', 'video', 'audio', 'upscale'] as StoryNodeKind[]).map((kind) => (
+      {(['image', 'video', 'audio', 'upscale'] as StoryNodeKind[]).map((kind) => (
         <button
           key={kind}
           onClick={() => addNode(kind)}
@@ -1834,6 +1920,10 @@ function CanvasFlow() {
     </div>
   ), [addNode, fitView, interactionMode])
 
+  const visibleProjectAssets = assetFilter === 'all'
+    ? projectAssets
+    : projectAssets.filter((asset) => asset.kind === assetFilter)
+
   return (
     <div className="relative h-full w-full bg-[#0a0a0f]">
       <ReactFlow<StoryNode, StoryEdge>
@@ -1844,6 +1934,8 @@ function CanvasFlow() {
         onNodesChange={handleNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
+        onDragOver={handleAssetDragOver}
+        onDrop={handleAssetDrop}
         selectionOnDrag={interactionMode === 'select'}
         selectionMode={SelectionMode.Partial}
         panOnDrag={interactionMode === 'pan' ? true : [1, 2]}
@@ -1855,6 +1947,7 @@ function CanvasFlow() {
         connectionLineStyle={{ stroke: '#e8c766', strokeWidth: 1.5 }}
         deleteKeyCode={['Backspace', 'Delete']}
         colorMode="dark"
+        onlyRenderVisibleElements
         fitViewOptions={{ padding: 0.2 }}
       >
         <Background color="rgba(255,255,255,0.16)" gap={18} size={1} variant={BackgroundVariant.Dots} />
@@ -1867,12 +1960,150 @@ function CanvasFlow() {
           maskColor="rgba(5,5,8,0.72)"
         />
       </ReactFlow>
+      <div className="pointer-events-auto absolute left-4 top-1/2 z-20 flex -translate-y-1/2 flex-col gap-2 rounded-2xl border border-white/10 bg-[#19191e]/95 p-2 shadow-[0_12px_35px_rgba(0,0,0,0.5)] backdrop-blur-xl">
+        <button
+          onClick={() => void uploadProjectMedia()}
+          disabled={uploadingMedia}
+          className="group flex h-12 w-12 flex-col items-center justify-center gap-1 rounded-xl text-white/55 transition hover:bg-white/[0.08] hover:text-[#e8c766] disabled:cursor-wait disabled:opacity-45"
+          title="上传本地图片、视频或音频"
+        >
+          {uploadingMedia ? (
+            <span className="h-4 w-4 animate-spin rounded-full border border-white/25 border-t-[#e8c766]" />
+          ) : (
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="h-4 w-4">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" />
+            </svg>
+          )}
+          <span className="text-[9px]">上传</span>
+        </button>
+        <div className="mx-2 h-px bg-white/10" />
+        <button
+          onClick={toggleAssetPanel}
+          className={`flex h-12 w-12 flex-col items-center justify-center gap-1 rounded-xl transition ${assetPanelOpen ? 'bg-[#d4af37]/15 text-[#e8c766]' : 'text-white/55 hover:bg-white/[0.08] hover:text-[#e8c766]'}`}
+          title="查看项目资产"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="h-4 w-4">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M3.5 7.5h17v11a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2v-11Zm3-4h11l2 4h-15l2-4Z" />
+          </svg>
+          <span className="text-[9px]">资产</span>
+        </button>
+      </div>
+
+      {assetPanelOpen && (
+        <aside className="pointer-events-auto absolute left-20 top-1/2 z-20 flex max-h-[72vh] w-[390px] -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-white/12 bg-[#151519]/98 shadow-[0_20px_60px_rgba(0,0,0,0.65)] backdrop-blur-xl">
+          <div className="flex items-center gap-2 border-b border-white/8 px-4 py-3">
+            <div>
+              <h3 className="text-[12px] font-medium tracking-[0.16em] text-[#e8e6df]">项目资产</h3>
+              <p className="mt-0.5 text-[9px] text-white/30">拖拽素材到画布即可创建节点</p>
+            </div>
+            <span className="ml-auto rounded-md bg-white/[0.06] px-2 py-1 text-[9px] tabular-nums text-white/35">{projectAssets.length}</span>
+            <button
+              onClick={() => void loadProjectAssets()}
+              disabled={assetsLoading}
+              className="flex h-7 w-7 items-center justify-center rounded-lg text-white/40 transition hover:bg-white/[0.07] hover:text-white disabled:opacity-40"
+              title="刷新资产"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className={`h-3.5 w-3.5 ${assetsLoading ? 'animate-spin' : ''}`}>
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6" />
+              </svg>
+            </button>
+            <button
+              onClick={() => setAssetPanelOpen(false)}
+              className="flex h-7 w-7 items-center justify-center rounded-lg text-white/40 transition hover:bg-white/[0.07] hover:text-white"
+              title="关闭"
+            >
+              ×
+            </button>
+          </div>
+
+          <div className="flex gap-1 border-b border-white/8 px-3 py-2">
+            {([
+              ['all', '全部'],
+              ['image', '图片'],
+              ['video', '视频'],
+              ['audio', '音频'],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value}
+                onClick={() => setAssetFilter(value)}
+                className={`rounded-lg px-3 py-1.5 text-[10px] transition ${assetFilter === value ? 'bg-[#d4af37]/14 text-[#e8c766]' : 'text-white/38 hover:bg-white/[0.05] hover:text-white/65'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto p-3">
+            {assetError && (
+              <div className="mb-3 rounded-lg border border-rose-500/20 bg-rose-500/[0.08] px-3 py-2 text-[10px] leading-4 text-rose-300">{assetError}</div>
+            )}
+            {assetsLoading && projectAssets.length === 0 ? (
+              <div className="flex h-40 items-center justify-center gap-2 text-[10px] text-white/35">
+                <span className="h-4 w-4 animate-spin rounded-full border border-white/20 border-t-[#e8c766]" />
+                正在扫描项目素材…
+              </div>
+            ) : visibleProjectAssets.length === 0 ? (
+              <div className="flex h-40 flex-col items-center justify-center text-center text-white/28">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="mb-3 h-8 w-8">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M3.5 7.5h17v11a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2v-11Zm3-4h11l2 4h-15l2-4Z" />
+                </svg>
+                <p className="text-[11px]">暂无{assetFilter === 'all' ? '项目素材' : `${assetFilter === 'image' ? '图片' : assetFilter === 'video' ? '视频' : '音频'}素材`}</p>
+                <p className="mt-1 text-[9px] text-white/20">可点击左侧上传按钮添加</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-2.5">
+                {visibleProjectAssets.map((asset) => {
+                  const preview = currentProject ? workspacePreview(currentProject.id, asset.relativePath) : ''
+                  return (
+                    <div
+                      key={asset.relativePath}
+                      draggable
+                      onDragStart={(event) => {
+                        event.dataTransfer.effectAllowed = 'copy'
+                        event.dataTransfer.setData(PROJECT_ASSET_DRAG_TYPE, JSON.stringify(asset))
+                      }}
+                      className="group cursor-grab overflow-hidden rounded-xl border border-white/10 bg-white/[0.025] transition hover:border-[#d4af37]/35 hover:bg-[#d4af37]/[0.04] active:cursor-grabbing"
+                      title="拖拽到画布创建节点"
+                    >
+                      <div className="flex h-24 items-center justify-center overflow-hidden bg-black/35">
+                        {asset.kind === 'image' ? (
+                          <img src={preview} alt={asset.name} draggable={false} loading="lazy" className="h-full w-full object-contain" />
+                        ) : asset.kind === 'video' ? (
+                          <video src={preview} muted preload="metadata" draggable={false} className="h-full w-full object-contain" />
+                        ) : (
+                          <div className="flex h-12 w-12 items-center justify-center rounded-full border border-[#d4af37]/20 bg-[#d4af37]/[0.08] text-xl text-[#e8c766]">♪</div>
+                        )}
+                      </div>
+                      <div className="p-2.5">
+                        <p className="truncate text-[10px] text-white/70">{asset.name}</p>
+                        <div className="mt-1.5 flex items-center justify-between text-[8px] text-white/28">
+                          <span>{asset.kind === 'image' ? '图片' : asset.kind === 'video' ? '视频' : '音频'}</span>
+                          <span>{formatAssetSize(asset.size)}</span>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        </aside>
+      )}
+
+      {!assetPanelOpen && assetError && (
+        <button
+          onClick={() => { setAssetPanelOpen(true); void loadProjectAssets() }}
+          className="pointer-events-auto absolute left-20 top-1/2 z-20 ml-2 mt-16 max-w-[280px] -translate-y-1/2 rounded-lg border border-rose-500/20 bg-[#21171a]/95 px-3 py-2 text-left text-[10px] leading-4 text-rose-300 shadow-xl"
+        >
+          {assetError}
+        </button>
+      )}
       {nodes.length === 0 && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div className="mb-20 text-center">
             <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border border-[#d4af37]/20 bg-[#d4af37]/[0.06] text-2xl text-[#e8c766]">✦</div>
-            <p className="mt-4 text-sm tracking-[0.2em] text-white/65">创建你的第一个分镜节点</p>
-            <p className="mt-2 text-xs text-white/30">从下方添加镜头、文本、图片、视频或音频节点</p>
+            <p className="mt-4 text-sm tracking-[0.2em] text-white/65">创建你的第一个生产节点</p>
+            <p className="mt-2 text-xs text-white/30">从下方添加图片、视频、音频或视频放大节点</p>
           </div>
         </div>
       )}

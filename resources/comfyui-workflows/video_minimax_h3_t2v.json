@@ -76,7 +76,7 @@
     "inputs": {
       "prompt": "",
       "width": 1024,
-      "height": 768,
+      "height": 576,
       "length": ["105:107", 1],
       "clip": ["105:13", 0],
       "vae": ["105:11", 0]

@@ -37,7 +37,6 @@ const REF_ICONS: Record<string, string> = {
 };
 
 const NODE_REF_ICONS: Record<string, string> = {
-  shot: '🎬',
   text: '📄',
   image: '🖼️',
   video: '🎞️',
@@ -99,6 +98,14 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     setActiveSkillIndex(0);
   }, [skillQuery]);
 
+  useEffect(() => {
+    setContent('');
+    setAttachments([]);
+    setHint('');
+    setSkills([]);
+    setSkillMenuDismissed(false);
+  }, [currentProject?.id]);
+
   const selectSkill = (skill: AvailableSkill) => {
     setContent(makeSkillCommand(skill.name));
     setSkillMenuDismissed(true);
@@ -106,7 +113,13 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (!showSkillMenu) return;
+    if (!showSkillMenu) {
+      if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+        event.preventDefault();
+        handleSend();
+      }
+      return;
+    }
     if (event.key === 'ArrowDown' && filteredSkills.length > 0) {
       event.preventDefault();
       setActiveSkillIndex((index) => (index + 1) % filteredSkills.length);

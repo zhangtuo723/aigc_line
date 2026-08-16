@@ -1,6 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { app } from 'electron';
+import log from 'electron-log/main';
 import { v4 as uuidv4 } from 'uuid';
 import type {
   Project,
@@ -8,12 +9,17 @@ import type {
   ProjectManifest,
   ChatMessage,
 } from '../../../src/shared/ipc.types';
+import {
+  parseChatEventLog,
+  replayChatEvents,
+  type ChatHistoryEvent,
+} from '../../../src/shared/chat-event-log';
 
 const APP_DIR_NAME = 'aigc-line';
 const PROJECTS_FILE = 'projects.json';
 const PROJECT_DIR_NAME = '.aigc-line';
 const MANIFEST_FILE = 'manifest.json';
-const CHAT_HISTORY_FILE = 'chat-history.json';
+const CHAT_EVENTS_FILE = 'chat-events.jsonl';
 const SESSION_FILE = 'session.json';
 const CANVAS_SNAPSHOT_FILE = 'canvas-snapshot.json';
 
@@ -134,31 +140,86 @@ export async function writeManifest(
   await fs.rename(tmpPath, filePath);
 }
 
-// Chat history persistence
-export async function readChatHistory(folderPath: string): Promise<ChatMessage[]> {
-  const filePath = path.join(folderPath, PROJECT_DIR_NAME, CHAT_HISTORY_FILE);
+// Chat history persistence. Each project has one append-only JSONL event log.
+const chatWriteQueues = new Map<string, Promise<void>>();
+const chatNextSequences = new Map<string, number>();
+
+function chatEventsPath(folderPath: string): string {
+  return path.join(folderPath, PROJECT_DIR_NAME, CHAT_EVENTS_FILE);
+}
+
+async function readChatEventLog(folderPath: string): Promise<ReturnType<typeof parseChatEventLog>> {
+  const filePath = chatEventsPath(folderPath);
   try {
     const data = await fs.readFile(filePath, 'utf-8');
-    const parsed = JSON.parse(data) as ChatMessage[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
+    return parseChatEventLog(data);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { events: [], ignoredIncompleteTail: false };
+    }
+    throw error;
   }
 }
 
-export async function writeChatHistory(folderPath: string, messages: ChatMessage[]): Promise<void> {
-  const dir = path.join(folderPath, PROJECT_DIR_NAME);
-  await fs.mkdir(dir, { recursive: true });
-  const filePath = path.join(dir, CHAT_HISTORY_FILE);
-  const tmpPath = `${filePath}.tmp`;
-  await fs.writeFile(tmpPath, JSON.stringify(messages, null, 2), 'utf-8');
-  await fs.rename(tmpPath, filePath);
+export async function readChatHistory(folderPath: string): Promise<ChatMessage[]> {
+  const pendingWrite = chatWriteQueues.get(path.resolve(folderPath));
+  if (pendingWrite) await pendingWrite;
+  const { events, ignoredIncompleteTail } = await readChatEventLog(folderPath);
+  if (ignoredIncompleteTail) {
+    log.warn('[ProjectStore] Ignoring incomplete final chat event:', chatEventsPath(folderPath));
+  }
+  return replayChatEvents(events);
 }
 
-export async function appendChatMessage(folderPath: string, message: ChatMessage): Promise<void> {
-  const messages = await readChatHistory(folderPath);
-  messages.push(message);
-  await writeChatHistory(folderPath, messages);
+function enqueueChatWrite(folderPath: string, operation: () => Promise<void>): Promise<void> {
+  const key = path.resolve(folderPath);
+  const previous = chatWriteQueues.get(key) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(operation);
+  chatWriteQueues.set(key, current);
+  void current.finally(() => {
+    if (chatWriteQueues.get(key) === current) chatWriteQueues.delete(key);
+  }).catch(() => undefined);
+  return current;
+}
+
+async function appendChatEvent(
+  folderPath: string,
+  makeEvent: (seq: number) => ChatHistoryEvent,
+): Promise<void> {
+  await enqueueChatWrite(folderPath, async () => {
+    const dir = path.join(folderPath, PROJECT_DIR_NAME);
+    await fs.mkdir(dir, { recursive: true });
+    const filePath = chatEventsPath(folderPath);
+    const key = path.resolve(folderPath);
+    let nextSeq = chatNextSequences.get(key);
+    if (nextSeq === undefined) {
+      const parsed = await readChatEventLog(folderPath);
+      if (parsed.ignoredIncompleteTail) {
+        const corruptPath = `${filePath}.corrupt-${Date.now()}`;
+        await fs.copyFile(filePath, corruptPath);
+        const validContent = parsed.events.map((event) => JSON.stringify(event)).join('\n');
+        await fs.writeFile(filePath, validContent ? `${validContent}\n` : '', 'utf-8');
+      }
+      nextSeq = (parsed.events.at(-1)?.seq ?? 0) + 1;
+    }
+    const event = makeEvent(nextSeq);
+    try {
+      await fs.appendFile(filePath, `${JSON.stringify(event)}\n`, 'utf-8');
+      chatNextSequences.set(key, nextSeq + 1);
+    } catch (error) {
+      chatNextSequences.delete(key);
+      throw error;
+    }
+  });
+}
+
+export function appendChatMessage(folderPath: string, message: ChatMessage): Promise<void> {
+  return appendChatEvent(folderPath, (seq) => ({
+    version: 1,
+    seq,
+    type: 'message.created',
+    message,
+  }));
 }
 
 export async function updateChatMessage(
@@ -166,12 +227,30 @@ export async function updateChatMessage(
   messageId: string,
   updater: (msg: ChatMessage) => ChatMessage,
 ): Promise<void> {
-  const messages = await readChatHistory(folderPath);
-  const idx = messages.findIndex((m) => m.id === messageId);
-  if (idx !== -1) {
-    messages[idx] = updater(messages[idx]);
-    await writeChatHistory(folderPath, messages);
-  }
+  await enqueueChatWrite(folderPath, async () => {
+    const parsed = await readChatEventLog(folderPath);
+    if (parsed.ignoredIncompleteTail) {
+      throw new Error('聊天事件日志末行不完整，请重新加载后再更新消息');
+    }
+    const current = replayChatEvents(parsed.events).find((message) => message.id === messageId);
+    if (!current) return;
+    const key = path.resolve(folderPath);
+    const seq = chatNextSequences.get(key) ?? ((parsed.events.at(-1)?.seq ?? 0) + 1);
+    const event: ChatHistoryEvent = {
+      version: 1,
+      seq,
+      type: 'message.replaced',
+      messageId,
+      message: updater(current),
+    };
+    try {
+      await fs.appendFile(chatEventsPath(folderPath), `${JSON.stringify(event)}\n`, 'utf-8');
+      chatNextSequences.set(key, seq + 1);
+    } catch (error) {
+      chatNextSequences.delete(key);
+      throw error;
+    }
+  });
 }
 
 // Session persistence for Claude Agent SDK

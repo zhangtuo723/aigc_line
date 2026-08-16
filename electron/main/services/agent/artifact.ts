@@ -23,6 +23,6 @@ export function pushArtifact(
     timestamp: Date.now(),
   };
   log.info('[Agent] Pushing artifact:', artifact.id, type, title);
-  messageHub.pushArtifact(artifact);
+  messageHub.pushArtifact(projectId, artifact);
   return artifact;
 }

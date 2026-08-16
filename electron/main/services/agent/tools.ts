@@ -5,10 +5,11 @@ import { z } from 'zod';
 import log from 'electron-log/main';
 import type { Artifact, CanvasStateSnapshot, ChatMessage } from '../../../../src/shared/ipc.types';
 import { messageHub } from '../message-hub';
-import { appendChatMessage } from '../project.store';
+import { appendChatMessage, readCanvasSnapshot } from '../project.store';
 import { pushArtifact } from './artifact';
 import { sendCanvasCommand } from './canvas-bridge';
 import { resolveVideoReviewRequest, reviewVideoWithQwen } from '../qwen-video-review.service';
+import { analyzeVideoWithQwen } from '../qwen-video-analysis.service';
 
 /** Image extensions -> MIME types supported as image artifacts */
 const IMAGE_MIME: Record<string, string> = {
@@ -31,8 +32,6 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
   const nodeFields = {
     title: z.string().optional(),
     prompt: z.string().optional(),
-    shotNumber: z.number().int().positive().optional(),
-    scene: z.string().optional(),
     aspectRatio: z.enum(['16:9', '1:1', '4:3']).optional(),
     sourcePath: z.string().optional(),
     workflowId: z.string().optional(),
@@ -92,11 +91,11 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
       ),
       tool(
         'CreateCanvasNodes',
-        'Create one or more live canvas nodes. A shot node only stores its number and concise scene/content; generation prompts and timing belong to image/video nodes. Normally connect a shot to an image node, then connect the image node to a video node. Only fields registered for the node kind are applied; call GetCanvasCapabilities to discover them. Canvas writes use last-write-wins and do not accept a revision precondition.',
+        'Create one or more live canvas nodes. Use image nodes for still references or keyframes, video nodes for generated clips, audio nodes for imported sound, and upscale nodes for video enlargement. Normally connect an image node directly to its video node. Store all generation requirements in the image/video prompt fields. Only fields registered for the node kind are applied; call GetCanvasCapabilities to discover them. Canvas writes use last-write-wins and do not accept a revision precondition.',
         {
           nodes: z.array(z.object({
             id: z.string().optional(),
-            kind: z.enum(['shot', 'text', 'image', 'video', 'audio', 'upscale']),
+            kind: z.enum(['image', 'video', 'audio', 'upscale']),
             position: positionSchema.optional(),
             ...nodeFields,
           })).min(1),
@@ -143,23 +142,50 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
         (args) => canvasResult('disconnect-edges', args),
       ),
       tool(
-        'ReviewStoryboardVideo',
-        'Review one shot with qwen3.5-omni-plus. Pass only one canvas node id (normally the shot id; image or video id is also accepted). The tool follows canvas connections to resolve the generated video, original prompt, related shot, and ordered reference images. It returns a plain-text Markdown review with nine independent scores, timestamped evidence, findings, and recommendations. It does not return structured data, calculate an overall score, or decide whether to accept, repair, or regenerate.',
+        'AnalyzeVideo',
+        'Analyze any video with qwen3.5-omni-plus according to a free-form user requirement. This is a general-purpose tool independent of the canvas storyboard reviewer. videoUrl may be a project-relative/absolute file path inside the current project or a public http(s) URL. The tool analyzes both video and audio, returns Chinese Markdown with timestamped evidence, and saves the report under generated/analyses/.',
         {
-          nodeId: z.string().min(1).describe('Exact canvas shot node id; a connected image or video node id is also accepted'),
+          videoUrl: z.string().min(1).describe('Project-local video path or public http(s) video URL'),
+          analysisRequest: z.string().min(1).describe('What to inspect, extract, compare, summarize, transcribe, or evaluate'),
+        },
+        async (args) => {
+          log.info('[AnalyzeVideo] Analyzing:', args.videoUrl);
+          try {
+            const result = await analyzeVideoWithQwen(folderPath, args.videoUrl, args.analysisRequest);
+            return {
+              content: [{ type: 'text', text: `${result.analysisText}\n\n---\n分析报告已保存：${result.reportPath}` }],
+            } as any;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            log.error('[AnalyzeVideo] Failed:', message);
+            return { content: [{ type: 'text', text: message }], isError: true } as any;
+          }
+        },
+      ),
+      tool(
+        'ReviewStoryboardVideo',
+        'Review one generated clip with qwen3.5-omni-plus. Pass its video node id, or an image node id that resolves to exactly one downstream video. The tool resolves the generated video, prompt, and ordered references, then checks continuity mistakes, visual corruption, malformed faces/bodies/hands/objects, broken physics, corrupted frames, audio distortion/dropouts/clipping, dialogue integrity, and audiovisual sync. It returns review text only: no report file or artifact. It does not calculate an overall score or decide whether to accept, repair, or regenerate.',
+        {
+          nodeId: z.string().min(1).describe('Exact canvas video node id; an image node with exactly one downstream video is also accepted'),
         },
         async (args) => {
           log.info('[ReviewStoryboardVideo] Reviewing node:', args.nodeId);
           try {
-            const canvasResponse = await sendCanvasCommand(projectId, 'get-state', {});
-            const state = canvasResponse.result as CanvasStateSnapshot;
+            let state: CanvasStateSnapshot | null = null;
+            try {
+              const canvasResponse = await sendCanvasCommand(projectId, 'get-state', {}, 1_500);
+              state = canvasResponse.result as CanvasStateSnapshot;
+            } catch (error) {
+              log.info('[ReviewStoryboardVideo] Live canvas unavailable, using saved snapshot:', error);
+              state = await readCanvasSnapshot(folderPath) as CanvasStateSnapshot | null;
+            }
             if (!state?.nodes || !state?.edges) throw new Error('无法读取实时画布状态');
             const request = resolveVideoReviewRequest(state, args.nodeId);
             const result = await reviewVideoWithQwen(folderPath, request);
             return {
               content: [{
                 type: 'text',
-                text: `${result.reviewText}\n\n---\n审核报告已保存：${result.reportPath}`,
+                text: result.reviewText,
               }],
             } as any;
           } catch (error) {
@@ -174,7 +200,7 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
       ),
       tool(
         'PushArtifact',
-        'Push a workspace file (markdown, html, or image) to the canvas. For storyboards, create shot/image/video nodes with the Canvas tools instead of pushing a storyboard table.',
+        'Push a workspace file (markdown, html, or image) to the canvas. For video plans, create image/video nodes with the Canvas tools instead of pushing a storyboard table.',
         {
           path: z.string().describe('Path to the file, relative to the workspace or absolute'),
           title: z.string().describe('A short title for the artifact'),
@@ -220,7 +246,7 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
               timestamp: Date.now(),
               artifact,
             };
-            messageHub.pushToFrontend(artifactMsg);
+            messageHub.pushToFrontend(projectId, artifactMsg);
             await appendChatMessage(folderPath, artifactMsg);
             return {
               content: [{ type: 'text', text: `Artifact pushed successfully: ${args.title} (${args.path})` }],

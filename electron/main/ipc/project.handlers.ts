@@ -10,6 +10,7 @@ import {
   setLastOpened,
   readManifest,
 } from '../services/project.store';
+import { importProjectMediaFiles, listProjectMediaAssets } from '../services/project-media.service';
 
 export function registerProjectHandlers(): void {
   ipcMain.handle(
@@ -66,6 +67,35 @@ export function registerProjectHandlers(): void {
       };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.project.importMedia, async (_event, projectId: string) => {
+    try {
+      const result = await dialog.showOpenDialog({
+        title: '上传图片、视频或音频到画布',
+        properties: ['openFile', 'multiSelections'],
+        filters: [
+          { name: '媒体文件', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif', 'mp4', 'webm', 'mov', 'mp3', 'wav', 'm4a', 'flac', 'ogg', 'aac'] },
+          { name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif'] },
+          { name: '视频', extensions: ['mp4', 'webm', 'mov'] },
+          { name: '音频', extensions: ['mp3', 'wav', 'm4a', 'flac', 'ogg', 'aac'] },
+        ],
+      });
+      if (result.canceled || result.filePaths.length === 0) {
+        return { success: false, canceled: true, assets: [] };
+      }
+      return { success: true, assets: await importProjectMediaFiles(projectId, result.filePaths) };
+    } catch (error) {
+      return { success: false, assets: [], error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.project.listMedia, async (_event, projectId: string) => {
+    try {
+      return { success: true, assets: await listProjectMediaAssets(projectId) };
+    } catch (error) {
+      return { success: false, assets: [], error: error instanceof Error ? error.message : String(error) };
     }
   });
 

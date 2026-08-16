@@ -11,9 +11,14 @@ import type {
   UpscaleVideoRequest,
   UpscaleVideoResult,
 } from '../../../src/shared/ipc.types'
+import {
+  imageDimensionsFor,
+  videoDimensionsFor,
+} from '../../../src/shared/media-dimensions'
 import { loadProject } from './project.store'
 import { getRuntimeSettings } from './settings.service'
 import { GOOGLE_IMAGE_MODELS } from './google-image.service'
+import { SEEDREAM_IMAGE_MODELS } from './seedream-image.service'
 
 type WorkflowNode = {
   class_type: string
@@ -44,38 +49,24 @@ interface WorkflowTemplate extends ComfyWorkflowInfo {
   heightField?: string
   imageNode?: string
   imageField?: string
+  saveNode?: string
 }
 
 const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
   {
-    id: 'flux2-klein-9b-t2i',
-    name: 'Flux2 Klein 9B · 文生图',
+    id: 'krea2-turbo-t2i',
+    name: 'Krea 2 Turbo · 文生图',
     kind: 'text-to-image',
-    file: 'flux2-klein-9b-text-to-image.json',
-    promptNode: '76',
-    promptField: 'value',
-    seedNode: '75:73',
-    seedField: 'noise_seed',
-    widthNode: '75:68',
-    widthField: 'value',
-    heightNode: '75:69',
-    heightField: 'value',
-  },
-  {
-    id: 'flux2-klein-9b-edit',
-    name: 'Flux2 Klein 9B · 图生图',
-    kind: 'image-to-image',
-    file: 'flux2-klein-9b-image-edit.json',
-    promptNode: '75:74',
+    file: 'krea2-turbo-text-to-image.json',
+    promptNode: '30:6',
     promptField: 'text',
-    seedNode: '75:73',
-    seedField: 'noise_seed',
-    widthNode: '133',
+    seedNode: '30:3',
+    seedField: 'seed',
+    widthNode: '30:5',
     widthField: 'width',
-    heightNode: '133',
+    heightNode: '30:5',
     heightField: 'height',
-    imageNode: '76',
-    imageField: 'image',
+    saveNode: '29',
   },
   {
     id: 'z-image-turbo-t2i',
@@ -113,6 +104,13 @@ const VIDEO_WORKFLOWS: VideoWorkflowTemplate[] = [
     file: 'video_minimax_h3_r2v.json',
     mode: 'reference',
   },
+  {
+    id: 'minimax-h3-r2v-turbo',
+    name: 'MiniMax H3 · 全模态参考（加速 LoRA）',
+    kind: 'image-to-video',
+    file: 'video_minimax_h3_r2v_turbo.json',
+    mode: 'reference',
+  },
 ]
 
 export const listComfyWorkflows = async (): Promise<ComfyWorkflowInfo[]> => {
@@ -122,19 +120,18 @@ export const listComfyWorkflows = async (): Promise<ComfyWorkflowInfo[]> => {
     name,
     kind: 'text-to-image',
   }))
-  return [...WORKFLOW_TEMPLATES, ...googleImageWorkflows, ...VIDEO_WORKFLOWS]
+  const seedreamImageWorkflows: ComfyWorkflowInfo[] = SEEDREAM_IMAGE_MODELS.map(({ id, name }) => ({
+    id,
+    name,
+    kind: 'text-to-image',
+  }))
+  return [...WORKFLOW_TEMPLATES, ...googleImageWorkflows, ...seedreamImageWorkflows, ...VIDEO_WORKFLOWS]
     .sort((a, b) => Number(b.id === defaultImageWorkflowId) - Number(a.id === defaultImageWorkflowId))
     .map(({ id, name, kind }) => ({ id, name, kind }))
 }
 
 const REQUEST_TIMEOUT_MS = 20_000
 const GENERATION_TIMEOUT_MS = 5 * 60_000
-
-const dimensionsFor = (ratio: ImageAspectRatio): { width: number; height: number } => {
-  if (ratio === '1:1') return { width: 1024, height: 1024 }
-  if (ratio === '4:3') return { width: 1024, height: 768 }
-  return { width: 1024, height: 576 }
-}
 
 const normalizeBaseUrl = (value: string): string => value.trim().replace(/\/+$/, '')
 
@@ -241,7 +238,7 @@ function buildTextToImageWorkflow(
   ratio: ImageAspectRatio,
   filenamePrefix: string,
 ): ComfyWorkflow {
-  const { width, height } = dimensionsFor(ratio)
+  const { width, height } = imageDimensionsFor(ratio)
   const seed = Math.floor(Math.random() * 1_000_000_000_000_000)
   return {
     '1': {
@@ -292,7 +289,7 @@ function buildFluxWorkflow(
   ratio: ImageAspectRatio,
   filenamePrefix: string,
 ): ComfyWorkflow {
-  const { width, height } = dimensionsFor(ratio)
+  const { width, height } = imageDimensionsFor(ratio)
   const seed = Math.floor(Math.random() * 1_000_000_000_000_000)
   return {
     '1': {
@@ -478,7 +475,7 @@ async function buildTemplateWorkflow(
   filenamePrefix: string,
 ): Promise<ComfyWorkflow> {
   const workflow = await loadWorkflowTemplate(template)
-  const { width, height } = dimensionsFor(request.aspectRatio)
+  const { width, height } = imageDimensionsFor(request.aspectRatio)
   const seed = Math.floor(Math.random() * 1_000_000_000_000_000)
   const setInput = (nodeId: string, field: string, value: unknown) => {
     const node = workflow[nodeId]
@@ -489,7 +486,8 @@ async function buildTemplateWorkflow(
   setInput(template.seedNode, template.seedField, seed)
   if (template.widthNode && template.widthField) setInput(template.widthNode, template.widthField, width)
   if (template.heightNode && template.heightField) setInput(template.heightNode, template.heightField, height)
-  if (workflow['9']?.class_type === 'SaveImage') workflow['9'].inputs.filename_prefix = filenamePrefix
+  const saveNode = workflow[template.saveNode ?? '9']
+  if (saveNode?.class_type === 'SaveImage') saveNode.inputs.filename_prefix = filenamePrefix
 
   if (template.kind === 'image-to-image') {
     if (!request.referenceImagePath) throw new Error('图生图工作流需要先连接一个已有图片节点作为参考图')
@@ -611,11 +609,7 @@ export async function generateVideoWithComfyUI(
   const template = VIDEO_WORKFLOWS.find((item) => item.id === request.workflowId) ?? VIDEO_WORKFLOWS[0]
   const workflow = await loadWorkflowFile(template.file, template.name)
   const duration = Math.max(1, Math.min(15, Number(request.duration ?? 5)))
-  const dimensions = request.aspectRatio === '1:1'
-    ? { width: 1024, height: 1024 }
-    : request.aspectRatio === '4:3'
-      ? { width: 1024, height: 768 }
-      : { width: 1024, height: 576 }
+  const dimensions = videoDimensionsFor(request.aspectRatio)
   const setInput = (nodeId: string, field: string, value: unknown) => {
     const node = workflow[nodeId]
     if (!node) throw new Error(`${template.name} 工作流缺少节点 ${nodeId}`)

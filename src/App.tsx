@@ -6,7 +6,8 @@ import { SettingsPage } from './pages/SettingsPage';
 import { TitleBar } from './components/TitleBar';
 
 function App() {
-  const { currentPage, loadProjects } = useAppStore();
+  const currentPage = useAppStore((state) => state.currentPage);
+  const loadProjects = useAppStore((state) => state.loadProjects);
 
   useEffect(() => {
     void loadProjects({ restoreLastOpened: true });

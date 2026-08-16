@@ -5,6 +5,8 @@ export const IPC_CHANNELS = {
     load: 'project:load',
     delete: 'project:delete',
     importAudio: 'project:importAudio',
+    importMedia: 'project:importMedia',
+    listMedia: 'project:listMedia',
   },
   chat: {
     sendMessage: 'chat:sendMessage',
@@ -35,6 +37,7 @@ export const IPC_CHANNELS = {
     testComfyUI: 'settings:testComfyUI',
     testQwen: 'settings:testQwen',
     testGoogleAi: 'settings:testGoogleAi',
+    testSeedream: 'settings:testSeedream',
   },
   push: {
     chatMessage: 'chat:receiveMessage',

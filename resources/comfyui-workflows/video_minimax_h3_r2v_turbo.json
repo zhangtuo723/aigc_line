@@ -1,0 +1,118 @@
+{
+  "92": {
+    "inputs": {
+      "filename_prefix": "video/MiniMax_H3",
+      "format": "auto",
+      "codec": "auto",
+      "video": ["130", 0]
+    },
+    "class_type": "SaveVideo"
+  },
+  "119": {
+    "inputs": { "vae_name": "minimax_h3_video_vae_fp16.safetensors" },
+    "class_type": "VAELoader"
+  },
+  "120": {
+    "inputs": { "vae_name": "minimax_h3_audio_vae_fp32.safetensors" },
+    "class_type": "VAELoader"
+  },
+  "121": {
+    "inputs": { "samples": ["125", 0], "vae": ["120", 0] },
+    "class_type": "VAEDecodeAudio"
+  },
+  "122": {
+    "inputs": { "samples": ["125", 0], "vae": ["119", 0] },
+    "class_type": "VAEDecode"
+  },
+  "123": {
+    "inputs": { "sampler_name": "res_multistep" },
+    "class_type": "KSamplerSelect"
+  },
+  "124": {
+    "inputs": {
+      "scheduler": "simple",
+      "steps": 8,
+      "denoise": 1,
+      "model": ["139", 0]
+    },
+    "class_type": "BasicScheduler"
+  },
+  "125": {
+    "inputs": {
+      "noise": ["129", 0],
+      "guider": ["126", 0],
+      "sampler": ["123", 0],
+      "sigmas": ["124", 0],
+      "latent_image": ["136", 1]
+    },
+    "class_type": "SamplerCustomAdvanced"
+  },
+  "126": {
+    "inputs": { "model": ["139", 0], "conditioning": ["136", 0] },
+    "class_type": "BasicGuider"
+  },
+  "127": {
+    "inputs": {
+      "unet_name": "minimax_h3_ref2va_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader"
+  },
+  "128": {
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+      "type": "minimax",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader"
+  },
+  "129": {
+    "inputs": { "noise_seed": 470951802611447 },
+    "class_type": "RandomNoise"
+  },
+  "130": {
+    "inputs": {
+      "fps": 24,
+      "bit_depth": 8,
+      "images": ["122", 0],
+      "audio": ["121", 0]
+    },
+    "class_type": "CreateVideo"
+  },
+  "131": {
+    "inputs": {
+      "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+      "values.a": ["132", 0]
+    },
+    "class_type": "ComfyMathExpression"
+  },
+  "132": {
+    "inputs": { "value": 5 },
+    "class_type": "PrimitiveFloat"
+  },
+  "136": {
+    "inputs": {
+      "prompt": ["138", 0],
+      "width": 1024,
+      "height": 576,
+      "length": ["131", 1],
+      "ref_image_size": "match",
+      "clip": ["128", 0],
+      "vae": ["119", 0],
+      "audio_vae": ["120", 0]
+    },
+    "class_type": "MiniMaxH3ReferenceToVideo"
+  },
+  "138": {
+    "inputs": { "value": "" },
+    "class_type": "PrimitiveStringMultiline"
+  },
+  "139": {
+    "inputs": {
+      "lora_name": "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+      "strength_model": 1,
+      "model": ["127", 0]
+    },
+    "class_type": "LoraLoaderModelOnly"
+  }
+}

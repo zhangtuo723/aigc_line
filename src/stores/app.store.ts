@@ -6,13 +6,17 @@ import type {
   Artifact,
   ArtifactRef,
   CanvasNodeRef,
+  ProjectChatMessagePush,
+  ProjectArtifactPush,
+  ProjectTurnEndPush,
 } from '../shared/ipc.types';
 
 interface AppState {
   projects: ProjectIndex;
   currentProject: Project | null;
   messages: ChatMessage[];
-  isAgentThinking: boolean;
+  chatHistoryError: string | null;
+  agentThinkingByProject: Record<string, boolean>;
   currentPage: 'home' | 'project' | 'settings';
   artifacts: Artifact[];
   /** Artifacts the user clicked on the canvas - attached to the next message */
@@ -24,7 +28,6 @@ interface AppState {
   setCurrentProject: (project: Project | null) => void;
   setMessages: (messages: ChatMessage[]) => void;
   addMessage: (message: ChatMessage) => void;
-  setAgentThinking: (isAgentThinking: boolean) => void;
   setCurrentPage: (page: 'home' | 'project' | 'settings') => void;
   setArtifacts: (artifacts: Artifact[]) => void;
   addArtifact: (artifact: Artifact) => void;
@@ -43,6 +46,7 @@ interface AppState {
 }
 
 const electronAPI = window.electronAPI;
+let projectSelectionSequence = 0;
 
 // Artifacts are keyed by their source file: re-pushing the same path updates
 // the existing entry in place (keeping its id, so canvas elements stay linked
@@ -60,7 +64,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   projects: { projects: [] },
   currentProject: null,
   messages: [],
-  isAgentThinking: false,
+  chatHistoryError: null,
+  agentThinkingByProject: {},
   currentPage: 'home',
   artifacts: [],
   referencedArtifacts: [],
@@ -70,7 +75,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   setCurrentProject: (currentProject) => set({ currentProject }),
   setMessages: (messages) => set({ messages }),
   addMessage: (message) => set((state) => ({ messages: [...state.messages, message] })),
-  setAgentThinking: (isAgentThinking) => set({ isAgentThinking }),
   setCurrentPage: (currentPage) => set({ currentPage }),
   setArtifacts: (artifacts) => set({ artifacts }),
   addArtifact: (artifact) => set((state) => ({ artifacts: upsertArtifact(state.artifacts, artifact) })),
@@ -123,17 +127,23 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   selectProject: async (id) => {
+    const selectionSequence = ++projectSelectionSequence;
     const project = await electronAPI.loadProject(id);
-    if (!project) return;
+    if (!project || selectionSequence !== projectSelectionSequence) return;
     set({
       currentProject: project,
       messages: [],
+      chatHistoryError: null,
       artifacts: [],
       referencedArtifacts: [],
       referencedCanvasNodes: [],
       currentPage: 'project',
     });
     await get().loadChatHistory();
+    if (
+      selectionSequence !== projectSelectionSequence
+      || get().currentProject?.id !== project.id
+    ) return;
     // Restore artifacts from artifact-type messages in chat history
     // (same file may have been pushed multiple times - keep one card per path)
     const { messages } = get();
@@ -149,12 +159,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     await electronAPI.deleteProject(id);
     const state = get();
     if (state.currentProject?.id === id) {
+      projectSelectionSequence += 1;
       set({
         currentProject: null,
         messages: [],
         artifacts: [],
         referencedArtifacts: [],
         referencedCanvasNodes: [],
+        agentThinkingByProject: {
+          ...state.agentThinkingByProject,
+          [id]: false,
+        },
       });
     }
     await get().loadProjects();
@@ -163,12 +178,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   loadChatHistory: async () => {
     const { currentProject } = get();
     if (!currentProject) return;
+    const projectId = currentProject.id;
     try {
       const history = await electronAPI.loadChatHistory(currentProject.folderPath);
-      set({ messages: history });
+      if (get().currentProject?.id !== projectId) return;
+      set({ messages: history, chatHistoryError: null });
     } catch (err) {
       console.error('Failed to load chat history:', err);
-      set({ messages: [] });
+      if (get().currentProject?.id !== projectId) return;
+      set({
+        messages: [],
+        chatHistoryError: err instanceof Error ? err.message : String(err),
+      });
     }
   },
 
@@ -188,7 +209,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     set((state) => ({
       messages: [...state.messages, message],
-      isAgentThinking: true,
+      agentThinkingByProject: {
+        ...state.agentThinkingByProject,
+        [currentProject.id]: true,
+      },
       referencedArtifacts: [],
       referencedCanvasNodes: [],
     }));
@@ -196,21 +220,42 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       await electronAPI.sendChatMessage(currentProject.id, message);
     } catch (err) {
-      set({ isAgentThinking: false });
+      set((state) => ({
+        agentThinkingByProject: {
+          ...state.agentThinkingByProject,
+          [currentProject.id]: false,
+        },
+        ...(state.currentProject?.id === currentProject.id
+          ? {
+              messages: state.messages.filter((item) => item.id !== message.id),
+              referencedArtifacts,
+              referencedCanvasNodes,
+            }
+          : {}),
+      }));
       throw err;
     }
   },
 }));
 
 // Subscribe to push events once
-electronAPI?.onChatMessage?.((message: ChatMessage) => {
+electronAPI?.onChatMessage?.(({ projectId, message }: ProjectChatMessagePush) => {
   useAppStore.setState((state) => {
+    const isCurrentProject = state.currentProject?.id === projectId;
+    const thinking = message.role === 'system' && message.event === 'context-cleared' ? false : true;
+    const runtimeUpdate = {
+      agentThinkingByProject: {
+        ...state.agentThinkingByProject,
+        [projectId]: thinking,
+      },
+    };
+    if (!isCurrentProject) return runtimeUpdate;
     // System messages include: thinking indicators and tool call status
     if (message.role === 'system') {
       if (message.event === 'context-cleared') {
         return {
           messages: [...state.messages, message],
-          isAgentThinking: false,
+          ...runtimeUpdate,
         };
       }
       if (message.toolCall) {
@@ -221,14 +266,14 @@ electronAPI?.onChatMessage?.((message: ChatMessage) => {
         if (existingIndex >= 0) {
           const updatedMessages = [...state.messages];
           updatedMessages[existingIndex] = message;
-          return { messages: updatedMessages, isAgentThinking: true };
+          return { messages: updatedMessages, ...runtimeUpdate };
         }
-        return { messages: [...state.messages, message], isAgentThinking: true };
+        return { messages: [...state.messages, message], ...runtimeUpdate };
       }
       // Thinking indicator message - add to messages list
       return {
         messages: [...state.messages, message],
-        isAgentThinking: true,
+        ...runtimeUpdate,
       };
     }
     // For assistant messages, append them; thinking state is cleared only by the
@@ -240,22 +285,30 @@ electronAPI?.onChatMessage?.((message: ChatMessage) => {
         return {
           messages: nextMessages,
           artifacts: upsertArtifact(state.artifacts, message.artifact),
+          ...runtimeUpdate,
         };
       }
-      return { messages: nextMessages };
+      return { messages: nextMessages, ...runtimeUpdate };
     }
     return state;
   });
 });
 
 // Turn-end signal from the main process - clears the thinking indicator
-electronAPI?.onTurnEnd?.(() => {
-  useAppStore.setState({ isAgentThinking: false });
+electronAPI?.onTurnEnd?.(({ projectId }: ProjectTurnEndPush) => {
+  useAppStore.setState((state) => ({
+    agentThinkingByProject: {
+      ...state.agentThinkingByProject,
+      [projectId]: false,
+    },
+  }));
 });
 
 // Subscribe to artifact push events
-electronAPI?.onArtifact?.((artifact: Artifact) => {
-  useAppStore.setState((state) => ({
-    artifacts: upsertArtifact(state.artifacts, artifact),
-  }));
+electronAPI?.onArtifact?.(({ projectId, artifact }: ProjectArtifactPush) => {
+  useAppStore.setState((state) =>
+    state.currentProject?.id === projectId
+      ? { artifacts: upsertArtifact(state.artifacts, artifact) }
+      : state,
+  );
 });

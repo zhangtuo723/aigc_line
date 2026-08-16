@@ -12,8 +12,6 @@ import { app } from 'electron';
 import log from 'electron-log/main';
 import type { ChatMessage } from '../../../../src/shared/ipc.types';
 import {
-  readChatHistory,
-  writeChatHistory,
   readSessionId,
   writeSessionId,
   appendChatMessage,
@@ -42,6 +40,7 @@ const CANVAS_MCP_TOOLS = [
   'ConnectCanvasNodes',
   'DisconnectCanvasEdges',
   'InvokeNodeAction',
+  'AnalyzeVideo',
   'ReviewStoryboardVideo',
 ];
 
@@ -137,7 +136,7 @@ async function handleStreamMessage(
     // A turn finished (success, error, or interrupt). When no turns remain,
     // tell the frontend to clear the thinking indicator.
     if (msg.type === 'result') {
-      await interruptActiveToolCalls(session.folderPath, activeToolCalls);
+      await interruptActiveToolCalls(session.projectId, session.folderPath, activeToolCalls);
       if (session.pendingContextClear) {
         const pending = session.pendingContextClear;
         session.pendingContextClear = null;
@@ -149,7 +148,7 @@ async function handleStreamMessage(
           timestamp: Date.now(),
           event: 'context-cleared',
         };
-        messageHub.pushToFrontend(boundary);
+        messageHub.pushToFrontend(session.projectId, boundary);
         await appendChatMessage(session.folderPath, boundary);
         pending.resolve();
       }
@@ -159,7 +158,7 @@ async function handleStreamMessage(
       // queue is drained, the session is idle regardless of the raw count.
       if (session.queue.length === 0) {
         session.pendingTurns = 0;
-        messageHub.notifyTurnEnd();
+        messageHub.notifyTurnEnd(session.projectId);
       }
       return;
     }
@@ -174,7 +173,7 @@ async function handleStreamMessage(
       content: text,
       timestamp: Date.now(),
     };
-    messageHub.pushToFrontend(textMsg);
+    messageHub.pushToFrontend(session.projectId, textMsg);
     await appendChatMessage(session.folderPath, textMsg);
   }
 }
@@ -249,7 +248,7 @@ async function pump(session: ProjectAgentSession): Promise<void> {
             preset: 'claude_code',
             append: buildSystemPromptAppend(folderPath),
           },
-          hooks: createToolTrackingHooks(folderPath, activeToolCalls),
+          hooks: createToolTrackingHooks(projectId, folderPath, activeToolCalls),
         },
       });
       session.activeQuery = stream;
@@ -265,6 +264,7 @@ async function pump(session: ProjectAgentSession): Promise<void> {
       }
       session.activeQuery = null;
       await interruptActiveToolCalls(
+        projectId,
         folderPath,
         activeToolCalls,
         'Agent 会话已结束，但工具没有返回完成事件。',
@@ -294,7 +294,7 @@ async function pump(session: ProjectAgentSession): Promise<void> {
     }
     if (session.pendingTurns > 0) {
       session.pendingTurns = 0;
-      messageHub.notifyTurnEnd();
+      messageHub.notifyTurnEnd(session.projectId);
     }
   }
 }
@@ -339,8 +339,7 @@ export async function enqueueAgentMessage(
   const { projectId, folderPath, allowedTools = ['Read', 'Bash', 'Glob', 'Grep'] } = options;
 
   // Persist the user message before queueing so history survives restarts
-  const history = await readChatHistory(folderPath);
-  await writeChatHistory(folderPath, [...history, userMessage]);
+  await appendChatMessage(folderPath, userMessage);
 
   const session = getOrCreateSession(projectId, folderPath, allowedTools);
   session.queue.push({

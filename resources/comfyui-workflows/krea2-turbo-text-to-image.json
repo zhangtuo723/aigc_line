@@ -1,0 +1,77 @@
+{
+  "29": {
+    "inputs": {
+      "filename_prefix": "Krea2_turbo",
+      "images": ["30:8", 0]
+    },
+    "class_type": "SaveImage",
+    "_meta": { "title": "保存图像" }
+  },
+  "50": {
+    "inputs": {
+      "text": "",
+      "clip": ["30:11", 0]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "CLIP文本编码" }
+  },
+  "30:12": {
+    "inputs": { "vae_name": "qwen_image_vae.safetensors" },
+    "class_type": "VAELoader",
+    "_meta": { "title": "加载VAE" }
+  },
+  "30:11": {
+    "inputs": {
+      "clip_name": "qwen3vl_4b_fp8_scaled.safetensors",
+      "type": "krea2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": { "title": "加载CLIP" }
+  },
+  "30:10": {
+    "inputs": {
+      "unet_name": "krea2_turbo_fp8_scaled.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": { "title": "UNet加载器" }
+  },
+  "30:5": {
+    "inputs": { "width": 2048, "height": 1152, "batch_size": 1 },
+    "class_type": "EmptyLatentImage",
+    "_meta": { "title": "空Latent图像" }
+  },
+  "30:6": {
+    "inputs": {
+      "text": "",
+      "clip": ["30:11", 0]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "CLIP文本编码" }
+  },
+  "30:3": {
+    "inputs": {
+      "seed": 830221195634176,
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": ["30:10", 0],
+      "positive": ["30:6", 0],
+      "negative": ["50", 0],
+      "latent_image": ["30:5", 0]
+    },
+    "class_type": "KSampler",
+    "_meta": { "title": "K采样器" }
+  },
+  "30:8": {
+    "inputs": {
+      "samples": ["30:3", 0],
+      "vae": ["30:12", 0]
+    },
+    "class_type": "VAEDecode",
+    "_meta": { "title": "VAE解码" }
+  }
+}

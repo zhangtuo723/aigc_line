@@ -1,12 +1,13 @@
 import { ipcMain } from 'electron'
 import { IPC_CHANNELS } from '../../../src/shared/ipc.channels'
-import type { SaveAppSettingsRequest, TestGoogleAiConnectionRequest, TestQwenConnectionRequest } from '../../../src/shared/ipc.types'
+import type { SaveAppSettingsRequest, TestGoogleAiConnectionRequest, TestQwenConnectionRequest, TestSeedreamConnectionRequest } from '../../../src/shared/ipc.types'
 import {
   getAppSettingsView,
   saveAppSettings,
   testComfyUIConnection,
   testGoogleAiConnection,
   testQwenConnection,
+  testSeedreamConnection,
 } from '../services/settings.service'
 
 export function registerSettingsHandlers(): void {
@@ -26,5 +27,9 @@ export function registerSettingsHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.settings.testGoogleAi,
     (_event, request: TestGoogleAiConnectionRequest) => testGoogleAiConnection(request),
+  )
+  ipcMain.handle(
+    IPC_CHANNELS.settings.testSeedream,
+    (_event, request: TestSeedreamConnectionRequest) => testSeedreamConnection(request),
   )
 }

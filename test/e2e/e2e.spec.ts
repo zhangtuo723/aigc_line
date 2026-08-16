@@ -115,6 +115,26 @@ test.describe('AIGC CANVAS Electron UI', () => {
     await expect(dialog).toBeHidden()
   })
 
+  test('project asset panel lists media and supports dragging it onto the canvas', async () => {
+    const assetName = `asset-${runId}.png`
+    const assetDirectory = path.join(testWorkspaceDir, 'generated', 'images')
+    await fs.mkdir(assetDirectory, { recursive: true })
+    await fs.writeFile(
+      path.join(assetDirectory, assetName),
+      Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64'),
+    )
+
+    await page.getByRole('button', { name: '资产' }).click()
+    await expect(page.getByRole('heading', { name: '项目资产' })).toBeVisible()
+    const assetCard = page.locator('[draggable="true"]').filter({ hasText: assetName })
+    await expect(assetCard).toBeVisible()
+
+    await assetCard.dragTo(page.locator('.react-flow__pane'), {
+      targetPosition: { x: 500, y: 300 },
+    })
+    await expect(page.getByText(assetName, { exact: true })).toHaveCount(2)
+  })
+
   test('deleting a project card stays on the home page', async () => {
     const projectName = `Delete E2E ${runId}`
     const deleteWorkspace = path.join(root, 'test-results', `delete-workspace-${runId}`)
@@ -133,5 +153,40 @@ test.describe('AIGC CANVAS Electron UI', () => {
     await expect(page.getByText(projectName, { exact: true })).toHaveCount(0)
     await expect(page.getByRole('heading', { name: '我的项目' })).toBeVisible()
     await expect(page.getByPlaceholder('描述你的想法，输入 / 使用 Skill，或拖入附件…')).toHaveCount(0)
+  })
+
+  test('settings use a grouped wide layout and list Seedream 5 models', async () => {
+    await page.setViewportSize({ width: 1600, height: 1000 })
+    await page.getByTitle('系统配置').click()
+    await expect(page.getByRole('heading', { name: '系统配置' })).toBeVisible()
+    await expect(page.getByText('Doubao-Seedream-5.0-pro · 文生图 / 图生图 · 2K')).toBeVisible()
+    await expect(page.getByText('Doubao-Seedream-5.0-lite · 文生图 / 图生图 · 2K')).toBeVisible()
+
+    const comfyBox = await page.getByRole('heading', { name: 'ComfyUI 服务' }).boundingBox()
+    const agentBox = await page.getByRole('heading', { name: 'Agent 环境' }).boundingBox()
+    const qwenBox = await page.getByRole('heading', { name: 'Qwen 音视频审查' }).boundingBox()
+    const googleBox = await page.getByRole('heading', { name: 'Google AI 图片生成' }).boundingBox()
+    const seedreamBox = await page.getByRole('heading', { name: 'Seedream 图片生成' }).boundingBox()
+    expect(comfyBox).not.toBeNull()
+    expect(agentBox).not.toBeNull()
+    expect(qwenBox).not.toBeNull()
+    expect(googleBox).not.toBeNull()
+    expect(seedreamBox).not.toBeNull()
+    expect(agentBox!.x).toBeGreaterThan(comfyBox!.x + 300)
+    expect(googleBox!.x).toBeGreaterThan(qwenBox!.x + 250)
+    expect(seedreamBox!.x).toBeGreaterThan(googleBox!.x + 250)
+
+    const seedreamKey = page.getByPlaceholder('输入火山方舟 API Key')
+    await seedreamKey.fill('ark-e2e-persistence-check')
+    await page.getByRole('button', { name: '保存配置' }).click()
+    await expect(page.getByText('配置已保存，API Key 持久化校验通过')).toBeVisible()
+    await expect(page.getByText('已保存', { exact: true })).toHaveCount(1)
+    await expect(page.getByText('清除已保存的 API Key')).toHaveCount(1)
+    await page.getByTitle('返回首页').click()
+    await page.getByTitle('系统配置').click()
+    await expect(page.getByPlaceholder('输入火山方舟 API Key')).toHaveValue('ark-e2e-persistence-check')
+    await expect(page.getByText('已保存', { exact: true })).toHaveCount(1)
+    await expect(page.getByRole('button', { name: '测试 Seedream 连接' })).toBeVisible()
+    await page.screenshot({ path: 'test/screenshots/settings-wide.png', fullPage: true })
   })
 })

@@ -23,7 +23,6 @@ export interface CanvasNodeSummary {
   id: string
   kind: CanvasNodeKind
   title: string
-  shotNumber?: number
   generationStatus: GenerationStatus
   hasOutput: boolean
 }
@@ -59,7 +58,6 @@ const summarizeNode = (node: ReadableCanvasNode): CanvasNodeSummary => ({
   id: node.id,
   kind: node.data.kind,
   title: node.data.title,
-  shotNumber: node.data.shotNumber,
   generationStatus: node.data.generationStatus ?? 'idle',
   hasOutput: typeof node.data.sourcePath === 'string' && node.data.sourcePath.length > 0,
 })
@@ -69,8 +67,6 @@ export function buildCanvasOverview(
   edges: readonly ReadableCanvasEdge[],
 ): CanvasOverview {
   const countsByKind: Record<CanvasNodeKind, number> = {
-    shot: 0,
-    text: 0,
     image: 0,
     video: 0,
     audio: 0,

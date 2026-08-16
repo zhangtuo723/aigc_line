@@ -23,7 +23,7 @@ describe('Google image models', () => {
   it('routes only Google image workflow ids to the Gemini API', () => {
     expect(isGoogleImageWorkflow('google-gemini-3.1-flash-image')).toBe(true)
     expect(isGoogleImageWorkflow('google-gemini-3-pro-image')).toBe(true)
-    expect(isGoogleImageWorkflow('flux2-klein-9b-t2i')).toBe(false)
+    expect(isGoogleImageWorkflow('krea2-turbo-t2i')).toBe(false)
     expect(isGoogleImageWorkflow(undefined)).toBe(false)
   })
 

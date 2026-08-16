@@ -15,6 +15,7 @@ import {
   upscaleVideoWithComfyUI,
 } from '../services/comfyui.service'
 import { generateImageWithGoogle, isGoogleImageWorkflow } from '../services/google-image.service'
+import { generateImageWithSeedream, isSeedreamImageWorkflow } from '../services/seedream-image.service'
 import { getRuntimeSettings } from '../services/settings.service'
 
 export function registerComfyUIHandlers(): void {
@@ -25,9 +26,9 @@ export function registerComfyUIHandlers(): void {
       try {
         const workflowId = request.workflowId || (await getRuntimeSettings()).defaultImageWorkflowId
         const resolvedRequest = { ...request, workflowId }
-        return isGoogleImageWorkflow(workflowId)
-          ? await generateImageWithGoogle(resolvedRequest)
-          : await generateImageWithComfyUI(resolvedRequest)
+        if (isGoogleImageWorkflow(workflowId)) return await generateImageWithGoogle(resolvedRequest)
+        if (isSeedreamImageWorkflow(workflowId)) return await generateImageWithSeedream(resolvedRequest)
+        return await generateImageWithComfyUI(resolvedRequest)
       } catch (error) {
         return {
           success: false,

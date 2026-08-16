@@ -1,7 +1,11 @@
 import { useAppStore } from '../stores/app.store';
 
 export function HomePage() {
-  const { projects, createProject, selectProject, deleteProject, setCurrentPage } = useAppStore();
+  const projects = useAppStore((state) => state.projects);
+  const createProject = useAppStore((state) => state.createProject);
+  const selectProject = useAppStore((state) => state.selectProject);
+  const deleteProject = useAppStore((state) => state.deleteProject);
+  const setCurrentPage = useAppStore((state) => state.setCurrentPage);
 
   const handleCreate = async () => {
     const folders = await window.electronAPI.showOpenDialog({ title: '选择项目文件夹' });
@@ -86,6 +90,14 @@ export function HomePage() {
                   <div
                     key={project.id}
                     onClick={() => selectProject(project.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        void selectProject(project.id);
+                      }
+                    }}
+                    role="button"
+                    tabIndex={0}
                     className="group cursor-pointer rounded-xl border border-white/[0.08] bg-white/[0.03] p-4 transition-all duration-300 hover:-translate-y-1 hover:border-[#d4af37]/40 hover:bg-white/[0.05] hover:shadow-[0_12px_40px_rgba(212,175,55,0.12)]"
                   >
                     <div className="flex items-start justify-between">

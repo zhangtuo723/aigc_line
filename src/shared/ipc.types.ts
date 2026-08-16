@@ -20,6 +20,29 @@ export interface ImportAudioResult {
   error?: string;
 }
 
+export type ProjectMediaKind = 'image' | 'video' | 'audio';
+
+export interface ProjectMediaAsset {
+  kind: ProjectMediaKind;
+  name: string;
+  relativePath: string;
+  size: number;
+  modifiedAt: number;
+}
+
+export interface ImportProjectMediaResult {
+  success: boolean;
+  canceled?: boolean;
+  assets?: ProjectMediaAsset[];
+  error?: string;
+}
+
+export interface ListProjectMediaResult {
+  success: boolean;
+  assets: ProjectMediaAsset[];
+  error?: string;
+}
+
 // Chat / Agent types
 export type MessageRole = 'user' | 'assistant' | 'system';
 
@@ -43,7 +66,7 @@ export interface ToolCall {
 }
 
 // Artifact types
-/** `storyboard` remains only so older chat histories can be imported into shot nodes. */
+/** `storyboard` remains only so older chat histories can be imported into image/video nodes. */
 export type ArtifactType = 'markdown' | 'html' | 'image' | 'storyboard';
 
 /** Legacy storyboard import shape. New projects store this data directly on canvas nodes. */
@@ -92,6 +115,21 @@ export interface ChatMessage {
   artifact?: Artifact;
 }
 
+/** Project-scoped push payloads prevent background agent sessions from leaking into the active project UI. */
+export interface ProjectChatMessagePush {
+  projectId: string;
+  message: ChatMessage;
+}
+
+export interface ProjectArtifactPush {
+  projectId: string;
+  artifact: Artifact;
+}
+
+export interface ProjectTurnEndPush {
+  projectId: string;
+}
+
 /** A lightweight pointer to a canvas artifact, attached to a chat message */
 export interface ArtifactRef {
   id: string;
@@ -124,7 +162,7 @@ export interface CanvasNodeRef {
 }
 
 // Live canvas bridge used by the Agent's Canvas MCP tools.
-export type CanvasNodeKind = 'shot' | 'text' | 'image' | 'video' | 'audio' | 'upscale';
+export type CanvasNodeKind = 'image' | 'video' | 'audio' | 'upscale';
 
 export interface CanvasPoint {
   x: number;
@@ -135,8 +173,6 @@ export interface CanvasNodeData extends Record<string, unknown> {
   kind: CanvasNodeKind;
   title: string;
   prompt?: string;
-  shotNumber?: number;
-  scene?: string;
   preview?: string;
   artifactId?: string;
   aspectRatio?: ImageAspectRatio;
@@ -240,6 +276,9 @@ export interface AppSettingsView {
   googleAiApiKey: string;
   googleAiApiKeyConfigured: boolean;
   googleAiProxyUrl: string;
+  seedreamBaseUrl: string;
+  seedreamApiKey: string;
+  seedreamApiKeyConfigured: boolean;
   defaultImageWorkflowId: string;
 }
 
@@ -255,6 +294,9 @@ export interface SaveAppSettingsRequest {
   googleAiApiKey?: string;
   clearGoogleAiApiKey?: boolean;
   googleAiProxyUrl?: string;
+  seedreamBaseUrl: string;
+  seedreamApiKey?: string;
+  clearSeedreamApiKey?: boolean;
 }
 
 export interface TestQwenConnectionRequest {
@@ -265,6 +307,11 @@ export interface TestQwenConnectionRequest {
 export interface TestGoogleAiConnectionRequest {
   apiKey?: string;
   proxyUrl?: string;
+}
+
+export interface TestSeedreamConnectionRequest {
+  baseUrl: string;
+  apiKey?: string;
 }
 
 export interface ConnectionTestResult {

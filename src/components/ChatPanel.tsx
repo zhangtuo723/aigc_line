@@ -5,15 +5,34 @@ import { ChatInput } from './ChatInput'
 import { useAppStore } from '../stores/app.store'
 
 export function ChatPanel() {
-  const { messages, isAgentThinking, currentProject, sendChatMessage } = useAppStore()
-  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const messages = useAppStore((state) => state.messages)
+  const chatHistoryError = useAppStore((state) => state.chatHistoryError)
+  const currentProject = useAppStore((state) => state.currentProject)
+  const sendChatMessage = useAppStore((state) => state.sendChatMessage)
+  const isAgentThinking = useAppStore((state) => (
+    state.currentProject ? !!state.agentThinkingByProject[state.currentProject.id] : false
+  ))
+  const messagesViewportRef = useRef<HTMLDivElement>(null)
+  const shouldStickToBottomRef = useRef(true)
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false)
   const [isClearingContext, setIsClearingContext] = useState(false)
   const [clearError, setClearError] = useState('')
+  const [sendError, setSendError] = useState('')
+  const toolStepCount = messages.reduce((count, message) => count + (message.toolCall ? 1 : 0), 0)
+  const dialogueCount = messages.length - toolStepCount
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const viewport = messagesViewportRef.current
+    if (!viewport || !shouldStickToBottomRef.current) return
+    viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' })
   }, [messages])
+
+  useEffect(() => {
+    shouldStickToBottomRef.current = true
+    setSendError('')
+    const viewport = messagesViewportRef.current
+    if (viewport) viewport.scrollTop = viewport.scrollHeight
+  }, [currentProject?.id])
 
   const handleSend = (content: string, attachments?: ChatMessageType['attachments']) => {
     if (!currentProject) return
@@ -22,7 +41,10 @@ export function ChatPanel() {
       setClearConfirmOpen(true)
       return
     }
-    sendChatMessage(content, attachments)
+    setSendError('')
+    void sendChatMessage(content, attachments).catch((error) => {
+      setSendError(error instanceof Error ? error.message : '消息发送失败，附件与节点引用已恢复')
+    })
   }
 
   const handleClearContext = async () => {
@@ -49,7 +71,15 @@ export function ChatPanel() {
       <div className="flex items-center gap-2 border-b border-white/[0.08] px-4 py-3">
         <span className="text-[9px] text-[#d4af37]">✦</span>
         <h3 className="text-sm font-medium tracking-wider text-[#e8e6df]">对话记录</h3>
-        <span className="ml-auto text-xs text-[#6d6a78]">{messages.length} 条消息</span>
+        <div className="ml-auto flex items-center gap-1.5 text-[10px] tabular-nums text-[#6d6a78]">
+          <span>{dialogueCount} 条对话</span>
+          {toolStepCount > 0 && (
+            <>
+              <span className="text-white/10">·</span>
+              <span>{toolStepCount} 个步骤</span>
+            </>
+          )}
+        </div>
         <button
           type="button"
           onClick={() => {
@@ -65,8 +95,19 @@ export function ChatPanel() {
       </div>
 
       {/* Messages area */}
-      <div className="flex-1 overflow-y-auto p-3">
-        {messages.length === 0 ? (
+      <div
+        ref={messagesViewportRef}
+        onScroll={(event) => {
+          const element = event.currentTarget
+          shouldStickToBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80
+        }}
+        className="flex-1 overflow-y-auto p-3"
+      >
+        {chatHistoryError ? (
+          <div className="m-4 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">
+            {chatHistoryError}
+          </div>
+        ) : messages.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center text-[#6d6a78]">
             <div className="relative">
               <div className="absolute inset-0 -m-4 rounded-full bg-[#d4af37]/10 blur-2xl" />
@@ -78,7 +119,7 @@ export function ChatPanel() {
             </p>
           </div>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-0.5">
             {messages.map((message) => (
               <ChatMessageItem key={message.id} message={message} />
             ))}
@@ -103,13 +144,17 @@ export function ChatPanel() {
                 </div>
               </div>
             )}
-            <div ref={messagesEndRef} />
           </div>
         )}
       </div>
 
       {/* Input area */}
       <div className="border-t border-white/[0.08]">
+        {sendError && (
+          <div className="mx-3 mt-2 rounded-lg border border-rose-400/25 bg-rose-400/10 px-3 py-2 text-xs text-rose-300">
+            {sendError}
+          </div>
+        )}
         <ChatInput onSend={handleSend} disabled={!currentProject || isClearingContext} />
       </div>
 

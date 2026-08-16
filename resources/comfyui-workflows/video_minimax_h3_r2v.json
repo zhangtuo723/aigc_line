@@ -93,8 +93,8 @@
   "136": {
     "inputs": {
       "prompt": ["138", 0],
-      "width": 512,
-      "height": 512,
+      "width": 1024,
+      "height": 576,
       "length": ["131", 1],
       "ref_image_size": "match",
       "clip": ["128", 0],

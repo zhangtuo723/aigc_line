@@ -1,0 +1,4 @@
+interface:
+  display_name: "人物参考图生成"
+  short_description: "先生成唯一身份底图，再用图生图派生不同场景人物版本"
+  default_prompt: "Use $character-reference-generation to create one canonical character base sheet and derive all scene variants from it with image-to-image."

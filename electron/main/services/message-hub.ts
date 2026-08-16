@@ -40,9 +40,9 @@ class MessageHub {
   }
 
   /** Push a chat message to all renderer windows */
-  pushToFrontend(message: ChatMessage): void {
+  pushToFrontend(projectId: string, message: ChatMessage): void {
     BrowserWindow.getAllWindows().forEach((win) => {
-      win.webContents.send(IPC_CHANNELS.push.chatMessage, message);
+      win.webContents.send(IPC_CHANNELS.push.chatMessage, { projectId, message });
     });
   }
 
@@ -58,7 +58,7 @@ class MessageHub {
     this.emit(event);
 
     // Also push to frontend as system message
-    this.pushToFrontend({
+    this.pushToFrontend(projectId, {
       id: `thinking-${Date.now()}`,
       role: 'system',
       content: message,
@@ -78,7 +78,7 @@ class MessageHub {
     this.emit(event);
 
     // Push to frontend
-    this.pushToFrontend({
+    this.pushToFrontend(projectId, {
       id: `tool-${toolCall.id}`,
       role: 'system',
       content: `正在执行: ${toolCall.toolName}`,
@@ -99,7 +99,7 @@ class MessageHub {
     this.emit(event);
 
     // Push to frontend with updated status
-    this.pushToFrontend({
+    this.pushToFrontend(projectId, {
       id: `tool-${toolCall.id}`,
       role: 'system',
       content: `已完成: ${toolCall.toolName} (${toolCall.duration}ms)`,
@@ -120,7 +120,7 @@ class MessageHub {
     this.emit(event);
 
     // Push final message to frontend
-    this.pushToFrontend({
+    this.pushToFrontend(projectId, {
       id: `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       role: 'assistant',
       content: text || 'Agent 执行完成。',
@@ -137,7 +137,7 @@ class MessageHub {
 
     this.emit(event);
 
-    this.pushToFrontend({
+    this.pushToFrontend(projectId, {
       id: `error-${Date.now()}`,
       role: 'assistant',
       content: `处理消息时出错: ${error}`,
@@ -146,16 +146,16 @@ class MessageHub {
   }
 
   /** Push an artifact to all renderer windows */
-  pushArtifact(artifact: Artifact): void {
+  pushArtifact(projectId: string, artifact: Artifact): void {
     BrowserWindow.getAllWindows().forEach((win) => {
-      win.webContents.send(IPC_CHANNELS.push.artifact, artifact);
+      win.webContents.send(IPC_CHANNELS.push.artifact, { projectId, artifact });
     });
   }
 
   /** Notify that the agent turn has finished (successfully or not) */
-  notifyTurnEnd(): void {
+  notifyTurnEnd(projectId: string): void {
     BrowserWindow.getAllWindows().forEach((win) => {
-      win.webContents.send(IPC_CHANNELS.push.turnEnd);
+      win.webContents.send(IPC_CHANNELS.push.turnEnd, { projectId });
     });
   }
   getActiveToolCalls(): ToolCall[] {

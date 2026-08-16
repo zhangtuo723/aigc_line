@@ -8,6 +8,7 @@
  */
 import type { ComfyWorkflowInfo } from '../shared/ipc.types'
 import type { NodeFieldDescriptor } from '../shared/node-capabilities'
+import { listCachedComfyWorkflows } from '../shared/comfy-workflows'
 import {
   registerNodeCapabilities,
   registerOptionProvider,
@@ -15,7 +16,7 @@ import {
 } from '../shared/node-capabilities'
 
 const workflowOptions = async (kinds: ComfyWorkflowInfo['kind'][]) => {
-  const workflows: ComfyWorkflowInfo[] = await window.electronAPI.listComfyWorkflows()
+  const workflows: ComfyWorkflowInfo[] = await listCachedComfyWorkflows()
   return workflows
     .filter((workflow) => kinds.includes(workflow.kind))
     .map((workflow) => ({ value: workflow.id, label: workflow.name }))
@@ -50,25 +51,6 @@ registerNodeCapabilities({
 })
 
 registerNodeCapabilities({
-  kind: 'shot',
-  label: '镜头节点',
-  fields: [
-    { key: 'shotNumber', type: 'number', description: '镜头号' },
-    { key: 'scene', type: 'string', description: '镜头内容' },
-  ],
-  actions: [],
-})
-
-registerNodeCapabilities({
-  kind: 'text',
-  label: '文本节点',
-  fields: [
-    { key: 'prompt', type: 'string', description: '文本内容' },
-  ],
-  actions: [],
-})
-
-registerNodeCapabilities({
   kind: 'image',
   label: '图片节点',
   fields: [
@@ -78,7 +60,7 @@ registerNodeCapabilities({
       key: 'workflowId',
       type: 'enum',
       dynamicOptions: 'comfy-image-workflows',
-      description: '图片生成模型或工作流（包含 ComfyUI、Nano Banana 2、Nano Banana Pro；可选值见 options）',
+      description: '图片生成模型或工作流（包含 ComfyUI、Nano Banana、Seedream；可选值见 options）',
     },
     { key: 'sourcePath', type: 'string', description: '生成结果的 workspace 相对路径' },
     ...generationStatusFields,

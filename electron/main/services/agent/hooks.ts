@@ -10,6 +10,7 @@ import type { ToolCallInfo } from './types';
  * Active calls are tracked in the provided map (keyed by tool_use_id).
  */
 export function createToolTrackingHooks(
+  projectId: string,
   folderPath: string,
   activeToolCalls: Map<string, ToolCallInfo>,
 ) {
@@ -39,7 +40,7 @@ export function createToolTrackingHooks(
             status: 'running',
           },
         };
-        messageHub.pushToFrontend(toolCallMsg);
+        messageHub.pushToFrontend(projectId, toolCallMsg);
         await appendChatMessage(folderPath, toolCallMsg);
         return { continue: true };
       }],
@@ -72,7 +73,7 @@ export function createToolTrackingHooks(
           },
         };
         activeToolCalls.delete(toolId);
-        messageHub.pushToFrontend(updatedMsg);
+        messageHub.pushToFrontend(projectId, updatedMsg);
         await updateChatMessage(folderPath, toolId, () => updatedMsg);
 
         return { continue: true };
@@ -121,7 +122,7 @@ export function createToolTrackingHooks(
           !!failureInput.is_interrupt,
           error,
         );
-        messageHub.pushToFrontend(updatedMsg);
+        messageHub.pushToFrontend(projectId, updatedMsg);
         await updateChatMessage(folderPath, toolId, () => updatedMsg);
         return { continue: true };
       }],
@@ -131,6 +132,7 @@ export function createToolTrackingHooks(
 
 /** Close orphaned running cards when a turn or stream ends without a post hook. */
 export async function interruptActiveToolCalls(
+  projectId: string,
   folderPath: string,
   activeToolCalls: Map<string, ToolCallInfo>,
   reason = '工具调用未返回完成事件，当前回合已结束；该操作可能已被自动重试。',
@@ -153,7 +155,7 @@ export async function interruptActiveToolCalls(
       },
     };
     log.warn('[Agent] Closing orphaned tool call:', tool.toolName, 'id:', tool.id);
-    messageHub.pushToFrontend(updatedMsg);
+    messageHub.pushToFrontend(projectId, updatedMsg);
     await updateChatMessage(folderPath, tool.id, () => updatedMsg);
   }
 }

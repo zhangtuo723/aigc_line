@@ -6,7 +6,7 @@ import type { Attachment, ChatMessage } from '../../../src/shared/ipc.types';
 import { normalizeInterruptedToolCalls } from '../../../src/shared/tool-call-status';
 import { clearAgentContext, enqueueAgentMessage, interruptAgentTurn, listAvailableSkills } from '../services/agent';
 import { messageHub } from '../services/message-hub';
-import { loadProject, readChatHistory, writeChatHistory } from '../services/project.store';
+import { loadProject, readChatHistory, updateChatMessage } from '../services/project.store';
 import log from 'electron-log/main';
 
 /**
@@ -92,11 +92,18 @@ export function registerChatHandlers(): void {
             // File missing or unreadable - keep the content from history
           }
         }
-        if (historyChanged) await writeChatHistory(folderPath, history);
+        if (historyChanged) {
+          for (const message of history) {
+            const previous = persistedHistory.find((item) => item.id === message.id);
+            if (previous?.toolCall?.status === 'running' && message.toolCall?.status === 'interrupted') {
+              await updateChatMessage(folderPath, message.id, () => message);
+            }
+          }
+        }
         return history;
       } catch (err) {
         log.error('[Chat] load history failed:', err);
-        return [];
+        throw new Error(`聊天记录加载失败：${err instanceof Error ? err.message : String(err)}`);
       }
     },
   );
@@ -108,7 +115,7 @@ export function registerChatHandlers(): void {
         // Get project info
         const project = await loadProject(projectId);
         if (!project) {
-          messageHub.pushToFrontend({
+          messageHub.pushToFrontend(projectId, {
             id: `error-${Date.now()}`,
             role: 'assistant',
             content: '项目不存在，请先创建或选择一个项目。',
@@ -137,7 +144,7 @@ export function registerChatHandlers(): void {
           projectId,
           err instanceof Error ? err.message : String(err),
         );
-        messageHub.notifyTurnEnd();
+        messageHub.notifyTurnEnd(projectId);
       }
     },
   );

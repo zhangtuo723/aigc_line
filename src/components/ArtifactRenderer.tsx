@@ -122,7 +122,8 @@ ${content}
         <iframe
           srcDoc={wrappedContent}
           className="h-full w-full border-0"
-          sandbox="allow-scripts allow-same-origin"
+          sandbox="allow-scripts"
+          referrerPolicy="no-referrer"
           title={artifact.title}
         />
       </div>

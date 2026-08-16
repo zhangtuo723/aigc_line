@@ -14,9 +14,14 @@ import {
   makeSkillCommand,
 } from '../src/shared/skill-command'
 import { normalizeInterruptedToolCalls } from '../src/shared/tool-call-status'
+import { parseChatEventLog, replayChatEvents } from '../src/shared/chat-event-log'
 import {
   resolveVideoReviewRequest,
 } from '../electron/main/services/qwen-video-review.service'
+import {
+  resolveAnalysisVideoInput,
+  validatePublicVideoUrl,
+} from '../electron/main/services/qwen-video-analysis.service'
 import {
   buildCanvasNodeDetail,
   buildCanvasOverview,
@@ -70,15 +75,9 @@ describe('canvas node references', () => {
 describe('canvas read models', () => {
   const nodes: CanvasNodeSnapshot[] = [
     {
-      id: 'shot-1',
-      type: 'storyNode',
-      position: { x: 10, y: 20 },
-      data: { kind: 'shot', title: '镜头 1', shotNumber: 1, scene: '很长的剧情详情' },
-    },
-    {
       id: 'image-1',
       type: 'storyNode',
-      position: { x: 30, y: 40 },
+      position: { x: 10, y: 20 },
       data: {
         kind: 'image',
         title: '镜头 1 · 图片',
@@ -88,9 +87,15 @@ describe('canvas read models', () => {
         generationStatus: 'idle',
       },
     },
+    {
+      id: 'video-1',
+      type: 'storyNode',
+      position: { x: 30, y: 40 },
+      data: { kind: 'video', title: '镜头 1 · 视频', prompt: '完整视频提示词' },
+    },
   ]
   const edges: CanvasEdgeSnapshot[] = [
-    { id: 'edge-1', source: 'shot-1', target: 'image-1' },
+    { id: 'edge-1', source: 'image-1', target: 'video-1' },
   ]
 
   it('returns a compact canvas overview without revisions or long node fields', () => {
@@ -99,10 +104,10 @@ describe('canvas read models', () => {
     expect(overview).toMatchObject({
       nodeCount: 2,
       edgeCount: 1,
-      countsByKind: { shot: 1, image: 1 },
+      countsByKind: { image: 1, video: 1 },
       nodes: [
-        { id: 'shot-1', kind: 'shot', title: '镜头 1', shotNumber: 1, hasOutput: false },
         { id: 'image-1', kind: 'image', title: '镜头 1 · 图片', generationStatus: 'idle', hasOutput: true },
+        { id: 'video-1', kind: 'video', title: '镜头 1 · 视频', hasOutput: false },
       ],
     })
     expect(overview).not.toHaveProperty('revision')
@@ -112,21 +117,19 @@ describe('canvas read models', () => {
   })
 
   it('returns one full node with compact incoming and outgoing connections', () => {
-    const detail = buildCanvasNodeDetail(nodes, edges, 'image-1')
+    const detail = buildCanvasNodeDetail(nodes, edges, 'video-1')
 
     expect(detail).toMatchObject({
-      id: 'image-1',
+      id: 'video-1',
       position: { x: 30, y: 40 },
       data: {
-        prompt: '完整图片提示词',
-        sourcePath: 'generated/images/image-1.png',
-        preview: '[inline preview omitted]',
+        prompt: '完整视频提示词',
       },
       incomingConnections: [{
         edgeId: 'edge-1',
-        nodeId: 'shot-1',
-        kind: 'shot',
-        title: '镜头 1',
+        nodeId: 'image-1',
+        kind: 'image',
+        title: '镜头 1 · 图片',
       }],
       outgoingConnections: [],
     })
@@ -216,11 +219,11 @@ describe('skill slash commands', () => {
       role: 'user',
       content: '/aigc-canvas:storyboard-production 创建三个夜景镜头',
       timestamp: 1,
-      nodeRefs: [{ id: 'shot-1', title: '镜头 1', kind: 'shot' }],
+      nodeRefs: [{ id: 'image-1', title: '镜头 1 · 图片', kind: 'image' }],
     }, 'E:\\workspace')
 
     expect(prompt.startsWith('/aigc-canvas:storyboard-production ')).toBe(true)
-    expect(prompt).toContain('nodeId="shot-1"')
+    expect(prompt).toContain('nodeId="image-1"')
   })
 })
 
@@ -266,30 +269,105 @@ describe('tool call status recovery', () => {
   })
 })
 
+describe('append-only chat event log', () => {
+  const created = {
+    version: 1 as const,
+    seq: 1,
+    type: 'message.created' as const,
+    message: { id: 'tool-1', role: 'system' as const, content: '运行中', timestamp: 1 },
+  }
+  const replaced = {
+    version: 1 as const,
+    seq: 2,
+    type: 'message.replaced' as const,
+    messageId: 'tool-1',
+    message: { id: 'tool-1', role: 'system' as const, content: '已完成', timestamp: 2 },
+  }
+
+  it('replays create and replace events', () => {
+    const parsed = parseChatEventLog(`${JSON.stringify(created)}\n${JSON.stringify(replaced)}\n`)
+    expect(replayChatEvents(parsed.events)).toEqual([replaced.message])
+    expect(parsed.ignoredIncompleteTail).toBe(false)
+  })
+
+  it('ignores only a malformed final line', () => {
+    const parsed = parseChatEventLog(`${JSON.stringify(created)}\n{"version":1`)
+    expect(replayChatEvents(parsed.events)).toEqual([created.message])
+    expect(parsed.ignoredIncompleteTail).toBe(true)
+  })
+
+  it('rejects corruption in the middle of the log', () => {
+    expect(() => parseChatEventLog(`${JSON.stringify(created)}\nnot-json\n${JSON.stringify(replaced)}\n`))
+      .toThrow('第 2 行损坏')
+  })
+})
+
 describe('storyboard video review', () => {
-  it('resolves a shot id to its generated video and reference image', () => {
+  it('resolves an image id to its generated video and reference image', () => {
+    const state: CanvasStateSnapshot = {
+      revision: 1,
+      nodeCount: 2,
+      edgeCount: 1,
+      viewport: { x: 0, y: 0, zoom: 1 },
+      nodes: [
+        { id: 'image-1', type: 'storyNode', position: { x: 100, y: 0 }, data: { kind: 'image', title: '角色参考', sourcePath: 'generated/images/shot-1.png' } },
+        { id: 'video-1', type: 'storyNode', position: { x: 200, y: 0 }, data: { kind: 'video', title: '镜头 1 视频', prompt: '主角进入房间并说你好', sourcePath: 'generated/videos/shot-1.mp4', referenceImageNodeIds: ['image-1'] } },
+      ],
+      edges: [
+        { id: 'edge-1', source: 'image-1', target: 'video-1' },
+      ],
+    }
+
+    const request = resolveVideoReviewRequest(state, 'image-1')
+    expect(request.videoNodeId).toBe('video-1')
+    expect(request.sourcePath).toBe('generated/videos/shot-1.mp4')
+    expect(request.referenceMedia).toEqual([expect.objectContaining({
+      kind: 'image',
+      label: '<Picture 1>',
+      nodeId: 'image-1',
+      sourcePath: 'generated/images/shot-1.png',
+    })])
+    expect(request.expectedContent).toContain('主角进入房间并说你好')
+  })
+
+  it('preserves multimodal reference numbering and fails on missing generated media', () => {
     const state: CanvasStateSnapshot = {
       revision: 1,
       nodeCount: 3,
       edgeCount: 2,
       viewport: { x: 0, y: 0, zoom: 1 },
       nodes: [
-        { id: 'shot-1', type: 'storyNode', position: { x: 0, y: 0 }, data: { kind: 'shot', title: '镜头 1', shotNumber: 1, scene: '主角进入房间' } },
-        { id: 'image-1', type: 'storyNode', position: { x: 100, y: 0 }, data: { kind: 'image', title: '角色参考', sourcePath: 'generated/images/shot-1.png' } },
-        { id: 'video-1', type: 'storyNode', position: { x: 200, y: 0 }, data: { kind: 'video', title: '镜头 1 视频', prompt: '主角进入房间并说你好', sourcePath: 'generated/videos/shot-1.mp4', referenceImageNodeIds: ['image-1'] } },
+        { id: 'image-1', type: 'storyNode', position: { x: 1, y: 0 }, data: { kind: 'image', title: '人物', sourcePath: 'images/person.png' } },
+        { id: 'audio-1', type: 'storyNode', position: { x: 2, y: 0 }, data: { kind: 'audio', title: '对白', sourcePath: 'audio/dialogue.wav' } },
+        { id: 'video-1', type: 'storyNode', position: { x: 3, y: 0 }, data: { kind: 'video', title: '成片', sourcePath: 'videos/result.mp4', referenceImageNodeIds: ['image-1'], referenceAudioNodeIds: ['audio-1'] } },
       ],
       edges: [
-        { id: 'edge-1', source: 'shot-1', target: 'image-1' },
-        { id: 'edge-2', source: 'image-1', target: 'video-1' },
+        { id: 'e1', source: 'image-1', target: 'video-1' },
+        { id: 'e2', source: 'audio-1', target: 'video-1' },
       ],
     }
 
-    const request = resolveVideoReviewRequest(state, 'shot-1')
-    expect(request.videoNodeId).toBe('video-1')
-    expect(request.sourcePath).toBe('generated/videos/shot-1.mp4')
-    expect(request.referenceImagePaths).toEqual(['generated/images/shot-1.png'])
-    expect(request.relatedShotNodeIds).toEqual(['shot-1'])
-    expect(request.expectedContent).toContain('主角进入房间并说你好')
+    const request = resolveVideoReviewRequest(state, 'video-1')
+    expect(request.referenceMedia?.map((item) => item.label)).toEqual(['<Picture 1>', '<Audio 1>'])
+    state.nodes[0].data.sourcePath = undefined
+    expect(() => resolveVideoReviewRequest(state, 'video-1')).toThrow('Picture 1')
   })
 
+})
+
+describe('general video analysis input', () => {
+  it('accepts project-local video paths and public URLs', () => {
+    expect(resolveAnalysisVideoInput('C:/projects/demo', 'generated/videos/a.mp4')).toEqual({
+      kind: 'local',
+      filePath: expect.stringMatching(/[\\/]projects[\\/]demo[\\/]generated[\\/]videos[\\/]a\.mp4$/),
+    })
+    expect(validatePublicVideoUrl('https://cdn.example.com/video.mp4')).toBe('https://cdn.example.com/video.mp4')
+  })
+
+  it('rejects project escapes and explicit private network URLs', () => {
+    expect(() => resolveAnalysisVideoInput('C:/projects/demo', '../secret.mp4')).toThrow('项目目录内')
+    expect(() => validatePublicVideoUrl('http://127.0.0.1/video.mp4')).toThrow('私有网络')
+    expect(() => validatePublicVideoUrl('http://192.168.1.2/video.mp4')).toThrow('私有网络')
+    expect(() => resolveAnalysisVideoInput('C:/projects/demo', 'file:///C:/video.mp4')).toThrow('只支持')
+  })
 })
