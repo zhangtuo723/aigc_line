@@ -1059,8 +1059,8 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
     if (!sourceNode) throw new Error('导演台节点已不存在，已取消写回截图')
     const outputCount = liveNodes.filter((node) => node.data.kind === 'image' && node.data.sourcePath?.includes('generated/director-stills/')).length
     const imageNode = makeNode('image', liveNodes.length + 1, {
-      x: (sourceNode?.position.x ?? 120) + 560,
-      y: (sourceNode?.position.y ?? 100) + outputCount * 120,
+      x: (sourceNode?.position.x ?? 120) + 600 + outputCount * 680,
+      y: sourceNode?.position.y ?? 100,
     })
     imageNode.data = {
       ...imageNode.data,
@@ -1078,6 +1078,65 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
       imageNode,
     ])
     setEdges((edges) => [...edges, makeLinkedEdge(`edge-${id}-${imageNode.id}`, id, imageNode.id)])
+    return relativePath
+  }
+
+  const exportDirectorVideo = async (
+    webmData: ArrayBuffer,
+    shot: DirectorShot,
+    directorProject: DirectorProject,
+  ): Promise<string> => {
+    if (!currentProject) throw new Error('当前项目不可用')
+    const exportProjectId = currentProject.id
+    const assertExportContext = () => {
+      if (useAppStore.getState().currentProject?.id !== exportProjectId) {
+        throw new Error('项目已切换，已取消写回本次导演台预演视频')
+      }
+      if (!getNodes().some((node) => node.id === id && node.data.kind === 'director')) {
+        throw new Error('导演台节点已不存在，已取消写回预演视频')
+      }
+    }
+    assertExportContext()
+    const result = await window.electronAPI.saveDirectorVideo({
+      projectId: exportProjectId,
+      nodeId: id,
+      shotId: shot.id,
+      shotName: shot.name,
+      webmData,
+    })
+    if (!result.success || !result.relativePath) throw new Error(result.error || '导演台预演视频保存失败')
+    assertExportContext()
+
+    const relativePath = result.relativePath
+    const preview = workspacePreview(exportProjectId, relativePath)
+    const liveNodes = getNodes()
+    const sourceNode = liveNodes.find((node) => node.id === id)
+    if (!sourceNode) throw new Error('导演台节点已不存在，已取消写回预演视频')
+    const outputCount = liveNodes.filter((node) => (
+      node.data.sourcePath?.includes('generated/director-stills/')
+      || node.data.sourcePath?.includes('generated/director-videos/')
+    )).length
+    const videoNode = makeNode('video', liveNodes.length + 1, {
+      x: sourceNode.position.x + 600 + outputCount * 680,
+      y: sourceNode.position.y,
+    })
+    videoNode.data = {
+      ...videoNode.data,
+      title: `${shot.name} · 预演视频`,
+      aspectRatio: shot.aspectRatio,
+      duration: shot.durationSec,
+      sourcePath: relativePath,
+      preview,
+      prompt: shot.notes ?? '',
+      readOnly: true,
+    }
+    setNodes((nodes) => [
+      ...nodes.map((node) => node.id === id
+        ? { ...node, data: { ...node.data, directorProject } }
+        : node),
+      videoNode,
+    ])
+    setEdges((edges) => [...edges, makeLinkedEdge(`edge-${id}-${videoNode.id}`, id, videoNode.id)])
     return relativePath
   }
 
@@ -1127,7 +1186,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
           </span>
         )}
         {data.readOnly && (
-          <span className="ml-1 rounded border border-[#d4af37]/25 bg-[#d4af37]/10 px-1.5 py-0.5 text-[9px] text-[#e8c766]">只读构图参考</span>
+          <span className="ml-1 rounded border border-[#d4af37]/25 bg-[#d4af37]/10 px-1.5 py-0.5 text-[9px] text-[#e8c766]">{data.kind === 'video' ? '只读预演视频' : '只读构图参考'}</span>
         )}
         <span className="ml-auto" />
         {selected && (
@@ -1240,6 +1299,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
             project={directorProject ?? createDefaultDirectorProject(data.title)}
             onChange={updateDirectorProject}
             onCapture={captureDirectorStill}
+            onExportVideo={exportDirectorVideo}
             onClose={() => setDirectorOpen(false)}
           />
         </Suspense>

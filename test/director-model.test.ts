@@ -7,11 +7,15 @@ import {
   createDirectorElement,
   createDirectorShot,
   directorCropRect,
+  directorMaxFrame,
   normalizeDirectorProject,
   patchDirectorShot,
   removeDirectorElement,
+  removeDirectorCameraKeyframe,
+  sampleDirectorCamera,
   snapshotElements,
   updateDirectorElement,
+  upsertDirectorCameraKeyframe,
   validateDirectorProject,
 } from '../src/features/director/director-model'
 import { directorProjectSchema } from '../src/shared/director-schema'
@@ -124,5 +128,41 @@ describe('director project model', () => {
     expect(directorCropRect(1600, 900, '16:9')).toEqual({ x: 0, y: 0, width: 1600, height: 900 })
     expect(directorCropRect(1600, 900, '9:16')).toEqual({ x: 547, y: 0, width: 506, height: 900 })
     expect(directorCropRect(1000, 1000, '4:3')).toEqual({ x: 0, y: 125, width: 1000, height: 750 })
+  })
+
+  it('uses shot duration as a 24fps timeline and interpolates camera keyframes', () => {
+    let project = createDefaultDirectorProject()
+    const shotId = project.activeShotId
+    const start = project.shots[0].position
+    project = upsertDirectorCameraKeyframe(project, shotId, 24, {
+      position: { x: start.x + 10, y: start.y, z: start.z },
+      target: project.shots[0].target,
+      fov: 65,
+    }, 'linear')
+    const shot = project.shots[0]
+    expect(directorMaxFrame(shot, project.fps)).toBe(119)
+    expect(sampleDirectorCamera(shot, 12)).toMatchObject({
+      position: { x: start.x + 5, y: start.y, z: start.z },
+      fov: 55,
+    })
+
+    project = removeDirectorCameraKeyframe(project, shotId, 24)
+    expect(project.shots[0].cameraKeyframes.some((keyframe) => keyframe.frame === 24)).toBe(false)
+    project = removeDirectorCameraKeyframe(project, shotId, 0)
+    expect(project.shots[0].cameraKeyframes.some((keyframe) => keyframe.frame === 0)).toBe(true)
+  })
+
+  it('trims camera keyframes when shot duration becomes shorter', () => {
+    let project = createDefaultDirectorProject()
+    const shotId = project.activeShotId
+    project = upsertDirectorCameraKeyframe(project, shotId, 48, {
+      position: { x: 1, y: 2, z: 3 },
+      target: { x: 0, y: 1, z: 0 },
+      fov: 50,
+    })
+    project = patchDirectorShot(project, shotId, { durationSec: 1 })
+    expect(directorMaxFrame(project.shots[0], project.fps)).toBe(23)
+    expect(project.shots[0].cameraKeyframes.every((keyframe) => keyframe.frame <= 23)).toBe(true)
+    expect(validateDirectorProject(project)).toEqual([])
   })
 })

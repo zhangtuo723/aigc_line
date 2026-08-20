@@ -31,7 +31,7 @@ import type {
   ProjectTurnEndPush,
   SavePastedImageResult,
 } from '../../src/shared/ipc.types';
-import type { SaveDirectorStillRequest, SaveDirectorStillResult } from '../../src/shared/director.types';
+import type { SaveDirectorStillRequest, SaveDirectorStillResult, SaveDirectorVideoRequest, SaveDirectorVideoResult } from '../../src/shared/director.types';
 
 export interface ElectronAPI {
   platform: NodeJS.Platform;
@@ -55,6 +55,7 @@ export interface ElectronAPI {
   saveCanvasSnapshot: (folderPath: string, snapshot: unknown) => Promise<{ success: boolean }>;
   loadCanvasSnapshot: (folderPath: string) => Promise<unknown | null>;
   saveDirectorStill: (request: SaveDirectorStillRequest) => Promise<SaveDirectorStillResult>;
+  saveDirectorVideo: (request: SaveDirectorVideoRequest) => Promise<SaveDirectorVideoResult>;
   saveArtifactContent: (
     projectId: string,
     relPath: string,
@@ -111,6 +112,7 @@ const api: ElectronAPI = {
   saveCanvasSnapshot: (folderPath, snapshot) => invoke(IPC_CHANNELS.canvas.save, folderPath, snapshot),
   loadCanvasSnapshot: (folderPath) => invoke(IPC_CHANNELS.canvas.load, folderPath),
   saveDirectorStill: (request) => invoke(IPC_CHANNELS.canvas.saveDirectorStill, request),
+  saveDirectorVideo: (request) => invoke(IPC_CHANNELS.canvas.saveDirectorVideo, request),
   saveArtifactContent: (projectId, relPath, content) =>
     invoke(IPC_CHANNELS.artifact.save, projectId, relPath, content),
   generateImage: (request) => invoke(IPC_CHANNELS.comfyui.generateImage, request),

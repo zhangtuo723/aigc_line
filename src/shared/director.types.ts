@@ -103,3 +103,17 @@ export interface SaveDirectorStillResult {
   relativePath?: string
   error?: string
 }
+
+export interface SaveDirectorVideoRequest {
+  projectId: string
+  nodeId: string
+  shotId: string
+  shotName: string
+  webmData: ArrayBuffer
+}
+
+export interface SaveDirectorVideoResult {
+  success: boolean
+  relativePath?: string
+  error?: string
+}

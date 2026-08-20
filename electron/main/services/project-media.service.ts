@@ -81,6 +81,37 @@ export async function saveDirectorStill(
   return toRelativePath(project.folderPath, destinationPath)
 }
 
+export async function saveDirectorVideo(
+  projectId: string,
+  nodeId: string,
+  shotId: string,
+  shotName: string,
+  webmData: ArrayBuffer,
+): Promise<string> {
+  const project = await loadProject(projectId)
+  if (!project) throw new Error('项目不存在或已被删除')
+  const data = Buffer.from(webmData)
+  if (data.byteLength < 16 || data.byteLength > 500 * 1024 * 1024) {
+    throw new Error('导演台预演视频大小无效')
+  }
+  const webmSignature = Buffer.from([0x1a, 0x45, 0xdf, 0xa3])
+  if (!data.subarray(0, 4).equals(webmSignature)) {
+    throw new Error('导演台预演视频不是有效的 WebM 文件')
+  }
+  if (!data.subarray(0, Math.min(data.length, 4096)).includes(Buffer.from('webm'))) {
+    throw new Error('导演台预演视频缺少 WebM 文档头')
+  }
+
+  const destinationDir = path.join(project.folderPath, 'generated', 'director-videos')
+  await fs.mkdir(destinationDir, { recursive: true })
+  const destinationPath = path.join(
+    destinationDir,
+    `${Date.now()}-${randomUUID().slice(0, 8)}-${safeGeneratedName(nodeId)}-${safeGeneratedName(shotId)}-${safeGeneratedName(shotName)}.webm`,
+  )
+  await fs.writeFile(destinationPath, data, { flag: 'wx' })
+  return toRelativePath(project.folderPath, destinationPath)
+}
+
 export async function importProjectMediaFiles(
   projectId: string,
   sourcePaths: readonly string[],

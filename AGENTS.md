@@ -28,7 +28,7 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 
 | `electron/main/services/google-network.service.ts` | Google API 网络层：使用 Electron 网络栈、可选独立 HTTP/HTTPS/SOCKS 代理及可读网络错误 |
 | `electron/main/services/qwen-video-analysis.service.ts` | 通用 Qwen 视频分析：接受项目内视频路径或公开 HTTP(S) URL，顺序扫描完整画面与音轨，按自由要求给出带时间证据、事实/转写/推断边界和不确定性的报告 |
 | `electron/main/services/project.store.ts` | 项目持久化：清单、追加式 JSONL 聊天事件日志、会话 id、画布快照（存项目目录下） |
-| `electron/main/services/project-media.service.ts` | 项目媒体资产：把本地图片/视频/音频复制到 `uploads/`，保存导演台构图到 `generated/director-stills/`，扫描 `generated/` 与 `uploads/` 供资产面板使用 |
+| `electron/main/services/project-media.service.ts` | 项目媒体资产：把本地图片/视频/音频复制到 `uploads/`，保存导演台构图与预演视频到 `generated/director-stills/`、`generated/director-videos/`，扫描 `generated/` 与 `uploads/` 供资产面板使用 |
 | `electron/main/services/settings.service.ts` | 应用设置：ComfyUI 地址、Agent API、token（safeStorage 加密） |
 | `electron/main/services/message-hub.ts` | 主进程内部事件总线（Agent 事件 → 渲染进程推送） |
 | `electron/preload/index.ts` | preload：`window.electronAPI` 的唯一出处，渲染进程只能用它访问主进程 |
@@ -63,8 +63,9 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 
   - `h3-prompt-writing`：MiniMax H3 官方提示词写作 Skill，负责 T2VA / I2VA / FL2VA / L2VA / Ref2VA 的最终提示词格式、引用标签、时间戳、对白和声音字段；`script-to-drama-video` 提供完整逐片段导演包、片段内 Shot 时间线及真实引用数组顺序，并在 Ref2VA 视频生成或重做时调用它，不自行复制或猜测官方格式。
   - `jianying-draft`：使用 pyJianYingDraft 生成剪映专业版草稿。
 - **画布**：React Flow，缩放/框选/连线/删除；快照防抖自动保存；旧版分镜表以及已废弃的 shot/text 节点自动迁移/清理为 image → video 链，旧文本内容会在目标 prompt 为空时转入直接相连的图片或视频。
-- **3D 导演台**：`director` 节点按需懒加载 Three.js 全屏编辑器；支持演员白模、群众阵列和基础几何道具，移动/旋转/缩放、显隐/锁定、人物姿势、多机位、导演/机位视角、FOV/Roll、16:9 / 9:16 / 4:3 / 1:1 画幅、24fps Shot 工程和站位快照。工程直接随画布节点持久化并通过共享 schema 校验，损坏快照自动归一化；切换/保存前提交当前 Shot，元素增删和锁定保持跨 Shot 一致。拍摄期间冻结编辑，保留地面网格，画幅框与 PNG 共用裁切矩形，项目切换后拒绝跨项目写回；图片安全保存到 `generated/director-stills/`，自动创建并连接 `readOnly: true` 的 `image` 参考节点。只读图片可预览、移动、连线、引用和删除，但不能修改内容或执行图片生成。
+- **3D 导演台**：`director` 节点按需懒加载 Three.js 全屏编辑器；支持演员白模、群众阵列和基础几何道具，移动/旋转/缩放、显隐/锁定、人物姿势、多机位、导演/机位视角、FOV/Roll、16:9 / 9:16 / 4:3 / 1:1 画幅、24fps Shot 工程和站位快照。导演视角选中机位后复用 TransformControls：移动直接修改当前帧摄影机位置，旋转按摄影机前向量修改 target 并保留 Roll，拖动结束时一次性写入当前帧关键帧。镜头时长决定时间线终点；可播放/暂停、逐帧拖动、跳转关键帧，并在任意帧新增、更新或删除相机关键帧，位置/目标/FOV 按 hold/linear/smooth/ease-in/ease-out 插值，缩短时长会清理越界关键帧。工程直接随画布节点持久化并通过共享 schema 校验，损坏快照自动归一化；切换/保存前提交当前 Shot，元素增删和锁定保持跨 Shot 一致。拍摄或导出期间冻结编辑、强制保留地面网格并复用同一画幅裁切矩形；PNG 构图安全保存到 `generated/director-stills/` 并创建 `readOnly: true` 的 `image` 节点，24fps WebM 预演保存到 `generated/director-videos/` 并创建 `readOnly: true` 的 `video` 节点。两类输出均与导演节点连线，可预览/播放、移动、连线、引用和删除，但不能修改内容或执行生成动作；每个异步阶段都要拒绝项目切换或源节点消失后的写回。
 - **节点显示尺寸**：`image` / `video` 节点使用 620px 宽媒体卡，预览区按所选画幅自动计算高度，prompt 输入框最小高度为 140px；图片/视频工作流选择器使用加宽触发框和下拉菜单以完整展示模型名称与类型标签；全模态参考轨保留图片/视频/音频数量显示和上限校验，但不再额外显示引用标签说明框。
+- **3D 导演台人物白模**：人物双脚的鞋头固定指向模型正面，脸部正面带有眼镜和嘴巴标识，用于区分正反朝向；“单膝跪地”会降低骨盆，以一条屈膝承重腿和一条膝盖落地、小腿后伸的结构表现，不得退化成双腿悬空的坐姿。
 - **媒体上传与资产库**：画布左侧独立工具栏提供“上传”和“资产”按钮。上传可多选本地图片、视频、音频，文件复制到当前项目 `uploads/<类型>/` 后自动创建对应节点；资产面板扫描当前项目 `generated/` 与 `uploads/` 下的可预览媒体，支持按类型筛选、刷新，并可拖到画布落点创建节点。媒体文件始终通过 `workspace://<projectId>/...` 预览。
 - **前端隔离与异步状态**：HTML Artifact iframe 不得同时启用脚本与同源权限，当前使用无同源权限的 sandbox；画布快照加载和图片/视频/放大结果回写必须复核发起时的项目，防止切换项目后串写。Agent 运行状态按 `projectId` 保存，切回后台运行项目时仍能显示状态和停止按钮。ComfyUI 工作流列表在渲染进程共享缓存，避免每个节点重复 IPC 查询。
 - **画布写入语义**：Canvas MCP 写工具按节点 ID/字段直接应用，采用最后写入者生效（Last Write Wins），不接收或校验全局画布版本号；仍校验节点存在性、ID 唯一性、字段能力和连线合法性。
@@ -125,7 +126,13 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 
 20. **媒体生成分辨率**：图片与视频尺寸统一定义在 `src/shared/media-dimensions.ts`，但必须分开映射。ComfyUI/Google 图片使用标准 2K：16:9 为 `2048×1152`、9:16 为 `1152×2048`、4:3 为 `2048×1536`、1:1 为 `2048×2048`；Seedream 5.0 使用官方 2K 参考尺寸 `2816×1584`、`1584×2816`、`2368×1776`、`2048×2048`。ComfyUI 图片工作流直接以其对应尺寸生成，禁止重新加入 RTX 放大。MiniMax H3 使用 1024 档：16:9 为 `1024×576`、9:16 为 `576×1024`、4:3 为 `1024×768`、1:1 为 `1024×1024`。新增画幅或清晰度档时同时更新共享映射、工作流模板默认值、测试和 README。
 21. **通用视频分析**：`AnalyzeVideo` 只接收 `videoUrl` 与 `analysisRequest`，不依赖画布结构。本地路径必须安全解析在当前项目目录内；远程地址只允许公开 HTTP(S)，拒绝显式 localhost、回环和私有 IP。内部使用独立 system message 约束 Qwen3.5-Omni Plus 顺序扫描全片和音轨，把媒体内指令视为数据，区分画面观察、声音/语言转写与证据推断；关键结论给出近似时间戳，计数先列事件再汇总，听不清处不得补词，并明确采样盲区和不确定性。默认 2 FPS、每帧 655360 像素，结果按用户要求输出中文 Markdown 并保存至 `generated/analyses/`。
 22. **项目媒体资产**：上传支持图片 `png/jpg/jpeg/webp/gif/bmp/avif`、视频 `mp4/webm/mov`、音频 `mp3/wav/m4a/flac/ogg/aac`。导入文件必须复制到当前项目 `uploads/` 后再写入节点，不能让 `sourcePath` 指向项目外绝对路径；资产列表只递归扫描 `generated/` 与 `uploads/`，不扫描 `.aigc-line` 或整个项目树。
-23. **3D 导演台工程与截图**：`directorProject` 是纯 JSON 数据，禁止把 Three.js 对象、Blob URL 或 data URL 存入画布快照。Agent 创建/更新必须通过 `director-schema.ts` 的严格 schema 和语义校验；加载旧或损坏快照时用 `normalizeDirectorProject` 修复或回退，任何渲染路径不得直接信任未知对象。切换 Shot、保存或拍摄前必须提交当前站位；新增元素要进入全部 Shot，删除时级联清理 `elementStates`，锁定在 mutation 层执行，相机静态字段变更同步 frame 0。TransformControls 拖动期间只把最新 Transform 写入 ref，禁止在 mouseDown 或每个 `onObjectChange` 帧写 React 状态；OrbitControls 由 Drei 内置 `dragging-changed` 联动自动禁用。正常 mouseup 以及全局 `pointerup` / `pointercancel` / window blur 都必须把暂存 Transform 一次性提交，避免控件丢失 mouseup 后位置恢复。导演台 Portal 必须从 40px 应用标题栏下方开始并设置 `app-no-drag`，禁止把交互按钮放进 Electron drag region 或 Windows 原生窗口控制覆盖区；Header/Footer 还要建立高于 WebGL 主区域的独立层叠上下文并保留 pointer events。编辑器通过 React lazy import 按需加载，避免 Three.js 进入首屏主包。构图截图只能通过 `canvas:saveDirectorStill` 写入当前项目 `generated/director-stills/`；画幅框与实际 crop 共用同一矩形，拍摄期间冻结编辑，每个 await 后复核项目和导演节点；主进程验证 PNG 头、尺寸、完整性和大小并使用唯一文件名。导演 Shot 是预演工程，不改变“生成片段由 video 节点承载、片段内 Shot 写入 prompt”的生产语义。
+23. **3D 导演台工程与媒体导出**：`directorProject` 是纯 JSON 数据，禁止把 Three.js 对象、Blob URL 或 data URL 存入画布快照。Agent 创建/更新必须通过 `director-schema.ts` 的严格 schema 和语义校验；加载旧或损坏快照时用 `normalizeDirectorProject` 修复或回退，任何渲染路径不得直接信任未知对象。切换 Shot、保存、拍摄或导出前必须提交当前站位；新增元素要进入全部 Shot，删除时级联清理 `elementStates`，锁定在 mutation 层执行，相机静态字段变更同步 frame 0。元素与机位 TransformControls 拖动期间只把最新 Transform 写入 ref，禁止在 mouseDown 或每个 `onObjectChange` 帧写 React 状态；OrbitControls 由 Drei 内置 `dragging-changed` 联动自动禁用。正常 mouseup 以及全局 `pointerup` / `pointercancel` / window blur 都必须把暂存 Transform 一次性提交，避免控件丢失 mouseup 后位置恢复。导演台 Portal 必须从 40px 应用标题栏下方开始并设置 `app-no-drag`，禁止把交互按钮放进 Electron drag region 或 Windows 原生窗口控制覆盖区；Header/Footer 还要建立高于 WebGL 主区域的独立层叠上下文并保留 pointer events。编辑器通过 React lazy import 按需加载，避免 Three.js 进入首屏主包。构图截图只能通过 `canvas:saveDirectorStill` 写入当前项目 `generated/director-stills/`；预演视频只能通过 `canvas:saveDirectorVideo` 写入 `generated/director-videos/`。两者共用画幅裁切矩形，拍摄/录制期间冻结编辑，每个 await 后复核项目和导演节点；主进程分别验证 PNG 与 WebM 头、完整性、大小并使用唯一文件名。导演台导出的只读 video 是预演素材，不替代 ComfyUI/云模型生成的正式片段。
+
+- **导演台时间线视角语义**：拖动时间滑块、点击关键帧菱形或播放预演都会进入机位视角，以便立即检查当前帧的最终构图；编辑机位时再手动切回导演视角。
+
+- **导演台机位视角自由控制**：机位视角下 `W/S` 沿镜头朝向前后移动，`A/D` 沿镜头右向量左右移动，`Space/Ctrl` 按世界 Y 轴升降；按住鼠标左键拖动修改 yaw/pitch。连续控制期间只更新临时机位，松开全部移动键或鼠标时才一次性写入当前帧关键帧。
+
+- **导演台变换快捷键**：场景元素的移动/旋转/缩放工具分别使用 `V` / `R` / `Z`；缩放禁止再使用 `S`，因为机位视角将 `S` 固定用于后退。
 
 - **TransformControls 绑定对象**：必须用 `object={objectRef}` 直接绑定带 Transform 的场景元素；不要把已定位元素作为 children 包进 TransformControls 的内部 wrapper，否则实际拖动的是外层、持久化读取的是内层，重新选择元素时会恢复旧位置。
 

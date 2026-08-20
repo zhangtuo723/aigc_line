@@ -1,5 +1,6 @@
 import type {
   DirectorAspectRatio,
+  DirectorCameraKeyframe,
   DirectorElement,
   DirectorElementKind,
   DirectorElementState,
@@ -16,6 +17,7 @@ const clone = <T,>(value: T): T => structuredClone(value)
 export const DIRECTOR_ASPECT_RATIOS: DirectorAspectRatio[] = ['16:9', '9:16', '4:3', '1:1']
 
 export interface DirectorCropRect { x: number; y: number; width: number; height: number }
+export type DirectorCameraView = Pick<DirectorCameraKeyframe, 'position' | 'target' | 'fov'>
 
 /** Center-crop geometry shared by the on-screen frame and PNG capture. */
 export function directorCropRect(width: number, height: number, aspect: DirectorAspectRatio): DirectorCropRect {
@@ -237,7 +239,102 @@ export function patchDirectorShot(
           ? next.cameraKeyframes.map((keyframe, index) => index === frameZero ? synced : keyframe)
           : [synced, ...next.cameraKeyframes]
       }
+      if ('durationSec' in patch) {
+        const maxFrame = Math.max(0, Math.ceil(next.durationSec * project.fps) - 1)
+        next.cameraKeyframes = next.cameraKeyframes.filter((keyframe) => keyframe.frame <= maxFrame)
+      }
       return next
+    }),
+  }
+}
+
+export function directorMaxFrame(shot: DirectorShot, fps = 24): number {
+  return Math.max(0, Math.ceil(shot.durationSec * fps) - 1)
+}
+
+const lerp = (from: number, to: number, amount: number): number => from + (to - from) * amount
+const lerpVec3 = (from: DirectorVec3, to: DirectorVec3, amount: number): DirectorVec3 => ({
+  x: lerp(from.x, to.x, amount),
+  y: lerp(from.y, to.y, amount),
+  z: lerp(from.z, to.z, amount),
+})
+
+function interpolationAmount(kind: DirectorCameraKeyframe['interpolation'], amount: number): number {
+  const t = Math.min(1, Math.max(0, amount))
+  if (kind === 'hold') return 0
+  if (kind === 'smooth') return t * t * (3 - 2 * t)
+  if (kind === 'ease-in') return t * t
+  if (kind === 'ease-out') return 1 - (1 - t) * (1 - t)
+  return t
+}
+
+/** Samples the persisted camera curve at an exact 24fps playhead frame. */
+export function sampleDirectorCamera(shot: DirectorShot, frame: number): DirectorCameraView {
+  const keyframes = [...shot.cameraKeyframes].sort((a, b) => a.frame - b.frame)
+  const fallback = { position: clone(shot.position), target: clone(shot.target), fov: shot.fov }
+  if (keyframes.length === 0) return fallback
+  const clampedFrame = Math.max(0, Math.floor(frame))
+  const rightIndex = keyframes.findIndex((keyframe) => keyframe.frame >= clampedFrame)
+  if (rightIndex === 0) return clone(keyframes[0])
+  if (rightIndex < 0) return clone(keyframes[keyframes.length - 1])
+  const left = keyframes[rightIndex - 1]
+  const right = keyframes[rightIndex]
+  if (right.frame === clampedFrame || right.frame === left.frame) return clone(right)
+  const amount = interpolationAmount(left.interpolation, (clampedFrame - left.frame) / (right.frame - left.frame))
+  return {
+    position: lerpVec3(left.position, right.position, amount),
+    target: lerpVec3(left.target, right.target, amount),
+    fov: lerp(left.fov, right.fov, amount),
+  }
+}
+
+export function upsertDirectorCameraKeyframe(
+  project: DirectorProject,
+  shotId: string,
+  frame: number,
+  view: DirectorCameraView,
+  interpolation: DirectorCameraKeyframe['interpolation'] = 'smooth',
+): DirectorProject {
+  return {
+    ...project,
+    shots: project.shots.map((shot) => {
+      if (shot.id !== shotId || shot.locked) return shot
+      const safeFrame = Math.min(directorMaxFrame(shot, project.fps), Math.max(0, Math.floor(frame)))
+      const existing = shot.cameraKeyframes.find((keyframe) => keyframe.frame === safeFrame)
+      if (existing?.locked) return shot
+      const keyframe: DirectorCameraKeyframe = {
+        id: existing?.id ?? directorId('camera-keyframe'),
+        frame: safeFrame,
+        position: clone(view.position),
+        target: clone(view.target),
+        fov: Math.min(120, Math.max(10, view.fov)),
+        interpolation: existing?.interpolation ?? interpolation,
+        locked: existing?.locked,
+      }
+      const cameraKeyframes = existing
+        ? shot.cameraKeyframes.map((item) => item.id === existing.id ? keyframe : item)
+        : [...shot.cameraKeyframes, keyframe]
+      cameraKeyframes.sort((a, b) => a.frame - b.frame)
+      return safeFrame === 0
+        ? { ...shot, position: clone(keyframe.position), target: clone(keyframe.target), fov: keyframe.fov, cameraKeyframes }
+        : { ...shot, cameraKeyframes }
+    }),
+  }
+}
+
+export function removeDirectorCameraKeyframe(
+  project: DirectorProject,
+  shotId: string,
+  frame: number,
+): DirectorProject {
+  if (frame === 0) return project
+  return {
+    ...project,
+    shots: project.shots.map((shot) => {
+      if (shot.id !== shotId || shot.locked) return shot
+      const target = shot.cameraKeyframes.find((keyframe) => keyframe.frame === frame)
+      if (!target || target.locked) return shot
+      return { ...shot, cameraKeyframes: shot.cameraKeyframes.filter((keyframe) => keyframe.id !== target.id) }
     }),
   }
 }

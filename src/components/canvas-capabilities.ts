@@ -97,6 +97,7 @@ registerNodeCapabilities({
     { key: 'referenceImageNodeIds', type: 'string-array', description: '全模态参考图片节点 id（最多 9 个）' },
     { key: 'referenceVideoNodeIds', type: 'string-array', description: '全模态参考视频节点 id（最多 3 个）' },
     { key: 'referenceAudioNodeIds', type: 'string-array', description: '全模态参考音频节点 id（最多 3 个）' },
+    { key: 'readOnly', type: 'boolean', readonly: true, description: '是否为导演台导出的只读预演视频节点（只读）' },
     ...generationStatusFields,
   ],
   actions: [
