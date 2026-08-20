@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import {
   addEdge,
   Background,
@@ -47,7 +47,15 @@ import {
   validateNodeFieldValue,
 } from '../shared/node-capabilities'
 import { buildCanvasNodeDetail, buildCanvasOverview } from '../shared/canvas-read-model'
+import { orderImageReferences } from '../shared/image-references'
+import type { DirectorProject, DirectorShot } from '../shared/director.types'
+import { directorProjectSchema } from '../shared/director-schema'
+import { createDefaultDirectorProject, normalizeDirectorProject, validateDirectorProject } from '../features/director/director-model'
 import './canvas-capabilities'
+
+const DirectorStageDialog = lazy(() => import('../features/director/DirectorStageDialog').then((module) => ({
+  default: module.DirectorStageDialog,
+})))
 
 type StoryNodeKind = CanvasNodeKind
 type InteractionMode = 'select' | 'pan'
@@ -74,6 +82,7 @@ const KIND_LABELS: Record<StoryNodeKind, string> = {
   video: '视频',
   audio: '音频',
   upscale: '视频放大',
+  director: '3D 导演台',
 }
 /**
  * Registry-driven field picking: only fields declared writable for the node
@@ -93,6 +102,12 @@ const pickMutableNodeData = (
     if (field.readonly) throw new Error(`字段为只读，不可修改：${key}`)
     const error = validateNodeFieldValue(field, fieldValue)
     if (error) throw new Error(`字段 ${key} 无效：${error}`)
+    if (kind === 'director' && key === 'directorProject') {
+      const parsed = directorProjectSchema.safeParse(fieldValue)
+      if (!parsed.success) throw new Error('字段 directorProject 无效：工程结构不完整或字段类型错误')
+      const issues = validateDirectorProject(parsed.data as DirectorProject)
+      if (issues.length > 0) throw new Error(`字段 directorProject 无效：${issues.join('；')}`)
+    }
     Object.assign(result, { [key]: fieldValue })
   }
   return result
@@ -126,7 +141,17 @@ const migrateLegacySnapshot = (snapshot: FlowSnapshot): FlowSnapshot => {
   const retiredTexts = snapshot.nodes.filter((node) => (node.data.kind as string) === 'text')
   const retiredNodes = [...retiredShots, ...retiredTexts]
   const removedIds = new Set([...legacyBoards, ...retiredNodes].map((node) => node.id))
-  const nodes = snapshot.nodes.filter((node) => !removedIds.has(node.id))
+  const nodes = snapshot.nodes.filter((node) => !removedIds.has(node.id)).map((node) => (
+    node.data.kind === 'director'
+      ? {
+          ...node,
+          data: {
+            ...node.data,
+            directorProject: normalizeDirectorProject(node.data.directorProject, node.data.title),
+          },
+        }
+      : node
+  ))
   const edges = snapshot.edges.filter((edge) => !removedIds.has(edge.source) && !removedIds.has(edge.target))
 
   for (const retired of retiredNodes) {
@@ -224,6 +249,14 @@ const nodeIcon = (kind: StoryNodeKind) => {
       </svg>
     )
   }
+  if (kind === 'director') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="h-3.5 w-3.5">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" d="M4 6.5 12 3l8 3.5v10L12 21l-8-4.5v-10Z" />
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" d="m4 6.5 8 4 8-4M12 10.5V21M7.5 8.2 16 4.6" />
+      </svg>
+    )
+  }
   return null
 }
 
@@ -259,16 +292,26 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
   const generationError = current?.data.generationError ?? ''
   const availableWorkflows = workflows.filter((item) => kind === 'video'
     ? item.kind === 'image-to-video'
-    : item.kind === 'text-to-image' || item.kind === 'image-to-image')
+    : item.kind === 'text-to-image')
   const selectedWorkflow = availableWorkflows.find((item) => item.id === current?.data.workflowId)
     ?? availableWorkflows[0]
-  const isReferenceWorkflow = selectedWorkflow?.id.startsWith('minimax-h3-r2v') ?? false
+  const isGoogleImageWorkflow = kind === 'image' && (selectedWorkflow?.id.startsWith('google-') ?? false)
+  const isSeedreamImageWorkflow = kind === 'image' && (selectedWorkflow?.id.startsWith('seedream-') ?? false)
+  const isCloudImageWorkflow = isGoogleImageWorkflow || isSeedreamImageWorkflow
+  const imageReferenceLimit = isGoogleImageWorkflow ? 14 : isSeedreamImageWorkflow ? 10 : 0
+  const isSeedanceWorkflow = selectedWorkflow?.id.startsWith('seedance-') ?? false
+  const isReferenceWorkflow = (selectedWorkflow?.id.startsWith('minimax-h3-r2v') ?? false) || isSeedanceWorkflow
   const isFirstLastWorkflow = kind === 'video' && selectedWorkflow?.id === 'minimax-h3-t2v-flf2v'
   const incoming = edges
     .filter((edge) => edge.target === id)
     .map((edge) => ({ edge, source: nodes.find((node) => node.id === edge.source) }))
     .filter((item): item is { edge: StoryEdge; source: StoryNode } => !!item.source)
   const imageCandidates = incoming.filter(({ source }) => source.data.kind === 'image' && source.data.sourcePath)
+  const orderedCloudImageNodes = orderImageReferences(
+    imageCandidates.map(({ source }) => source),
+    current?.data.referenceImageNodeIds,
+    imageReferenceLimit,
+  )
   const referenceCandidates = incoming.filter(({ source }) => (
     source.data.kind === 'image' || source.data.kind === 'video' || source.data.kind === 'audio'
   ) && source.data.sourcePath)
@@ -332,6 +375,17 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
     assignReference(trackKind, event.dataTransfer.getData('application/x-aigc-node-id'))
   }
 
+  const moveCloudImageReference = (nodeId: string, delta: -1 | 1) => {
+    const ids = orderedCloudImageNodes.map((node) => node.id)
+    const from = ids.indexOf(nodeId)
+    const to = from + delta
+    if (from < 0 || to < 0 || to >= ids.length) return
+    ;[ids[from], ids[to]] = [ids[to], ids[from]]
+    setNodes((list) => list.map((node) => node.id === id
+      ? { ...node, data: { ...node.data, referenceImageNodeIds: ids } }
+      : node))
+  }
+
   useEffect(() => {
     let active = true
     listCachedComfyWorkflows()
@@ -346,16 +400,16 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
         <div className="nodrag relative ml-auto">
             <button
               onClick={() => setWorkflowMenuOpen((open) => !open)}
-              className={`flex max-w-[190px] items-center gap-1.5 rounded-full border px-2.5 py-1 transition ${workflowMenuOpen ? 'border-[#d4af37]/45 bg-[#d4af37]/10 text-[#f0d98c]' : 'border-white/[0.06] bg-white/[0.05] text-white/48 hover:text-white/75'}`}
-              title={kind === 'image' ? '选择图片生成模型' : '选择 ComfyUI 工作流'}
+              className={`flex w-[340px] max-w-full items-center justify-between gap-2 rounded-full border px-3 py-1 transition ${workflowMenuOpen ? 'border-[#d4af37]/45 bg-[#d4af37]/10 text-[#f0d98c]' : 'border-white/[0.06] bg-white/[0.05] text-white/48 hover:text-white/75'}`}
+              title={kind === 'image' ? '选择图片生成模型' : '选择视频生成模型'}
             >
-              <span className="truncate">
+              <span className="min-w-0 truncate">
                 {selectedWorkflow?.name ?? (kind === 'video' ? '视频工作流待配置' : '加载工作流…')}
               </span>
-              <span className="text-[8px]">▼</span>
+              <span className="shrink-0 text-[8px]">▼</span>
             </button>
             {workflowMenuOpen && (
-              <div className="absolute right-0 top-full z-[110] mt-1.5 w-[230px] overflow-hidden rounded-xl border border-white/[0.12] bg-[#242429] p-1 shadow-[0_14px_36px_rgba(0,0,0,0.7)]">
+              <div className="absolute right-0 top-full z-[110] mt-1.5 w-[380px] max-w-[calc(100vw-3rem)] overflow-hidden rounded-xl border border-white/[0.12] bg-[#242429] p-1 shadow-[0_14px_36px_rgba(0,0,0,0.7)]">
                 {availableWorkflows.map((workflow) => (
                   <button
                     key={workflow.id}
@@ -369,7 +423,7 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
                   >
                     <span className="min-w-0 flex-1 truncate">{workflow.name}</span>
                     <span className="flex-shrink-0 rounded bg-white/[0.06] px-1.5 py-0.5 text-[8px] text-white/35">
-                      {workflow.id.startsWith('google-') ? 'Google · 文/图' : workflow.id.startsWith('minimax-h3-r2v') ? (workflow.id.endsWith('-turbo') ? '全模态 · 加速' : '全模态') : workflow.kind === 'image-to-video' ? '视频' : workflow.kind === 'image-to-image' ? '图生图' : '文生图'}
+                      {workflow.id.startsWith('google-') ? 'Google · 多图' : workflow.id.startsWith('seedream-') ? '方舟 · 多图' : workflow.id.startsWith('seedance-') ? '方舟 · 全模态' : workflow.id.startsWith('minimax-h3-r2v') ? (workflow.id.endsWith('-turbo') ? '全模态 · 加速' : '全模态') : workflow.kind === 'image-to-video' ? '视频' : workflow.kind === 'image-to-image' ? '图生图' : 'ComfyUI · 文生图'}
                     </span>
                   </button>
                 ))}
@@ -377,6 +431,69 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
             )}
         </div>
       </div>
+
+      {isCloudImageWorkflow && (
+        <div className="mb-2.5 rounded-xl border border-dashed border-white/15 bg-black/15 p-2">
+          <div className="mb-1.5 flex items-center gap-1.5 text-[9px] text-white/45">
+            {nodeIcon('image')}
+            <span>多图参考</span>
+            <span className="text-white/25">提示词可按“图1、图2…”引用</span>
+            <span className="ml-auto text-white/25">{orderedCloudImageNodes.length}/{imageReferenceLimit}</span>
+          </div>
+          {orderedCloudImageNodes.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {orderedCloudImageNodes.map((referenceNode, index) => {
+                const edge = incoming.find(({ source }) => source.id === referenceNode.id)?.edge
+                return (
+                  <div
+                    key={referenceNode.id}
+                    className="nodrag group/cloud-ref relative flex h-[66px] w-[66px] flex-col items-center justify-center gap-1 rounded-lg border border-[#d4af37]/25 bg-[#d4af37]/[0.07] px-1 pt-1 text-[8px] text-white/65"
+                    title={`图${index + 1} · ${referenceNode.data.title}`}
+                  >
+                    <span className="absolute left-1 top-1 flex h-4 min-w-4 items-center justify-center rounded bg-[#d4af37]/15 px-1 text-[8px] text-[#e8c766]">图{index + 1}</span>
+                    {referenceNode.data.preview ? (
+                      <img src={referenceNode.data.preview} className="h-8 w-8 rounded object-cover" draggable={false} />
+                    ) : nodeIcon('image')}
+                    <span className="w-full truncate text-center">{referenceNode.data.title}</span>
+                    <div className="absolute bottom-0.5 right-0.5 flex gap-0.5 opacity-0 transition group-hover/cloud-ref:opacity-100">
+                      <button
+                        onClick={() => moveCloudImageReference(referenceNode.id, -1)}
+                        disabled={index === 0}
+                        className="flex h-4 w-4 items-center justify-center rounded bg-black/60 text-white/60 hover:text-white disabled:opacity-25"
+                        title="向前移动"
+                      >‹</button>
+                      <button
+                        onClick={() => moveCloudImageReference(referenceNode.id, 1)}
+                        disabled={index === orderedCloudImageNodes.length - 1}
+                        className="flex h-4 w-4 items-center justify-center rounded bg-black/60 text-white/60 hover:text-white disabled:opacity-25"
+                        title="向后移动"
+                      >›</button>
+                      {edge && (
+                        <button
+                          onClick={() => void deleteElements({ edges: [edge] })}
+                          className="flex h-4 w-4 items-center justify-center rounded bg-black/60 text-white/60 hover:text-white"
+                          title="移除参考并断开连线"
+                        >×</button>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            <div className="py-2 text-center text-[9px] text-white/25">连接一个或多个已有图片节点即可添加参考图</div>
+          )}
+          {imageCandidates.length > imageReferenceLimit && (
+            <div className="mt-1.5 text-[9px] text-amber-300/65">已连接 {imageCandidates.length} 张，只会发送前 {imageReferenceLimit} 张</div>
+          )}
+        </div>
+      )}
+
+      {kind === 'image' && !isCloudImageWorkflow && imageCandidates.length > 0 && (
+        <div className="mb-2.5 rounded-xl border border-white/[0.08] bg-white/[0.03] px-2.5 py-2 text-[9px] text-white/35">
+          当前 ComfyUI 图片工作流仅支持文生图，已连接图片不会作为生成参考。
+        </div>
+      )}
 
       {isFirstLastWorkflow && imageCandidates.length > 0 && (
         <div className="mb-2.5">
@@ -500,9 +617,9 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
       {isReferenceWorkflow && (
         <div className="mb-2.5 space-y-2">
           {([
-            ['image', '图片轨', referenceImageNodes, 9, 'Picture'],
-            ['video', '视频轨', referenceVideoNodes, 3, 'Video'],
-            ['audio', '音频轨', referenceAudioNodes, 3, 'Audio'],
+            ['image', '图片轨', referenceImageNodes, 9, isSeedanceWorkflow ? '图片' : 'Picture'],
+            ['video', '视频轨', referenceVideoNodes, 3, isSeedanceWorkflow ? '视频' : 'Video'],
+            ['audio', '音频轨', referenceAudioNodes, 3, isSeedanceWorkflow ? '音频' : 'Audio'],
           ] as const).map(([trackKind, label, trackNodes, limit, token]) => (
             <div
               key={trackKind}
@@ -530,7 +647,7 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
                         event.dataTransfer.effectAllowed = 'copyMove'
                       }}
                       className="nodrag group/track relative flex h-14 w-14 cursor-grab flex-col items-center justify-center gap-1 rounded-lg border border-[#d4af37]/25 bg-[#d4af37]/[0.07] px-1 pt-1 text-[8px] text-white/65 active:cursor-grabbing"
-                      title={`<${token} ${index + 1}> · ${trackNode.data.title}；拖回本轨道末尾可调整顺序`}
+                      title={`${isSeedanceWorkflow ? `${token}${index + 1}` : `<${token} ${index + 1}>`} · ${trackNode.data.title}；拖回本轨道末尾可调整顺序`}
                     >
                       <span className="absolute left-1 top-1 flex h-4 min-w-4 items-center justify-center rounded bg-[#d4af37]/15 px-1 text-[8px] text-[#e8c766]">{index + 1}</span>
                       {trackNode.data.kind === 'image' && trackNode.data.preview ? (
@@ -557,7 +674,7 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
         </div>
       )}
 
-      {!isFirstLastWorkflow && !isReferenceWorkflow && incoming.length > 0 && (
+      {!isFirstLastWorkflow && !isReferenceWorkflow && !isCloudImageWorkflow && incoming.length > 0 && (
         <div className="mb-2.5 flex flex-wrap gap-2">
           {incoming.map(({ edge, source }, index) => (
             <div
@@ -591,7 +708,9 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
         placeholder={kind === 'image'
           ? '描述你想要生成的画面内容，连接其他节点可引用素材…'
           : isReferenceWorkflow
-            ? '描述视频并用 <Picture 1>、<Video 1>、<Audio 1> 指定参考素材…'
+            ? isSeedanceWorkflow
+              ? '描述视频并用“图片1”“视频1”“音频1”指定参考素材；无参考素材时也可文生视频…'
+              : '描述视频并用 <Picture 1>、<Video 1>、<Audio 1> 指定参考素材…'
             : '描述视频的运动、镜头和节奏，连接图片节点可作为首尾帧参考…'}
         className="min-h-[140px] w-full resize-none border-0 bg-transparent px-1 text-[12px] leading-5 text-[#e8e6df] outline-none placeholder:text-white/25"
       />
@@ -617,7 +736,7 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
             </button>
             {ratioMenuOpen && (
               <div className="absolute bottom-full left-0 z-[100] mb-1.5 min-w-[76px] overflow-hidden rounded-xl border border-white/[0.12] bg-[#242429] p-1 shadow-[0_12px_32px_rgba(0,0,0,0.65)]">
-                {(['16:9', '1:1', '4:3'] as const).map((ratio) => (
+                {(['16:9', '9:16', '1:1', '4:3'] as const).map((ratio) => (
                   <button
                     key={ratio}
                     onClick={() => {
@@ -880,18 +999,87 @@ function NodeDeleteButton({ id }: { id: string }) {
 }
 
 function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
-  const { setNodes } = useReactFlow<StoryNode, StoryEdge>()
+  const canvasNodes = useNodes<StoryNode>()
+  const { getNodes, setNodes, setEdges } = useReactFlow<StoryNode, StoryEdge>()
   const currentProject = useAppStore((state) => state.currentProject)
   const addCanvasNodeReference = useAppStore((state) => state.addCanvasNodeReference)
   const isReferencedInChat = useAppStore((state) => state.referencedCanvasNodes.some((ref) => ref.id === id))
   const [audioImporting, setAudioImporting] = useState(false)
+  const [directorOpen, setDirectorOpen] = useState(false)
   const isUpscale = data.kind === 'upscale'
+  const isDirector = data.kind === 'director'
   const visualMediaKind = data.kind === 'image' || data.kind === 'video'
     ? data.kind
     : isUpscale ? 'video' : null
   const isAudio = data.kind === 'audio'
   const aspectRatio = data.aspectRatio ?? '16:9'
-  const aspectRatioValue = aspectRatio === '1:1' ? '1 / 1' : aspectRatio === '4:3' ? '4 / 3' : '16 / 9'
+  const aspectRatioValue = aspectRatio === '1:1' ? '1 / 1' : aspectRatio === '4:3' ? '4 / 3' : aspectRatio === '9:16' ? '9 / 16' : '16 / 9'
+  const directorProject = useMemo(
+    () => isDirector ? normalizeDirectorProject(data.directorProject, data.title) : undefined,
+    [data.directorProject, data.title, isDirector],
+  )
+
+  const updateDirectorProject = (directorProject: DirectorProject) => {
+    setNodes((nodes) => nodes.map((node) => node.id === id
+      ? { ...node, data: { ...node.data, directorProject } }
+      : node))
+  }
+
+  const captureDirectorStill = async (
+    pngDataUrl: string,
+    shot: DirectorShot,
+    directorProject: DirectorProject,
+  ): Promise<string> => {
+    if (!currentProject) throw new Error('当前项目不可用')
+    const captureProjectId = currentProject.id
+    const assertCaptureContext = () => {
+      if (useAppStore.getState().currentProject?.id !== captureProjectId) {
+        throw new Error('项目已切换，已取消写回本次导演台截图')
+      }
+      if (!getNodes().some((node) => node.id === id && node.data.kind === 'director')) {
+        throw new Error('导演台节点已不存在，已取消写回截图')
+      }
+    }
+    const pngData = await fetch(pngDataUrl).then((response) => response.arrayBuffer())
+    assertCaptureContext()
+    const result = await window.electronAPI.saveDirectorStill({
+      projectId: captureProjectId,
+      nodeId: id,
+      shotId: shot.id,
+      shotName: shot.name,
+      pngData,
+    })
+    if (!result.success || !result.relativePath) throw new Error(result.error || '导演台截图保存失败')
+    assertCaptureContext()
+
+    const relativePath = result.relativePath
+    const preview = workspacePreview(captureProjectId, relativePath)
+    const liveNodes = getNodes()
+    const sourceNode = liveNodes.find((node) => node.id === id)
+    if (!sourceNode) throw new Error('导演台节点已不存在，已取消写回截图')
+    const outputCount = liveNodes.filter((node) => node.data.kind === 'image' && node.data.sourcePath?.includes('generated/director-stills/')).length
+    const imageNode = makeNode('image', liveNodes.length + 1, {
+      x: (sourceNode?.position.x ?? 120) + 560,
+      y: (sourceNode?.position.y ?? 100) + outputCount * 120,
+    })
+    imageNode.data = {
+      ...imageNode.data,
+      title: `${shot.name} · 构图参考`,
+      aspectRatio: shot.aspectRatio,
+      sourcePath: relativePath,
+      preview,
+      prompt: shot.notes ?? '',
+      readOnly: true,
+    }
+    setNodes((nodes) => [
+      ...nodes.map((node) => node.id === id
+        ? { ...node, data: { ...node.data, directorProject, sourcePath: relativePath, preview } }
+        : node),
+      imageNode,
+    ])
+    setEdges((edges) => [...edges, makeLinkedEdge(`edge-${id}-${imageNode.id}`, id, imageNode.id)])
+    return relativePath
+  }
 
   const importAudio = async () => {
     if (!currentProject || audioImporting) return
@@ -928,7 +1116,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
   }
 
   return (
-    <div className={data.kind === 'image' || data.kind === 'video' ? 'w-[620px]' : 'w-[420px]'}>
+    <div className={data.kind === 'image' || data.kind === 'video' ? 'w-[620px]' : isDirector ? 'w-[520px]' : 'w-[420px]'}>
       <div className="mb-1.5 flex items-center gap-1 text-[11px] text-white/48">
         {nodeIcon(data.kind)}
         <span className="min-w-0 truncate">{data.title}</span>
@@ -937,6 +1125,9 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
             <span className="h-2 w-2 animate-pulse rounded-full bg-[#e8c766]" />
             生成中
           </span>
+        )}
+        {data.readOnly && (
+          <span className="ml-1 rounded border border-[#d4af37]/25 bg-[#d4af37]/10 px-1.5 py-0.5 text-[9px] text-[#e8c766]">只读构图参考</span>
         )}
         <span className="ml-auto" />
         {selected && (
@@ -958,7 +1149,29 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
         className={`relative overflow-visible rounded-xl border bg-[#202023] shadow-[0_10px_35px_rgba(0,0,0,0.3)] transition ${selected ? 'border-[#e8c766]/75 shadow-[0_0_0_1px_rgba(232,199,102,0.18),0_18px_45px_rgba(0,0,0,0.4)]' : 'border-white/[0.13]'}`}
       >
         <Handle type="target" position={Position.Left} className="story-handle" />
-        {visualMediaKind ? (
+        {isDirector ? (
+          <div className="nodrag nowheel overflow-hidden rounded-[11px] bg-[#121318]" onPointerDown={(event) => event.stopPropagation()}>
+            <div className="relative aspect-video overflow-hidden bg-[radial-gradient(circle_at_50%_30%,#273148_0%,#11141c_48%,#090a0e_100%)]">
+              {data.preview ? (
+                <img src={data.preview} alt="导演台最近构图" className="h-full w-full object-contain" draggable={false} />
+              ) : (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-white/32">
+                  <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-[#d4af37]/25 bg-[#d4af37]/10 text-2xl text-[#e8c766]">◫</div>
+                  <div className="text-center"><p className="text-xs text-white/55">虚拟片场尚未拍摄构图</p><p className="mt-1 text-[10px]">布置演员、道具与多机位，再输出参考图</p></div>
+                </div>
+              )}
+              <div className="absolute bottom-3 left-3 flex gap-2 text-[9px] text-white/55">
+                <span className="rounded-md border border-white/10 bg-black/45 px-2 py-1">{directorProject?.elements.length ?? 2} 个元素</span>
+                <span className="rounded-md border border-white/10 bg-black/45 px-2 py-1">{directorProject?.shots.length ?? 1} 个 Shot</span>
+                <span className="rounded-md border border-white/10 bg-black/45 px-2 py-1">24 FPS</span>
+              </div>
+            </div>
+            <div className="flex items-center justify-between border-t border-white/8 px-4 py-3">
+              <div><p className="text-[11px] text-white/65">3D Blocking 与机位预演</p><p className="mt-0.5 text-[9px] text-white/30">工程随画布保存，截图自动创建图片节点</p></div>
+              <button onClick={() => setDirectorOpen(true)} className="rounded-lg border border-[#d4af37]/30 bg-[#d4af37]/10 px-4 py-2 text-[10px] font-medium text-[#f0d98c] hover:bg-[#d4af37]/15">打开导演台</button>
+            </div>
+          </div>
+        ) : visualMediaKind ? (
           <div className="relative overflow-hidden rounded-[11px] bg-[#202023] transition-[height] duration-200" style={{ aspectRatio: aspectRatioValue }}>
             {data.preview ? (
               data.kind === 'image' ? (
@@ -1019,8 +1232,18 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
         ) : null}
         <Handle type="source" position={Position.Right} className="story-handle" />
       </div>
-      {selected && visualMediaKind && !isUpscale && <PromptPanel id={id} kind={visualMediaKind} />}
+      {selected && visualMediaKind && !isUpscale && !data.readOnly && <PromptPanel id={id} kind={visualMediaKind} />}
       {selected && isUpscale && <UpscalePanel id={id} />}
+      {directorOpen && isDirector && (
+        <Suspense fallback={<div className="fixed inset-0 z-[200] flex items-center justify-center bg-[#090a0e] text-sm text-[#e8c766]">正在加载 3D 导演台…</div>}>
+          <DirectorStageDialog
+            project={directorProject ?? createDefaultDirectorProject(data.title)}
+            onChange={updateDirectorProject}
+            onCapture={captureDirectorStill}
+            onClose={() => setDirectorOpen(false)}
+          />
+        </Suspense>
+      )}
     </div>
   )
 }
@@ -1039,6 +1262,7 @@ const makeNode = (kind: StoryNodeKind, index: number, position?: { x: number; y:
     duration: kind === 'video' ? 5 : undefined,
     scale: kind === 'upscale' ? 2 : undefined,
     quality: kind === 'upscale' ? 'ULTRA' : undefined,
+    directorProject: kind === 'director' ? createDefaultDirectorProject(`导演场景 ${index}`) : undefined,
   },
 })
 
@@ -1233,6 +1457,7 @@ function CanvasFlow() {
     const project = useAppStore.getState().currentProject
     const current = nodesRef.current.find((node) => node.id === nodeId)
     if (!project || !current || current.data.kind !== 'image') return
+    if (current.data.readOnly) return
     if (!(current.data.prompt ?? '').trim()) {
       patchNodeData(nodeId, { generationStatus: 'error', generationError: '请先输入文生图提示词' })
       return
@@ -1240,20 +1465,29 @@ function CanvasFlow() {
     patchNodeData(nodeId, { generationStatus: 'generating', generationError: '' })
     try {
       const workflows: ComfyWorkflowInfo[] = await listCachedComfyWorkflows()
-      const available = workflows.filter((item) => item.kind === 'text-to-image' || item.kind === 'image-to-image')
+      const available = workflows.filter((item) => item.kind === 'text-to-image')
       const selectedWorkflow = available.find((item) => item.id === current.data.workflowId) ?? available[0]
-      const referenceImagePath = edgesRef.current
+      const incomingImageNodes = edgesRef.current
         .filter((edge) => edge.target === nodeId)
         .map((edge) => nodesRef.current.find((node) => node.id === edge.source))
-        .find((source) => source?.data.kind === 'image' && source.data.sourcePath)
-        ?.data.sourcePath
+        .filter((source): source is StoryNode => !!source && source.data.kind === 'image' && !!source.data.sourcePath)
+      const imageReferenceLimit = selectedWorkflow?.id.startsWith('google-')
+        ? 14
+        : selectedWorkflow?.id.startsWith('seedream-')
+          ? 10
+          : 0
+      const referenceImagePaths = orderImageReferences(
+        incomingImageNodes,
+        current.data.referenceImageNodeIds,
+        imageReferenceLimit,
+      ).map((source) => source.data.sourcePath!)
       const result = await window.electronAPI.generateImage({
         projectId: project.id,
         nodeId,
         prompt: current.data.prompt ?? '',
         aspectRatio: current.data.aspectRatio ?? '16:9',
         workflowId: selectedWorkflow?.id,
-        referenceImagePath,
+        referenceImagePaths: imageReferenceLimit > 0 ? referenceImagePaths : undefined,
       })
       if (!result.success || !result.relativePath) {
         throw new Error(result.error || '图片生成服务没有返回图片')
@@ -1281,7 +1515,8 @@ function CanvasFlow() {
       const workflows: ComfyWorkflowInfo[] = await listCachedComfyWorkflows()
       const available = workflows.filter((item) => item.kind === 'image-to-video')
       const selectedWorkflow = available.find((item) => item.id === current.data.workflowId) ?? available[0]
-      const isReferenceWorkflow = selectedWorkflow?.id.startsWith('minimax-h3-r2v') ?? false
+      const isSeedanceWorkflow = selectedWorkflow?.id.startsWith('seedance-') ?? false
+      const isReferenceWorkflow = (selectedWorkflow?.id.startsWith('minimax-h3-r2v') ?? false) || isSeedanceWorkflow
       const isFirstLastWorkflow = selectedWorkflow?.id === 'minimax-h3-t2v-flf2v'
       const incomingSources = edgesRef.current
         .filter((edge) => edge.target === nodeId)
@@ -1306,7 +1541,7 @@ function CanvasFlow() {
             ? '全模态参考视频轨最多放入 3 个视频'
             : referenceAudioPaths.length > 3
               ? '全模态参考音频轨最多放入 3 段音频'
-              : referenceImagePaths.length + referenceVideoPaths.length + referenceAudioPaths.length === 0
+              : !isSeedanceWorkflow && referenceImagePaths.length + referenceVideoPaths.length + referenceAudioPaths.length === 0
                 ? '请从候选素材中至少拖一个图片、视频或音频到参考轨道'
                 : ''
         if (error) {
@@ -1330,7 +1565,7 @@ function CanvasFlow() {
         referenceAudioPaths: isReferenceWorkflow ? referenceAudioPaths : undefined,
       })
       if (!result.success || !result.relativePath) {
-        throw new Error(result.error || 'ComfyUI 没有返回视频')
+        throw new Error(result.error || '视频生成服务没有返回视频')
       }
       applyGenerationResult(nodeId, project.id, result.relativePath)
     } catch (error) {
@@ -1500,6 +1735,9 @@ function CanvasFlow() {
           const results = nodeIds.map((nodeId) => {
             const node = nodesRef.current.find((item) => item.id === nodeId)
             if (!node) return { nodeId, accepted: false as const, error: `找不到节点：${nodeId}` }
+            if (node.data.readOnly) {
+              return { nodeId, accepted: false as const, error: '该节点是只读构图参考，不能修改或执行生成动作' }
+            }
             const actionDescriptor = getNodeCapabilities(node.data.kind)
               ?.actions.find((item) => item.id === actionId)
             if (!actionDescriptor) {
@@ -1544,7 +1782,7 @@ function CanvasFlow() {
           const occupied = new Set(nodesRef.current.map((node) => node.id))
           const created = inputs.map((input, index) => {
             const kind = input.kind as StoryNodeKind
-            if (!['image', 'video', 'audio', 'upscale'].includes(kind)) throw new Error(`无效节点类型：${String(kind)}`)
+            if (!['image', 'video', 'audio', 'upscale', 'director'].includes(kind)) throw new Error(`无效节点类型：${String(kind)}`)
             const id = typeof input.id === 'string' && input.id.trim()
               ? input.id.trim()
               : `${kind}-${Date.now().toString(36)}-${index}-${Math.random().toString(36).slice(2, 7)}`
@@ -1561,7 +1799,7 @@ function CanvasFlow() {
               title: typeof input.title === 'string' ? input.title : base.data.title,
             }
             if (
-              (kind === 'image' || kind === 'video' || kind === 'audio' || kind === 'upscale') &&
+              (kind === 'image' || kind === 'video' || kind === 'audio' || kind === 'upscale' || kind === 'director') &&
               data.sourcePath && !data.preview
             ) {
               data.preview = `workspace://${currentProject.id}/${data.sourcePath.split('/').map(encodeURIComponent).join('/')}`
@@ -1584,6 +1822,13 @@ function CanvasFlow() {
           const ids = new Set(updates.map((update) => String(update.id)))
           const missing = [...ids].filter((id) => !nodesRef.current.some((node) => node.id === id))
           if (missing.length > 0) throw new Error(`找不到节点：${missing.join(', ')}`)
+          const immutableUpdates = updates.filter((update) => {
+            const node = nodesRef.current.find((item) => item.id === String(update.id))
+            return node?.data.readOnly && Object.keys(update).some((key) => key !== 'id' && key !== 'position')
+          })
+          if (immutableUpdates.length > 0) {
+            throw new Error(`只读构图参考节点不能修改内容：${immutableUpdates.map((update) => String(update.id)).join(', ')}`)
+          }
           nodesRef.current = nodesRef.current.map((node) => {
             const update = updates.find((item) => item.id === node.id)
             if (!update) return node
@@ -1592,7 +1837,7 @@ function CanvasFlow() {
               : node.position
             const data = { ...node.data, ...pickMutableNodeData(node.data.kind, update), kind: node.data.kind }
             if (
-              (node.data.kind === 'image' || node.data.kind === 'video' || node.data.kind === 'audio' || node.data.kind === 'upscale') &&
+              (node.data.kind === 'image' || node.data.kind === 'video' || node.data.kind === 'audio' || node.data.kind === 'upscale' || node.data.kind === 'director') &&
               typeof update.sourcePath === 'string' && !('preview' in update)
             ) {
               data.preview = update.sourcePath
@@ -1902,7 +2147,7 @@ function CanvasFlow() {
         </svg>
       </button>
       <div className="mx-1 h-5 w-px bg-white/10" />
-      {(['image', 'video', 'audio', 'upscale'] as StoryNodeKind[]).map((kind) => (
+      {(['image', 'video', 'audio', 'upscale', 'director'] as StoryNodeKind[]).map((kind) => (
         <button
           key={kind}
           onClick={() => addNode(kind)}
@@ -1956,7 +2201,7 @@ function CanvasFlow() {
           position="bottom-right"
           pannable
           zoomable
-          nodeColor={(node) => node.data.kind === 'image' ? '#8b7355' : node.data.kind === 'video' ? '#566b7f' : node.data.kind === 'audio' ? '#7f6656' : node.data.kind === 'upscale' ? '#4f7f74' : '#67636e'}
+          nodeColor={(node) => node.data.kind === 'image' ? '#8b7355' : node.data.kind === 'video' ? '#566b7f' : node.data.kind === 'audio' ? '#7f6656' : node.data.kind === 'upscale' ? '#4f7f74' : node.data.kind === 'director' ? '#b08b2f' : '#67636e'}
           maskColor="rgba(5,5,8,0.72)"
         />
       </ReactFlow>

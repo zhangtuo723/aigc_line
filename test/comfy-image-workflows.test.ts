@@ -46,9 +46,11 @@ describe('Krea 2 Turbo image workflow', () => {
 
   it('keeps image output at standard 2K and video output at the 1024 class', () => {
     expect(imageDimensionsFor('16:9')).toEqual({ width: 2048, height: 1152 })
+    expect(imageDimensionsFor('9:16')).toEqual({ width: 1152, height: 2048 })
     expect(imageDimensionsFor('4:3')).toEqual({ width: 2048, height: 1536 })
     expect(imageDimensionsFor('1:1')).toEqual({ width: 2048, height: 2048 })
     expect(videoDimensionsFor('16:9')).toEqual({ width: 1024, height: 576 })
+    expect(videoDimensionsFor('9:16')).toEqual({ width: 576, height: 1024 })
     expect(videoDimensionsFor('4:3')).toEqual({ width: 1024, height: 768 })
     expect(videoDimensionsFor('1:1')).toEqual({ width: 1024, height: 1024 })
   })

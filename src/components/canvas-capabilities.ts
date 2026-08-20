@@ -23,7 +23,7 @@ const workflowOptions = async (kinds: ComfyWorkflowInfo['kind'][]) => {
 }
 
 registerOptionProvider('comfy-image-workflows', () =>
-  workflowOptions(['text-to-image', 'image-to-image']))
+  workflowOptions(['text-to-image']))
 registerOptionProvider('comfy-video-workflows', () =>
   workflowOptions(['image-to-video']))
 
@@ -55,7 +55,7 @@ registerNodeCapabilities({
   label: '图片节点',
   fields: [
     { key: 'prompt', type: 'string', description: '图片生成提示词' },
-    { key: 'aspectRatio', type: 'enum', values: ['16:9', '1:1', '4:3'], description: '画幅比例' },
+    { key: 'aspectRatio', type: 'enum', values: ['16:9', '9:16', '1:1', '4:3'], description: '画幅比例' },
     {
       key: 'workflowId',
       type: 'enum',
@@ -63,6 +63,8 @@ registerNodeCapabilities({
       description: '图片生成模型或工作流（包含 ComfyUI、Nano Banana、Seedream；可选值见 options）',
     },
     { key: 'sourcePath', type: 'string', description: '生成结果的 workspace 相对路径' },
+    { key: 'referenceImageNodeIds', type: 'string-array', description: '云端图片模型的有序参考图片节点 id（Google 最多 14 张，Seedream 最多 10 张；ComfyUI 文生图不使用）' },
+    { key: 'readOnly', type: 'boolean', readonly: true, description: '是否为工具输出的只读图片节点（只读）' },
     ...generationStatusFields,
   ],
   actions: [
@@ -71,7 +73,7 @@ registerNodeCapabilities({
       label: '生成',
       async: true,
       statusField: 'generationStatus',
-      description: '使用所选图片模型或工作流生成图片；连接已有图片时支持图生图，完成后结果路径写入 sourcePath',
+      description: '使用所选图片模型或工作流生成图片；Google/Seedream 可按 referenceImageNodeIds 使用多张参考图，ComfyUI 当前仅文生图；完成后结果路径写入 sourcePath',
     },
   ],
 })
@@ -81,7 +83,7 @@ registerNodeCapabilities({
   label: '视频节点',
   fields: [
     { key: 'prompt', type: 'string', description: '视频生成提示词' },
-    { key: 'aspectRatio', type: 'enum', values: ['16:9', '1:1', '4:3'], description: '画幅比例' },
+    { key: 'aspectRatio', type: 'enum', values: ['16:9', '9:16', '1:1', '4:3'], description: '画幅比例' },
     {
       key: 'workflowId',
       type: 'enum',
@@ -142,4 +144,15 @@ registerNodeCapabilities({
       description: '对连入的视频节点执行 RTX 视频放大，完成后结果路径写入 sourcePath',
     },
   ],
+})
+
+registerNodeCapabilities({
+  kind: 'director',
+  label: '3D 导演台',
+  fields: [
+    { key: 'directorProject', type: 'object', description: '完整的可序列化 3D 预演工程：演员、道具、机位、Shot 与关键帧' },
+    { key: 'sourcePath', type: 'string', readonly: true, description: '最近一次机位截图的项目相对路径（只读）' },
+    { key: 'preview', type: 'string', readonly: true, description: '最近一次机位截图预览（只读）' },
+  ],
+  actions: [],
 })

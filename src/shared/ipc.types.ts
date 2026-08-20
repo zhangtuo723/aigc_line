@@ -52,6 +52,12 @@ export interface Attachment {
   path: string;
 }
 
+export interface SavePastedImageResult {
+  success: boolean;
+  attachment?: Attachment;
+  error?: string;
+}
+
 // Tool call tracking
 export type ToolStatus = 'running' | 'completed' | 'error' | 'interrupted';
 
@@ -162,7 +168,7 @@ export interface CanvasNodeRef {
 }
 
 // Live canvas bridge used by the Agent's Canvas MCP tools.
-export type CanvasNodeKind = 'image' | 'video' | 'audio' | 'upscale';
+export type CanvasNodeKind = 'image' | 'video' | 'audio' | 'upscale' | 'director';
 
 export interface CanvasPoint {
   x: number;
@@ -188,6 +194,10 @@ export interface CanvasNodeData extends Record<string, unknown> {
   inputNodeId?: string;
   scale?: number;
   quality?: string;
+  /** Immutable media reference produced by a tool such as the 3D director stage. */
+  readOnly?: boolean;
+  /** Serializable 3D previs project. Kept as unknown here to avoid coupling IPC media types to the editor runtime. */
+  directorProject?: import('./director.types').DirectorProject;
   generationStatus?: 'idle' | 'generating' | 'error';
   generationError?: string;
 }
@@ -246,7 +256,7 @@ export interface CanvasCommandResponse {
 }
 
 // ComfyUI image generation
-export type ImageAspectRatio = '16:9' | '1:1' | '4:3';
+export type ImageAspectRatio = '16:9' | '9:16' | '1:1' | '4:3';
 
 export interface GenerateImageRequest {
   projectId: string;
@@ -255,6 +265,8 @@ export interface GenerateImageRequest {
   aspectRatio: ImageAspectRatio;
   negativePrompt?: string;
   workflowId?: string;
+  referenceImagePaths?: string[];
+  /** @deprecated Use referenceImagePaths. Kept for older renderer snapshots. */
   referenceImagePath?: string;
 }
 

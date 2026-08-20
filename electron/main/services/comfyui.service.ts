@@ -19,6 +19,7 @@ import { loadProject } from './project.store'
 import { getRuntimeSettings } from './settings.service'
 import { GOOGLE_IMAGE_MODELS } from './google-image.service'
 import { SEEDREAM_IMAGE_MODELS } from './seedream-image.service'
+import { SEEDANCE_VIDEO_MODELS } from './seedance-video.service'
 
 type WorkflowNode = {
   class_type: string
@@ -125,7 +126,12 @@ export const listComfyWorkflows = async (): Promise<ComfyWorkflowInfo[]> => {
     name,
     kind: 'text-to-image',
   }))
-  return [...WORKFLOW_TEMPLATES, ...googleImageWorkflows, ...seedreamImageWorkflows, ...VIDEO_WORKFLOWS]
+  const seedanceVideoWorkflows: ComfyWorkflowInfo[] = SEEDANCE_VIDEO_MODELS.map(({ id, name }) => ({
+    id,
+    name,
+    kind: 'image-to-video',
+  }))
+  return [...WORKFLOW_TEMPLATES, ...googleImageWorkflows, ...seedreamImageWorkflows, ...VIDEO_WORKFLOWS, ...seedanceVideoWorkflows]
     .sort((a, b) => Number(b.id === defaultImageWorkflowId) - Number(a.id === defaultImageWorkflowId))
     .map(({ id, name, kind }) => ({ id, name, kind }))
 }
@@ -490,9 +496,10 @@ async function buildTemplateWorkflow(
   if (saveNode?.class_type === 'SaveImage') saveNode.inputs.filename_prefix = filenamePrefix
 
   if (template.kind === 'image-to-image') {
-    if (!request.referenceImagePath) throw new Error('图生图工作流需要先连接一个已有图片节点作为参考图')
+    const referenceImagePath = request.referenceImagePaths?.[0] ?? request.referenceImagePath
+    if (!referenceImagePath) throw new Error('图生图工作流需要先连接一个已有图片节点作为参考图')
     if (!template.imageNode || !template.imageField) throw new Error(`工作流 ${template.name} 未配置输入图片节点`)
-    const uploadedName = await uploadReferenceMedia(baseUrl, projectRoot, request.referenceImagePath)
+    const uploadedName = await uploadReferenceMedia(baseUrl, projectRoot, referenceImagePath)
     setInput(template.imageNode, template.imageField, uploadedName)
   }
   return workflow

@@ -23,7 +23,7 @@ vi.mock('../electron/main/services/google-network.service', () => ({
   normalizeGoogleProxyUrl: (value: string) => value.trim().replace(/\/+$/, ''),
 }))
 
-import { getAppSettingsView, saveAppSettings } from '../electron/main/services/settings.service'
+import { getAppSettingsView, normalizeSeedreamBaseUrl, saveAppSettings } from '../electron/main/services/settings.service'
 
 describe('settings secret persistence', () => {
   afterAll(async () => {
@@ -52,5 +52,14 @@ describe('settings secret persistence', () => {
     const stored = await fs.readFile(path.join(fixture.directory, 'settings.json'), 'utf8')
     expect(stored).toContain('"seedreamApiKey": "ark-test-secret"')
     expect(stored).not.toContain('encryptedSeedreamApiKey')
+  })
+
+  it('normalizes Seedream image endpoints to their API base URL', () => {
+    expect(normalizeSeedreamBaseUrl('https://ark.cn-beijing.volces.com/api/v3/images/generations'))
+      .toBe('https://ark.cn-beijing.volces.com/api/v3')
+    expect(normalizeSeedreamBaseUrl('https://ark.cn-beijing.volces.com/api/plan/v3/images/generations/'))
+      .toBe('https://ark.cn-beijing.volces.com/api/plan/v3')
+    expect(normalizeSeedreamBaseUrl('https://ark.cn-beijing.volces.com/api/plan/v3/images/generations/images/generations'))
+      .toBe('https://ark.cn-beijing.volces.com/api/plan/v3')
   })
 })

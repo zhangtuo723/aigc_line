@@ -33,7 +33,11 @@ export function isSeedreamImageWorkflow(workflowId?: string): boolean {
   return SEEDREAM_IMAGE_MODELS.some((item) => item.id === workflowId)
 }
 
-export function buildSeedreamImageRequest(request: Pick<GenerateImageRequest, 'prompt' | 'aspectRatio'>, model: string) {
+export function buildSeedreamImageRequest(
+  request: Pick<GenerateImageRequest, 'prompt' | 'aspectRatio'>,
+  model: string,
+  images: string[] = [],
+) {
   const { width, height } = seedreamImageDimensionsFor(request.aspectRatio)
   return {
     model,
@@ -44,6 +48,7 @@ export function buildSeedreamImageRequest(request: Pick<GenerateImageRequest, 'p
     response_format: 'b64_json',
     output_format: 'jpeg',
     watermark: false,
+    ...(images.length > 0 ? { image: images } : {}),
   }
 }
 
@@ -71,13 +76,18 @@ export async function generateImageWithSeedream(request: GenerateImageRequest): 
 
   const settings = await getRuntimeSettings()
   if (!settings.seedreamApiKey) throw new Error('请先在设置页配置火山方舟 Seedream API Key')
-  const body: ReturnType<typeof buildSeedreamImageRequest> & { image?: string } = buildSeedreamImageRequest(request, selected.model)
-  if (request.referenceImagePath) {
-    const reference = await resolveReferenceImage(project.folderPath, request.referenceImagePath)
+  const referencePaths = [...new Set(
+    request.referenceImagePaths ?? (request.referenceImagePath ? [request.referenceImagePath] : []),
+  )]
+  if (referencePaths.length > 10) throw new Error('Seedream 最多支持 10 张参考图片')
+  const referenceImages: string[] = []
+  for (const referencePath of referencePaths) {
+    const reference = await resolveReferenceImage(project.folderPath, referencePath)
     const bytes = await fs.readFile(reference.path)
     if (bytes.byteLength > 10 * 1024 * 1024) throw new Error('Seedream 参考图片不能超过 10 MB')
-    body.image = `data:${reference.mimeType};base64,${bytes.toString('base64')}`
+    referenceImages.push(`data:${reference.mimeType};base64,${bytes.toString('base64')}`)
   }
+  const body = buildSeedreamImageRequest(request, selected.model, referenceImages)
 
   const response = await fetch(`${settings.seedreamBaseUrl}/images/generations`, {
     method: 'POST',

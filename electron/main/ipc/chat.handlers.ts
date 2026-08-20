@@ -1,4 +1,5 @@
-import { ipcMain } from 'electron';
+import { ipcMain, nativeImage } from 'electron';
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { IPC_CHANNELS } from '../../../src/shared/ipc.channels';
@@ -8,6 +9,14 @@ import { clearAgentContext, enqueueAgentMessage, interruptAgentTurn, listAvailab
 import { messageHub } from '../services/message-hub';
 import { loadProject, readChatHistory, updateChatMessage } from '../services/project.store';
 import log from 'electron-log/main';
+
+const PASTED_IMAGE_EXTENSIONS: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+};
+const MAX_PASTED_IMAGE_BYTES = 20 * 1024 * 1024;
 
 /**
  * Copy uploaded attachments into the project workspace (uploads/) so the
@@ -27,6 +36,12 @@ async function stageAttachments(
       continue;
     }
     try {
+      const sourcePath = path.resolve(att.path);
+      const projectPath = path.resolve(folderPath);
+      if (sourcePath.startsWith(`${projectPath}${path.sep}`)) {
+        staged.push({ ...att, path: sourcePath });
+        continue;
+      }
       const dest = path.join(uploadsDir, `${Date.now()}-${path.basename(att.path)}`);
       await fs.copyFile(att.path, dest);
       staged.push({ ...att, path: dest });
@@ -39,6 +54,46 @@ async function stageAttachments(
 }
 
 export function registerChatHandlers(): void {
+  ipcMain.handle(
+    IPC_CHANNELS.chat.savePastedImage,
+    async (_event, projectId: string, data: ArrayBuffer, mimeType: string) => {
+      try {
+        const project = await loadProject(projectId);
+        if (!project) return { success: false, error: '项目不存在或已被删除' };
+
+        const extension = PASTED_IMAGE_EXTENSIONS[mimeType.toLowerCase()];
+        if (!extension) return { success: false, error: '剪贴板图片格式不支持' };
+        if (!(data instanceof ArrayBuffer) || data.byteLength === 0) {
+          return { success: false, error: '剪贴板图片内容为空' };
+        }
+        if (data.byteLength > MAX_PASTED_IMAGE_BYTES) {
+          return { success: false, error: '粘贴图片不能超过 20 MB' };
+        }
+
+        const bytes = Buffer.from(data);
+        if (nativeImage.createFromBuffer(bytes).isEmpty()) {
+          return { success: false, error: '剪贴板内容不是有效图片' };
+        }
+
+        const imagesDir = path.join(project.folderPath, 'uploads', 'images');
+        await fs.mkdir(imagesDir, { recursive: true });
+        const name = `pasted-image-${Date.now()}-${randomUUID().slice(0, 8)}.${extension}`;
+        const imagePath = path.join(imagesDir, name);
+        await fs.writeFile(imagePath, bytes);
+        return {
+          success: true,
+          attachment: { type: extension, name, path: imagePath },
+        };
+      } catch (error) {
+        log.error('[Chat] Failed to save pasted image:', error);
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  );
+
   ipcMain.handle(
     IPC_CHANNELS.chat.clearContext,
     async (_event, projectId: string) => {

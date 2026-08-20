@@ -29,7 +29,9 @@ import type {
   ProjectChatMessagePush,
   ProjectArtifactPush,
   ProjectTurnEndPush,
+  SavePastedImageResult,
 } from '../../src/shared/ipc.types';
+import type { SaveDirectorStillRequest, SaveDirectorStillResult } from '../../src/shared/director.types';
 
 export interface ElectronAPI {
   platform: NodeJS.Platform;
@@ -41,12 +43,18 @@ export interface ElectronAPI {
   importProjectMedia: (projectId: string) => Promise<ImportProjectMediaResult>;
   listProjectMedia: (projectId: string) => Promise<ListProjectMediaResult>;
   sendChatMessage: (projectId: string, message: ChatMessage) => Promise<void>;
+  savePastedImage: (
+    projectId: string,
+    data: ArrayBuffer,
+    mimeType: string,
+  ) => Promise<SavePastedImageResult>;
   interruptAgent: (projectId: string) => Promise<void>;
   loadChatHistory: (folderPath: string) => Promise<ChatMessage[]>;
   listAgentSkills: (projectId: string) => Promise<AvailableSkill[]>;
   clearAgentContext: (projectId: string) => Promise<ClearAgentContextResult>;
   saveCanvasSnapshot: (folderPath: string, snapshot: unknown) => Promise<{ success: boolean }>;
   loadCanvasSnapshot: (folderPath: string) => Promise<unknown | null>;
+  saveDirectorStill: (request: SaveDirectorStillRequest) => Promise<SaveDirectorStillResult>;
   saveArtifactContent: (
     projectId: string,
     relPath: string,
@@ -93,6 +101,8 @@ const api: ElectronAPI = {
   listProjectMedia: (projectId) => invoke(IPC_CHANNELS.project.listMedia, projectId),
   sendChatMessage: (projectId, message) =>
     invoke(IPC_CHANNELS.chat.sendMessage, projectId, message),
+  savePastedImage: (projectId, data, mimeType) =>
+    invoke(IPC_CHANNELS.chat.savePastedImage, projectId, data, mimeType),
   interruptAgent: (projectId) =>
     invoke(IPC_CHANNELS.chat.interrupt, projectId),
   loadChatHistory: (folderPath) => invoke(IPC_CHANNELS.chat.loadHistory, folderPath),
@@ -100,6 +110,7 @@ const api: ElectronAPI = {
   clearAgentContext: (projectId) => invoke(IPC_CHANNELS.chat.clearContext, projectId),
   saveCanvasSnapshot: (folderPath, snapshot) => invoke(IPC_CHANNELS.canvas.save, folderPath, snapshot),
   loadCanvasSnapshot: (folderPath) => invoke(IPC_CHANNELS.canvas.load, folderPath),
+  saveDirectorStill: (request) => invoke(IPC_CHANNELS.canvas.saveDirectorStill, request),
   saveArtifactContent: (projectId, relPath, content) =>
     invoke(IPC_CHANNELS.artifact.save, projectId, relPath, content),
   generateImage: (request) => invoke(IPC_CHANNELS.comfyui.generateImage, request),

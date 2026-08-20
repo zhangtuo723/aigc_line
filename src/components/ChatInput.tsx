@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ChangeEvent, KeyboardEvent } from 'react';
+import type { ChangeEvent, ClipboardEvent, KeyboardEvent } from 'react';
 import type { Attachment, AvailableSkill, AvailableSkillSource } from '../shared/ipc.types';
 import { useAppStore } from '../stores/app.store';
 import {
@@ -59,6 +59,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillMenuDismissed, setSkillMenuDismissed] = useState(false);
   const [activeSkillIndex, setActiveSkillIndex] = useState(0);
+  const [pastedImageCount, setPastedImageCount] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const currentProject = useAppStore((s) => s.currentProject);
@@ -104,6 +105,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     setHint('');
     setSkills([]);
     setSkillMenuDismissed(false);
+    setPastedImageCount(0);
   }, [currentProject?.id]);
 
   const selectSkill = (skill: AvailableSkill) => {
@@ -136,7 +138,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
   };
 
   const handleSend = () => {
-    if (!content.trim() && attachments.length === 0 && !hasReferences) return;
+    if (pastedImageCount > 0 || (!content.trim() && attachments.length === 0 && !hasReferences)) return;
     onSend(content.trim(), attachments.length > 0 ? attachments : undefined);
     setContent('');
     setAttachments([]);
@@ -168,6 +170,47 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
 
     setAttachments((prev) => [...prev, ...newAttachments]);
     e.target.value = '';
+  };
+
+  const handlePaste = async (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (disabled || !currentProject) return;
+    const imageFiles = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    if (imageFiles.length === 0) return;
+
+    event.preventDefault();
+    const projectId = currentProject.id;
+    setPastedImageCount((count) => count + imageFiles.length);
+    const saved: Attachment[] = [];
+    const errors: string[] = [];
+    try {
+      for (const file of imageFiles) {
+        const result = await window.electronAPI.savePastedImage(
+          projectId,
+          await file.arrayBuffer(),
+          file.type,
+        );
+        if (result.success && result.attachment) saved.push(result.attachment);
+        else errors.push(result.error || '图片保存失败');
+      }
+      if (useAppStore.getState().currentProject?.id !== projectId) return;
+      if (saved.length > 0) setAttachments((prev) => [...prev, ...saved]);
+      if (errors.length > 0) {
+        setHint(errors[0]);
+        window.setTimeout(() => setHint(''), 3000);
+      }
+    } catch (error) {
+      if (useAppStore.getState().currentProject?.id === projectId) {
+        setHint(error instanceof Error ? error.message : '粘贴图片失败');
+        window.setTimeout(() => setHint(''), 3000);
+      }
+    } finally {
+      if (useAppStore.getState().currentProject?.id === projectId) {
+        setPastedImageCount((count) => Math.max(0, count - imageFiles.length));
+      }
+    }
   };
 
   const removeAttachment = (index: number) => {
@@ -274,23 +317,36 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
         )}
 
         {/* Selected attachments preview */}
-        {attachments.length > 0 && (
+        {(attachments.length > 0 || pastedImageCount > 0) && (
           <div className='flex flex-wrap gap-2 px-3 pt-3'>
             {attachments.map((attachment, index) => (
               <div
                 key={index}
-                className='flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1 text-xs text-[#b8b5c2]'
+                className='flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 p-1 pr-2 text-xs text-[#b8b5c2]'
               >
-                <span>{ATTACHMENT_ICONS[attachment.type] ?? '📎'}</span>
+                {['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(attachment.type.toLowerCase()) ? (
+                  <img
+                    src={`local-file:///${encodeURI(attachment.path.replace(/^\/+/, ''))}`}
+                    alt={attachment.name}
+                    className='h-9 w-9 rounded-md object-cover'
+                  />
+                ) : <span>{ATTACHMENT_ICONS[attachment.type] ?? '📎'}</span>}
                 <span className='max-w-[120px] truncate'>{attachment.name}</span>
                 <button
                   onClick={() => removeAttachment(index)}
                   className='ml-1 text-[#6d6a78] hover:text-[#e8e6df]'
+                  title='移除附件'
                 >
                   ×
                 </button>
               </div>
             ))}
+            {pastedImageCount > 0 && (
+              <div className='flex items-center gap-2 rounded-lg border border-[#d4af37]/20 bg-[#d4af37]/[0.06] px-2.5 py-1.5 text-xs text-[#e8c766]'>
+                <span className='h-3 w-3 animate-spin rounded-full border border-current border-r-transparent' />
+                正在添加图片…
+              </div>
+            )}
           </div>
         )}
 
@@ -303,9 +359,10 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
             setSkillMenuDismissed(false);
           }}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           onBlur={() => window.setTimeout(() => setSkillMenuDismissed(true), 100)}
           disabled={disabled}
-          placeholder='描述你的想法，输入 / 使用 Skill，或拖入附件…'
+          placeholder='描述你的想法，输入 / 使用 Skill，或粘贴图片…'
           rows={3}
           className='w-full resize-none bg-transparent px-4 pt-3 text-sm leading-relaxed text-[#e8e6df] placeholder:text-[#5a5766] focus:outline-none disabled:opacity-50'
         />
@@ -340,7 +397,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
           {/* Send button */}
           <button
             onClick={handleSend}
-            disabled={disabled || (!content.trim() && attachments.length === 0 && !hasReferences)}
+            disabled={disabled || pastedImageCount > 0 || (!content.trim() && attachments.length === 0 && !hasReferences)}
             className='ml-auto flex h-8 w-8 items-center justify-center rounded-full border border-[#d4af37]/50 bg-gradient-to-b from-[#e8c766] to-[#b08d2a] text-[#241a05] shadow-[0_2px_12px_rgba(212,175,55,0.25)] transition hover:brightness-110 disabled:border-white/10 disabled:bg-none disabled:bg-white/5 disabled:text-[#6d6a78] disabled:shadow-none'
             title='发送'
           >

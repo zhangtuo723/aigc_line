@@ -12,6 +12,7 @@ export const IPC_CHANNELS = {
     sendMessage: 'chat:sendMessage',
     receiveMessage: 'chat:receiveMessage',
     loadHistory: 'chat:loadHistory',
+    savePastedImage: 'chat:savePastedImage',
     listSkills: 'chat:listSkills',
     clearContext: 'chat:clearContext',
     interrupt: 'chat:interrupt',
@@ -19,6 +20,7 @@ export const IPC_CHANNELS = {
   canvas: {
     save: 'canvas:save',
     load: 'canvas:load',
+    saveDirectorStill: 'canvas:saveDirectorStill',
     commandResult: 'canvas:commandResult',
   },
   artifact: {

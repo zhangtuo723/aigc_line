@@ -21,6 +21,7 @@ describe('Seedream image models', () => {
 
   it.each([
     ['16:9', '2816x1584'],
+    ['9:16', '1584x2816'],
     ['4:3', '2368x1776'],
     ['1:1', '2048x2048'],
   ] as const)('uses the official Seedream 5.0 Pro 2K reference size for %s', (aspectRatio, size) => {
@@ -34,5 +35,13 @@ describe('Seedream image models', () => {
       output_format: 'jpeg',
       watermark: false,
     })
+  })
+
+  it('serializes multiple reference images as an ordered array', () => {
+    expect(buildSeedreamImageRequest(
+      { prompt: '测试', aspectRatio: '16:9' },
+      'model-id',
+      ['data:image/png;base64,first', 'data:image/jpeg;base64,second'],
+    ).image).toEqual(['data:image/png;base64,first', 'data:image/jpeg;base64,second'])
   })
 })

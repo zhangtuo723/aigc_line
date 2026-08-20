@@ -71,6 +71,7 @@ export function buildCanvasOverview(
     video: 0,
     audio: 0,
     upscale: 0,
+    director: 0,
   }
   const countsByGenerationStatus: Record<GenerationStatus, number> = {
     idle: 0,

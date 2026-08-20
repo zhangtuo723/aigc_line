@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   GOOGLE_IMAGE_MODELS,
   buildGoogleImageGenerationConfig,
+  buildGoogleImageParts,
   isGoogleImageWorkflow,
 } from '../electron/main/services/google-image.service'
 import { normalizeGoogleProxyUrl } from '../electron/main/services/google-network.service'
@@ -36,7 +37,19 @@ describe('Google image models', () => {
       },
     })
     expect(buildGoogleImageGenerationConfig('1:1').imageConfig.aspectRatio).toBe('1:1')
+    expect(buildGoogleImageGenerationConfig('9:16').imageConfig.aspectRatio).toBe('9:16')
     expect(buildGoogleImageGenerationConfig('4:3').imageConfig.aspectRatio).toBe('4:3')
+  })
+
+  it('serializes multiple reference images in the selected order', () => {
+    expect(buildGoogleImageParts(' prompt ', [
+      { mimeType: 'image/png', data: 'first' },
+      { mimeType: 'image/jpeg', data: 'second' },
+    ])).toEqual([
+      { text: 'prompt' },
+      { inline_data: { mime_type: 'image/png', data: 'first' } },
+      { inline_data: { mime_type: 'image/jpeg', data: 'second' } },
+    ])
   })
 })
 

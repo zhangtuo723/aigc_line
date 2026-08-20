@@ -52,6 +52,10 @@ const settingsPath = (): string => path.join(getAppDataDir(), SETTINGS_FILE)
 
 const normalizeUrl = (value: string): string => value.trim().replace(/\/+$/, '')
 
+export const normalizeSeedreamBaseUrl = (value: string): string => (
+  normalizeUrl(value).replace(/(?:\/images\/generations)+$/i, '')
+)
+
 const normalizeDefaultWorkflow = (value?: string): string => (
   !value || REMOVED_IMAGE_WORKFLOWS.has(value) ? DEFAULT_WORKFLOW : value
 )
@@ -106,7 +110,7 @@ export async function getRuntimeSettings(): Promise<RuntimeSettings> {
       || process.env.GOOGLE_API_KEY
       || '',
     googleAiProxyUrl: normalizeGoogleProxyUrl(stored.googleAiProxyUrl || ''),
-    seedreamBaseUrl: normalizeUrl(stored.seedreamBaseUrl || DEFAULT_SEEDREAM_BASE_URL),
+    seedreamBaseUrl: normalizeSeedreamBaseUrl(stored.seedreamBaseUrl || DEFAULT_SEEDREAM_BASE_URL),
     seedreamApiKey: stored.seedreamApiKey?.trim()
       || decryptToken(stored.encryptedSeedreamApiKey)
       || process.env.ARK_API_KEY
@@ -142,7 +146,7 @@ export async function saveAppSettings(request: SaveAppSettingsRequest): Promise<
     agentBaseUrl: normalizeUrl(request.agentBaseUrl),
     qwenBaseUrl: normalizeUrl(request.qwenBaseUrl || DEFAULT_QWEN_BASE_URL),
     googleAiProxyUrl: normalizeGoogleProxyUrl(request.googleAiProxyUrl || ''),
-    seedreamBaseUrl: normalizeUrl(request.seedreamBaseUrl || DEFAULT_SEEDREAM_BASE_URL),
+    seedreamBaseUrl: normalizeSeedreamBaseUrl(request.seedreamBaseUrl || DEFAULT_SEEDREAM_BASE_URL),
     defaultImageWorkflowId: normalizeDefaultWorkflow(request.defaultImageWorkflowId),
   }
   delete (next as StoredSettings & { qwenModel?: string }).qwenModel
@@ -235,7 +239,8 @@ export async function testSeedreamConnection(
   request: TestSeedreamConnectionRequest,
 ): Promise<ConnectionTestResult> {
   const runtime = await getRuntimeSettings()
-  const baseUrl = normalizeUrl(request.baseUrl || runtime.seedreamBaseUrl || DEFAULT_SEEDREAM_BASE_URL)
+  const baseUrl = normalizeSeedreamBaseUrl(request.baseUrl || runtime.seedreamBaseUrl || DEFAULT_SEEDREAM_BASE_URL)
+  const isAgentPlan = /\/api\/plan\/v3$/i.test(baseUrl)
   const apiKey = request.apiKey?.trim() || runtime.seedreamApiKey
   if (!apiKey) return { success: false, message: '请先输入火山方舟 API Key' }
 
@@ -246,7 +251,7 @@ export async function testSeedreamConnection(
       signal: AbortSignal.timeout(20_000),
     })
     if (modelsResponse.ok) {
-      return { success: true, message: '连接成功 · Seedream 5.0 Pro / Lite 共用此 Key' }
+      return { success: true, message: isAgentPlan ? '连接成功 · Agent Plan Seedream API 可用' : '连接成功 · Seedream 5.0 Pro / Lite 共用此 Key' }
     }
     if (modelsResponse.status === 401 || modelsResponse.status === 403) {
       const detail = (await modelsResponse.text()).slice(0, 500)
@@ -270,7 +275,7 @@ export async function testSeedreamConnection(
       return { success: false, message: `鉴权失败：HTTP ${probeResponse.status}${detail ? ` · ${detail}` : ''}` }
     }
     if (probeResponse.status === 400 || probeResponse.status === 422) {
-      return { success: true, message: '连接成功 · API Key 已通过鉴权（未生成图片）' }
+      return { success: true, message: isAgentPlan ? '连接成功 · Agent Plan API Key 已通过鉴权（未生成图片）' : '连接成功 · API Key 已通过鉴权（未生成图片）' }
     }
     return { success: false, message: `连接测试返回异常：HTTP ${probeResponse.status}${detail ? ` · ${detail}` : ''}` }
   } catch (error) {

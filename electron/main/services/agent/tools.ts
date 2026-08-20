@@ -3,13 +3,13 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { z } from 'zod';
 import log from 'electron-log/main';
-import type { Artifact, CanvasStateSnapshot, ChatMessage } from '../../../../src/shared/ipc.types';
+import type { Artifact, ChatMessage } from '../../../../src/shared/ipc.types';
 import { messageHub } from '../message-hub';
-import { appendChatMessage, readCanvasSnapshot } from '../project.store';
+import { appendChatMessage } from '../project.store';
 import { pushArtifact } from './artifact';
 import { sendCanvasCommand } from './canvas-bridge';
-import { resolveVideoReviewRequest, reviewVideoWithQwen } from '../qwen-video-review.service';
 import { analyzeVideoWithQwen } from '../qwen-video-analysis.service';
+import { directorProjectSchema } from '../../../../src/shared/director-schema';
 
 /** Image extensions -> MIME types supported as image artifacts */
 const IMAGE_MIME: Record<string, string> = {
@@ -32,7 +32,7 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
   const nodeFields = {
     title: z.string().optional(),
     prompt: z.string().optional(),
-    aspectRatio: z.enum(['16:9', '1:1', '4:3']).optional(),
+    aspectRatio: z.enum(['16:9', '9:16', '1:1', '4:3']).optional(),
     sourcePath: z.string().optional(),
     workflowId: z.string().optional(),
     duration: z.number().positive().optional(),
@@ -44,6 +44,7 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
     inputNodeId: z.string().optional(),
     scale: z.number().optional(),
     quality: z.string().optional(),
+    directorProject: directorProjectSchema.optional(),
   };
   const canvasResult = async (action: Parameters<typeof sendCanvasCommand>[1], payload: unknown) => {
     try {
@@ -95,7 +96,7 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
         {
           nodes: z.array(z.object({
             id: z.string().optional(),
-            kind: z.enum(['image', 'video', 'audio', 'upscale']),
+            kind: z.enum(['image', 'video', 'audio', 'upscale', 'director']),
             position: positionSchema.optional(),
             ...nodeFields,
           })).min(1),
@@ -143,7 +144,7 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
       ),
       tool(
         'AnalyzeVideo',
-        'Analyze any video with qwen3.5-omni-plus according to a free-form user requirement. This is a general-purpose tool independent of the canvas storyboard reviewer. videoUrl may be a project-relative/absolute file path inside the current project or a public http(s) URL. The tool analyzes both video and audio, returns Chinese Markdown with timestamped evidence, and saves the report under generated/analyses/.',
+        'Analyze any video with qwen3.5-omni-plus according to a free-form requirement. videoUrl may be a project-relative/absolute file path inside the current project or a public http(s) URL. The tool scans the whole video in chronological order, jointly analyzes visuals, visible text, speech, music, ambience and sound effects, distinguishes observations/transcription/inference, cites timestamped evidence, states uncertainty, and saves a Chinese Markdown report under generated/analyses/. Suitable for summaries, timelines, transcription, content extraction, event counting, comparisons, audiovisual analysis and targeted quality inspection.',
         {
           videoUrl: z.string().min(1).describe('Project-local video path or public http(s) video URL'),
           analysisRequest: z.string().min(1).describe('What to inspect, extract, compare, summarize, transcribe, or evaluate'),
@@ -159,42 +160,6 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
             const message = error instanceof Error ? error.message : String(error);
             log.error('[AnalyzeVideo] Failed:', message);
             return { content: [{ type: 'text', text: message }], isError: true } as any;
-          }
-        },
-      ),
-      tool(
-        'ReviewStoryboardVideo',
-        'Review one generated clip with qwen3.5-omni-plus. Pass its video node id, or an image node id that resolves to exactly one downstream video. The tool resolves the generated video, prompt, and ordered references, then checks continuity mistakes, visual corruption, malformed faces/bodies/hands/objects, broken physics, corrupted frames, audio distortion/dropouts/clipping, dialogue integrity, and audiovisual sync. It returns review text only: no report file or artifact. It does not calculate an overall score or decide whether to accept, repair, or regenerate.',
-        {
-          nodeId: z.string().min(1).describe('Exact canvas video node id; an image node with exactly one downstream video is also accepted'),
-        },
-        async (args) => {
-          log.info('[ReviewStoryboardVideo] Reviewing node:', args.nodeId);
-          try {
-            let state: CanvasStateSnapshot | null = null;
-            try {
-              const canvasResponse = await sendCanvasCommand(projectId, 'get-state', {}, 1_500);
-              state = canvasResponse.result as CanvasStateSnapshot;
-            } catch (error) {
-              log.info('[ReviewStoryboardVideo] Live canvas unavailable, using saved snapshot:', error);
-              state = await readCanvasSnapshot(folderPath) as CanvasStateSnapshot | null;
-            }
-            if (!state?.nodes || !state?.edges) throw new Error('无法读取实时画布状态');
-            const request = resolveVideoReviewRequest(state, args.nodeId);
-            const result = await reviewVideoWithQwen(folderPath, request);
-            return {
-              content: [{
-                type: 'text',
-                text: result.reviewText,
-              }],
-            } as any;
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            log.error('[ReviewStoryboardVideo] Failed:', message);
-            return {
-              content: [{ type: 'text', text: message }],
-              isError: true,
-            } as any;
           }
         },
       ),

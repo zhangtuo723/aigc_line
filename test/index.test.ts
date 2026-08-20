@@ -16,9 +16,7 @@ import {
 import { normalizeInterruptedToolCalls } from '../src/shared/tool-call-status'
 import { parseChatEventLog, replayChatEvents } from '../src/shared/chat-event-log'
 import {
-  resolveVideoReviewRequest,
-} from '../electron/main/services/qwen-video-review.service'
-import {
+  buildVideoAnalysisPrompts,
   resolveAnalysisVideoInput,
   validatePublicVideoUrl,
 } from '../electron/main/services/qwen-video-analysis.service'
@@ -29,7 +27,6 @@ import {
 import type {
   CanvasEdgeSnapshot,
   CanvasNodeSnapshot,
-  CanvasStateSnapshot,
 } from '../src/shared/ipc.types'
 
 describe('vitest smoke', () => {
@@ -171,12 +168,12 @@ describe('skill slash commands', () => {
 
   it('filters skills and creates the selected command', () => {
     const skills = [{
-      name: 'aigc-canvas:storyboard-production',
+      name: 'aigc-canvas:script-to-drama-video',
       description: 'Create short-drama shots',
       source: 'builtin' as const,
     }]
-    expect(filterAvailableSkills(skills, 'story')).toEqual(skills)
-    expect(makeSkillCommand(skills[0].name)).toBe('/aigc-canvas:storyboard-production ')
+    expect(filterAvailableSkills(skills, 'drama')).toEqual(skills)
+    expect(makeSkillCommand(skills[0].name)).toBe('/aigc-canvas:script-to-drama-video ')
   })
 
   it('parses skill metadata used by the menu', () => {
@@ -192,14 +189,14 @@ describe('skill slash commands', () => {
 
   it('does not expose SDK control commands as skills', () => {
     const discovered = [{
-      name: 'aigc-canvas:storyboard-production',
+      name: 'aigc-canvas:script-to-drama-video',
       description: '本地描述',
       source: 'builtin' as const,
     }]
     const merged = mergeDiscoveredSkills(discovered, [
       { name: 'clear', description: 'Clear context', argumentHint: '' },
       {
-        name: 'aigc-canvas:storyboard-production',
+        name: 'aigc-canvas:script-to-drama-video',
         description: 'SDK 描述',
         argumentHint: '<topic>',
       },
@@ -207,7 +204,7 @@ describe('skill slash commands', () => {
 
     expect(merged).toHaveLength(1)
     expect(merged[0]).toMatchObject({
-      name: 'aigc-canvas:storyboard-production',
+      name: 'aigc-canvas:script-to-drama-video',
       description: 'SDK 描述',
       argumentHint: '<topic>',
     })
@@ -217,12 +214,12 @@ describe('skill slash commands', () => {
     const prompt = buildUserPrompt({
       id: 'message-skill',
       role: 'user',
-      content: '/aigc-canvas:storyboard-production 创建三个夜景镜头',
+      content: '/aigc-canvas:script-to-drama-video 创建三个夜景镜头',
       timestamp: 1,
       nodeRefs: [{ id: 'image-1', title: '镜头 1 · 图片', kind: 'image' }],
     }, 'E:\\workspace')
 
-    expect(prompt.startsWith('/aigc-canvas:storyboard-production ')).toBe(true)
+    expect(prompt.startsWith('/aigc-canvas:script-to-drama-video ')).toBe(true)
     expect(prompt).toContain('nodeId="image-1"')
   })
 })
@@ -302,59 +299,6 @@ describe('append-only chat event log', () => {
   })
 })
 
-describe('storyboard video review', () => {
-  it('resolves an image id to its generated video and reference image', () => {
-    const state: CanvasStateSnapshot = {
-      revision: 1,
-      nodeCount: 2,
-      edgeCount: 1,
-      viewport: { x: 0, y: 0, zoom: 1 },
-      nodes: [
-        { id: 'image-1', type: 'storyNode', position: { x: 100, y: 0 }, data: { kind: 'image', title: '角色参考', sourcePath: 'generated/images/shot-1.png' } },
-        { id: 'video-1', type: 'storyNode', position: { x: 200, y: 0 }, data: { kind: 'video', title: '镜头 1 视频', prompt: '主角进入房间并说你好', sourcePath: 'generated/videos/shot-1.mp4', referenceImageNodeIds: ['image-1'] } },
-      ],
-      edges: [
-        { id: 'edge-1', source: 'image-1', target: 'video-1' },
-      ],
-    }
-
-    const request = resolveVideoReviewRequest(state, 'image-1')
-    expect(request.videoNodeId).toBe('video-1')
-    expect(request.sourcePath).toBe('generated/videos/shot-1.mp4')
-    expect(request.referenceMedia).toEqual([expect.objectContaining({
-      kind: 'image',
-      label: '<Picture 1>',
-      nodeId: 'image-1',
-      sourcePath: 'generated/images/shot-1.png',
-    })])
-    expect(request.expectedContent).toContain('主角进入房间并说你好')
-  })
-
-  it('preserves multimodal reference numbering and fails on missing generated media', () => {
-    const state: CanvasStateSnapshot = {
-      revision: 1,
-      nodeCount: 3,
-      edgeCount: 2,
-      viewport: { x: 0, y: 0, zoom: 1 },
-      nodes: [
-        { id: 'image-1', type: 'storyNode', position: { x: 1, y: 0 }, data: { kind: 'image', title: '人物', sourcePath: 'images/person.png' } },
-        { id: 'audio-1', type: 'storyNode', position: { x: 2, y: 0 }, data: { kind: 'audio', title: '对白', sourcePath: 'audio/dialogue.wav' } },
-        { id: 'video-1', type: 'storyNode', position: { x: 3, y: 0 }, data: { kind: 'video', title: '成片', sourcePath: 'videos/result.mp4', referenceImageNodeIds: ['image-1'], referenceAudioNodeIds: ['audio-1'] } },
-      ],
-      edges: [
-        { id: 'e1', source: 'image-1', target: 'video-1' },
-        { id: 'e2', source: 'audio-1', target: 'video-1' },
-      ],
-    }
-
-    const request = resolveVideoReviewRequest(state, 'video-1')
-    expect(request.referenceMedia?.map((item) => item.label)).toEqual(['<Picture 1>', '<Audio 1>'])
-    state.nodes[0].data.sourcePath = undefined
-    expect(() => resolveVideoReviewRequest(state, 'video-1')).toThrow('Picture 1')
-  })
-
-})
-
 describe('general video analysis input', () => {
   it('accepts project-local video paths and public URLs', () => {
     expect(resolveAnalysisVideoInput('C:/projects/demo', 'generated/videos/a.mp4')).toEqual({
@@ -369,5 +313,23 @@ describe('general video analysis input', () => {
     expect(() => validatePublicVideoUrl('http://127.0.0.1/video.mp4')).toThrow('私有网络')
     expect(() => validatePublicVideoUrl('http://192.168.1.2/video.mp4')).toThrow('私有网络')
     expect(() => resolveAnalysisVideoInput('C:/projects/demo', 'file:///C:/video.mp4')).toThrow('只支持')
+  })
+
+  it('builds an evidence-first multimodal analysis prompt around the user request', () => {
+    const prompts = buildVideoAnalysisPrompts('统计人物摔倒的次数，并说明是否伴随撞击声')
+
+    expect(prompts.system).toContain('完整按时间顺序检查')
+    expect(prompts.system).toContain('画面')
+    expect(prompts.system).toContain('音效')
+    expect(prompts.system).toContain('直接观察到的画面')
+    expect(prompts.system).toContain('基于证据的推断')
+    expect(prompts.system).toContain('先列出每次出现的时间证据')
+    expect(prompts.system).toContain('[听不清]')
+    expect(prompts.user).toContain('<analysis_request>')
+    expect(prompts.user).toContain('统计人物摔倒的次数，并说明是否伴随撞击声')
+  })
+
+  it('rejects an empty analysis request before calling the model', () => {
+    expect(() => buildVideoAnalysisPrompts('   ')).toThrow('分析要求不能为空')
   })
 })

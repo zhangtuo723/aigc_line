@@ -231,7 +231,7 @@ export function SettingsPage() {
           {notice && <div className="rounded-lg border border-[#d4af37]/25 bg-[#d4af37]/[0.07] px-4 py-3 text-sm text-[#d9c178]">{notice}</div>}
 
           <div className="space-y-5">
-            <div className="grid items-start gap-5 lg:grid-cols-2">
+            <div className="grid auto-rows-fr items-stretch gap-5 lg:grid-cols-2">
           <SettingsCard title="ComfyUI 服务" description="本地图片工作流、视频生成与视频放大请求发送到此服务器。修改后可先测试连接。">
             <label className="text-xs tracking-wider text-[#9a97a3]">HTTP 地址</label>
             <div className="mt-2 flex gap-3">
@@ -270,7 +270,7 @@ export function SettingsPage() {
           </SettingsCard>
 
             </div>
-            <div className="grid items-start gap-5 xl:grid-cols-3">
+            <div className="grid auto-rows-fr items-stretch gap-5 xl:grid-cols-3">
 
           <SettingsCard title="Qwen 音视频审查" description="固定使用 Qwen3.5-Omni Plus 同时理解视频画面、对白、环境音和音效，并输出带时间戳的审查报告。API Key 保存在本机，重新打开设置页时会自动回填。">
             <div className="grid gap-5">
@@ -341,11 +341,12 @@ export function SettingsPage() {
             </div>
           </SettingsCard>
 
-          <SettingsCard title="Seedream 图片生成" description="通过火山方舟 API 调用 Doubao-Seedream-5.0-pro / lite，支持 2K 文生图和连接参考图片后的图生图。">
+          <SettingsCard title="方舟图片 / 视频生成" description="使用同一套方舟 Base URL 与 API Key 调用 Seedream 5.0 图片生成和 Seedance 2.0 全模态视频生成；Agent Plan 使用专属地址与 Key。">
             <div className="grid gap-5">
               <div>
-                <label className="text-xs tracking-wider text-[#9a97a3]">方舟 API 地址</label>
+                <label className="text-xs tracking-wider text-[#9a97a3]">方舟 API Base URL</label>
                 <input value={seedreamBaseUrl} onChange={(event) => { setSeedreamBaseUrl(event.target.value); setSeedreamTestResult(null); }} className={`${fieldClass} mt-2`} placeholder={DEFAULT_SEEDREAM_BASE_URL} spellCheck={false} />
+                <p className="mt-2 text-[11px] leading-5 text-[#5f5c68]">普通 API 填 <span className="font-mono">…/api/v3</span>，Agent Plan 填 <span className="font-mono">…/api/plan/v3</span>；无需附加 <span className="font-mono">/images/generations</span>，粘贴完整地址时会自动移除。</p>
               </div>
               <div>
                 <div className="flex items-center justify-between">
@@ -365,11 +366,11 @@ export function SettingsPage() {
               </div>
               <div className="flex flex-wrap items-center gap-3">
                 <button onClick={handleSeedreamTest} disabled={testingSeedream || !seedreamBaseUrl.trim() || (clearSeedreamApiKey && !seedreamApiKey.trim())} className="rounded-lg border border-white/[0.12] bg-white/[0.05] px-5 py-2.5 text-sm text-[#d7d4cb] transition hover:border-[#d4af37]/40 hover:text-[#e8c766] disabled:opacity-40">
-                  {testingSeedream ? '测试中…' : '测试 Seedream 连接'}
+                  {testingSeedream ? '测试中…' : '测试方舟连接'}
                 </button>
                 {seedreamTestResult && <p className={`text-xs ${seedreamTestResult.success ? 'text-emerald-400' : 'text-rose-400'}`}>{seedreamTestResult.message}</p>}
               </div>
-              <p className="text-[11px] leading-5 text-[#5f5c68]">模型：doubao-seedream-5-0-260128（Pro）、doubao-seedream-5-0-lite-260128。API Key 明文保存在本机 settings.json，也可通过 ARK_API_KEY 环境变量提供。</p>
+              <p className="text-[11px] leading-5 text-[#5f5c68]">图片：Seedream 5.0 Pro / Lite；视频：Seedance 2.0（Agent Plan，720p、4–15 秒、同步音频）。API Key 明文保存在本机 settings.json，也可通过 ARK_API_KEY 环境变量提供。</p>
             </div>
           </SettingsCard>
             </div>
@@ -399,12 +400,12 @@ export function SettingsPage() {
 
 function SettingsCard({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
   return (
-    <section className="rounded-2xl border border-white/[0.08] bg-[#111118] p-6 shadow-[0_16px_50px_rgba(0,0,0,0.18)]">
+    <section className="flex h-full min-w-0 flex-col rounded-2xl border border-white/[0.08] bg-[#111118] p-6 shadow-[0_16px_50px_rgba(0,0,0,0.18)]">
       <div className="mb-5 border-b border-white/[0.07] pb-4">
         <h2 className="text-sm font-semibold tracking-[0.14em] text-[#e8e6df]">{title}</h2>
         <p className="mt-2 text-xs leading-5 text-[#777482]">{description}</p>
       </div>
-      {children}
+      <div className="flex-1">{children}</div>
     </section>
   );
 }

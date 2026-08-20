@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import type { ProjectMediaAsset, ProjectMediaKind } from '../../../src/shared/ipc.types'
 import { loadProject } from './project.store'
 
@@ -39,6 +40,45 @@ const safeFileBase = (filePath: string): string => {
   return path.basename(filePath, extension)
     .replace(/[^\p{L}\p{N}._-]+/gu, '-')
     .slice(0, 80) || 'media'
+}
+
+const safeGeneratedName = (value: string): string => (
+  value.replace(/[^\p{L}\p{N}._-]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'shot'
+)
+
+export async function saveDirectorStill(
+  projectId: string,
+  nodeId: string,
+  shotId: string,
+  shotName: string,
+  pngData: ArrayBuffer,
+): Promise<string> {
+  const project = await loadProject(projectId)
+  if (!project) throw new Error('项目不存在或已被删除')
+  const data = Buffer.from(pngData)
+  if (data.byteLength < 8 || data.byteLength > 25 * 1024 * 1024) {
+    throw new Error('导演台截图大小无效')
+  }
+  const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  if (!data.subarray(0, 8).equals(pngSignature)) throw new Error('导演台截图不是有效的 PNG 文件')
+  if (data.byteLength < 33 || data.toString('ascii', 12, 16) !== 'IHDR') {
+    throw new Error('导演台截图缺少有效的 PNG 头')
+  }
+  const width = data.readUInt32BE(16)
+  const height = data.readUInt32BE(20)
+  if (width < 1 || height < 1 || width > 8192 || height > 8192) {
+    throw new Error('导演台截图尺寸无效')
+  }
+  if (data.lastIndexOf(Buffer.from('IEND')) < 0) throw new Error('导演台截图数据不完整')
+
+  const destinationDir = path.join(project.folderPath, 'generated', 'director-stills')
+  await fs.mkdir(destinationDir, { recursive: true })
+  const destinationPath = path.join(
+    destinationDir,
+    `${Date.now()}-${randomUUID().slice(0, 8)}-${safeGeneratedName(nodeId)}-${safeGeneratedName(shotId)}-${safeGeneratedName(shotName)}.png`,
+  )
+  await fs.writeFile(destinationPath, data, { flag: 'wx' })
+  return toRelativePath(project.folderPath, destinationPath)
 }
 
 export async function importProjectMediaFiles(

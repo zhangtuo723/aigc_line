@@ -16,6 +16,7 @@ import {
 } from '../services/comfyui.service'
 import { generateImageWithGoogle, isGoogleImageWorkflow } from '../services/google-image.service'
 import { generateImageWithSeedream, isSeedreamImageWorkflow } from '../services/seedream-image.service'
+import { generateVideoWithSeedance, isSeedanceVideoWorkflow } from '../services/seedance-video.service'
 import { getRuntimeSettings } from '../services/settings.service'
 
 export function registerComfyUIHandlers(): void {
@@ -41,6 +42,7 @@ export function registerComfyUIHandlers(): void {
     IPC_CHANNELS.comfyui.generateVideo,
     async (_event, request: GenerateVideoRequest): Promise<GenerateVideoResult> => {
       try {
+        if (isSeedanceVideoWorkflow(request.workflowId)) return await generateVideoWithSeedance(request)
         return await generateVideoWithComfyUI(request)
       } catch (error) {
         return {

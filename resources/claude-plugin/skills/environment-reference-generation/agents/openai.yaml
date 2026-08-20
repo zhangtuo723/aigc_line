@@ -1,0 +1,4 @@
+interface:
+  display_name: "场景参考图生成"
+  short_description: "为短剧生成无人高机位空间全景，并保持布局、材质与灯光连续"
+  default_prompt: "Use $environment-reference-generation to create reusable, empty high-angle environment reference images for my scenes."

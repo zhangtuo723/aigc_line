@@ -13,7 +13,7 @@ export interface FieldOption {
   label: string;
 }
 
-export type NodeFieldType = 'string' | 'number' | 'enum' | 'string-array';
+export type NodeFieldType = 'string' | 'number' | 'boolean' | 'enum' | 'string-array' | 'object';
 
 export interface NodeFieldDescriptor {
   /** Key inside the node's data object, e.g. 'prompt' */
@@ -119,6 +119,8 @@ export function validateNodeFieldValue(field: NodeFieldDescriptor, value: unknow
         return `仅支持：${field.numberValues.join(', ')}`;
       }
       return null;
+    case 'boolean':
+      return typeof value === 'boolean' ? null : '需要布尔值';
     case 'enum':
       if (typeof value !== 'string') return '需要字符串枚举值';
       // Dynamic options are validated by the provider's consumer, not here.
@@ -130,6 +132,10 @@ export function validateNodeFieldValue(field: NodeFieldDescriptor, value: unknow
       return Array.isArray(value) && value.every((item) => typeof item === 'string')
         ? null
         : '需要字符串数组';
+    case 'object':
+      return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? null
+        : '需要对象';
     default:
       return null;
   }

@@ -22,10 +22,20 @@ export const GOOGLE_IMAGE_MODELS = [
   },
 ] as const
 
-type GoogleImagePart = {
+export type GoogleImagePart = {
   text?: string
   inlineData?: { mimeType?: string; data?: string }
   inline_data?: { mime_type?: string; data?: string }
+}
+
+export function buildGoogleImageParts(
+  prompt: string,
+  images: Array<{ mimeType: string; data: string }>,
+): GoogleImagePart[] {
+  return [
+    { text: prompt.trim() },
+    ...images.map(({ mimeType, data }) => ({ inline_data: { mime_type: mimeType, data } })),
+  ]
 }
 
 type GoogleImageResponse = {
@@ -110,9 +120,13 @@ export async function generateImageWithGoogle(
   const settings = await getRuntimeSettings()
   if (!settings.googleAiApiKey) throw new Error('请先在设置页配置 Google AI Studio API Key')
 
-  const parts: GoogleImagePart[] = [{ text: prompt }]
-  if (request.referenceImagePath) {
-    const imagePath = await resolveProjectImage(project.folderPath, request.referenceImagePath)
+  const referencePaths = [...new Set(
+    request.referenceImagePaths ?? (request.referenceImagePath ? [request.referenceImagePath] : []),
+  )]
+  if (referencePaths.length > 14) throw new Error('Nano Banana 最多支持 14 张参考图片')
+  const referenceImages: Array<{ mimeType: string; data: string }> = []
+  for (const referencePath of referencePaths) {
+    const imagePath = await resolveProjectImage(project.folderPath, referencePath)
     const extension = path.extname(imagePath).toLowerCase()
     const mimeType = MIME_BY_EXTENSION[extension]
     if (!mimeType) throw new Error('Nano Banana 图生图仅支持 PNG、JPEG、WebP 或 GIF 参考图片')
@@ -120,8 +134,9 @@ export async function generateImageWithGoogle(
     if (bytes.byteLength > 20 * 1024 * 1024) {
       throw new Error('Nano Banana 参考图片不能超过 20 MB')
     }
-    parts.push({ inline_data: { mime_type: mimeType, data: bytes.toString('base64') } })
+    referenceImages.push({ mimeType, data: bytes.toString('base64') })
   }
+  const parts = buildGoogleImageParts(prompt, referenceImages)
 
   const response = await fetchGoogleApi(
     `https://generativelanguage.googleapis.com/v1/models/${selected.model}:generateContent`,

@@ -41,7 +41,6 @@ const CANVAS_MCP_TOOLS = [
   'DisconnectCanvasEdges',
   'InvokeNodeAction',
   'AnalyzeVideo',
-  'ReviewStoryboardVideo',
 ];
 
 /** Delay before restarting a dead stream that still has pending work. */
