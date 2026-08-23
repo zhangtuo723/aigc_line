@@ -32,6 +32,8 @@ import type {
   SavePastedImageResult,
   SaveImageEditRequest,
   SaveImageEditResult,
+  SaveBoardPreviewRequest,
+  SaveBoardPreviewResult,
 } from '../../src/shared/ipc.types';
 import type { SaveDirectorStillRequest, SaveDirectorStillResult, SaveDirectorVideoRequest, SaveDirectorVideoResult } from '../../src/shared/director.types';
 
@@ -59,6 +61,7 @@ export interface ElectronAPI {
   saveDirectorStill: (request: SaveDirectorStillRequest) => Promise<SaveDirectorStillResult>;
   saveDirectorVideo: (request: SaveDirectorVideoRequest) => Promise<SaveDirectorVideoResult>;
   saveImageEdit: (request: SaveImageEditRequest) => Promise<SaveImageEditResult>;
+  saveBoardPreview: (request: SaveBoardPreviewRequest) => Promise<SaveBoardPreviewResult>;
   saveArtifactContent: (
     projectId: string,
     relPath: string,
@@ -117,6 +120,7 @@ const api: ElectronAPI = {
   saveDirectorStill: (request) => invoke(IPC_CHANNELS.canvas.saveDirectorStill, request),
   saveDirectorVideo: (request) => invoke(IPC_CHANNELS.canvas.saveDirectorVideo, request),
   saveImageEdit: (request) => invoke(IPC_CHANNELS.canvas.saveImageEdit, request),
+  saveBoardPreview: (request) => invoke(IPC_CHANNELS.canvas.saveBoardPreview, request),
   saveArtifactContent: (projectId, relPath, content) =>
     invoke(IPC_CHANNELS.artifact.save, projectId, relPath, content),
   generateImage: (request) => invoke(IPC_CHANNELS.comfyui.generateImage, request),

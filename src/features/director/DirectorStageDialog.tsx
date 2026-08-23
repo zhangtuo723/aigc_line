@@ -1374,7 +1374,7 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
   }
 
   return createPortal(
-    <div className="app-no-drag fixed inset-x-0 bottom-0 top-10 z-[200] flex flex-col bg-[#090a0e] text-white" onPointerDown={(event) => event.stopPropagation()}>
+    <div data-canvas-node-editor-dialog data-director-stage-dialog className="app-no-drag fixed inset-x-0 bottom-0 top-10 z-[200] flex flex-col bg-[#090a0e] text-white" onPointerDown={(event) => event.stopPropagation()}>
       {busy && <div className="app-no-drag fixed inset-x-0 bottom-0 top-10 z-[210] cursor-progress" aria-label={exporting ? '正在导出预演视频，编辑已暂停' : '正在拍摄，编辑已暂停'} />}
       <header className="pointer-events-auto relative z-30 flex h-14 flex-shrink-0 items-center gap-3 border-b border-white/10 bg-[#121318] px-4">
         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#d4af37]/15 text-[#e8c766]">◫</div>

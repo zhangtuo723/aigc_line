@@ -167,7 +167,11 @@ registerNodeCapabilities({
 
 registerNodeCapabilities({
   kind: 'image-editor',
-  label: '图片编辑节点',
-  fields: [],
+  label: '画板节点',
+  fields: [
+    { key: 'boardState', type: 'object', readonly: true, description: '画板自动保存的 Excalidraw 场景状态（只读，不包含图片 data URL）' },
+    { key: 'boardPreviewPath', type: 'string', readonly: true, description: '画板当前可视区域中心截图的项目相对路径（只读）' },
+    { key: 'boardPreviewUpdatedAt', type: 'number', readonly: true, description: '画板中心截图更新时间（只读）' },
+  ],
   actions: [],
 })

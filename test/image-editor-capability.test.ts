@@ -3,13 +3,16 @@ import '../src/components/canvas-capabilities'
 import { getNodeCapabilities } from '../src/shared/node-capabilities'
 import { buildCanvasOverview } from '../src/shared/canvas-read-model'
 
-describe('image editor node registration', () => {
+describe('board node registration', () => {
   it('exposes the image-editor kind to canvas capabilities', () => {
     const capability = getNodeCapabilities('image-editor')
 
-    expect(capability?.label).toBe('图片编辑节点')
+    expect(capability?.label).toBe('画板节点')
     expect(capability?.fields).toEqual([
       expect.objectContaining({ key: 'title', type: 'string' }),
+      expect.objectContaining({ key: 'boardState', type: 'object', readonly: true }),
+      expect.objectContaining({ key: 'boardPreviewPath', type: 'string', readonly: true }),
+      expect.objectContaining({ key: 'boardPreviewUpdatedAt', type: 'number', readonly: true }),
     ])
     expect(capability?.actions).toEqual([])
   })

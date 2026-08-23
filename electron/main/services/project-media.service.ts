@@ -83,7 +83,7 @@ export async function saveDirectorStill(
 export async function saveImageEdit(
   projectId: string,
   nodeId: string,
-  inputNodeId: string,
+  inputNodeId: string | undefined,
   pngData: ArrayBuffer,
   expectedWidth: number,
   expectedHeight: number,
@@ -98,9 +98,29 @@ export async function saveImageEdit(
   await fs.mkdir(destinationDir, { recursive: true })
   const destinationPath = path.join(
     destinationDir,
-    `${Date.now()}-${randomUUID().slice(0, 8)}-${safeGeneratedName(nodeId)}-${safeGeneratedName(inputNodeId)}.png`,
+    `${Date.now()}-${randomUUID().slice(0, 8)}-${safeGeneratedName(nodeId)}-${safeGeneratedName(inputNodeId ?? 'blank-board')}.png`,
   )
   await fs.writeFile(destinationPath, data, { flag: 'wx' })
+  return toRelativePath(project.folderPath, destinationPath)
+}
+
+export async function saveBoardPreview(
+  projectId: string,
+  nodeId: string,
+  pngData: ArrayBuffer,
+  expectedWidth: number,
+  expectedHeight: number,
+): Promise<string> {
+  const project = await loadProject(projectId)
+  if (!project) throw new Error('项目不存在或已被删除')
+  const { data, width, height } = validatePng(pngData, '画板预览')
+  if (width !== Math.floor(expectedWidth) || height !== Math.floor(expectedHeight)) {
+    throw new Error('画板预览尺寸与截图画布不一致')
+  }
+  const destinationDir = path.join(project.folderPath, '.aigc-line', 'board-previews')
+  await fs.mkdir(destinationDir, { recursive: true })
+  const destinationPath = path.join(destinationDir, `${safeGeneratedName(nodeId)}.png`)
+  await fs.writeFile(destinationPath, data)
   return toRelativePath(project.folderPath, destinationPath)
 }
 

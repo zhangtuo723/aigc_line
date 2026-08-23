@@ -173,7 +173,7 @@ export type CanvasNodeKind = 'image' | 'image-editor' | 'video' | 'audio' | 'ups
 export interface SaveImageEditRequest {
   projectId: string;
   nodeId: string;
-  inputNodeId: string;
+  inputNodeId?: string;
   pngData: ArrayBuffer;
   width: number;
   height: number;
@@ -183,6 +183,47 @@ export interface SaveImageEditResult {
   success: boolean;
   relativePath?: string;
   error?: string;
+}
+
+export interface SaveBoardPreviewRequest {
+  projectId: string;
+  nodeId: string;
+  pngData: ArrayBuffer;
+  width: number;
+  height: number;
+}
+
+export interface SaveBoardPreviewResult {
+  success: boolean;
+  relativePath?: string;
+  error?: string;
+}
+
+/** Serializable Excalidraw scene stored on an image-editor (board) node. Binary image data is never embedded. */
+export interface BoardState {
+  version: 1;
+  elements: unknown[];
+  appState: {
+    viewBackgroundColor?: string;
+    currentItemStrokeColor?: string;
+    currentItemBackgroundColor?: string;
+    currentItemFillStyle?: string;
+    currentItemStrokeWidth?: number;
+    currentItemStrokeStyle?: string;
+    currentItemRoughness?: number;
+    currentItemOpacity?: number;
+    currentItemFontFamily?: number;
+    currentItemFontSize?: number;
+    currentItemTextAlign?: string;
+    currentItemStartArrowhead?: string | null;
+    currentItemEndArrowhead?: string | null;
+    gridSize?: number | null;
+    gridStep?: number;
+    gridModeEnabled?: boolean;
+    scrollX?: number;
+    scrollY?: number;
+    zoom?: unknown;
+  };
 }
 
 export interface CanvasPoint {
@@ -213,6 +254,11 @@ export interface CanvasNodeData extends Record<string, unknown> {
   readOnly?: boolean;
   /** Serializable 3D previs project. Kept as unknown here to avoid coupling IPC media types to the editor runtime. */
   directorProject?: import('./director.types').DirectorProject;
+  /** Serializable Excalidraw vector scene. Connected image binaries are reconstructed from their source nodes. */
+  boardState?: BoardState;
+  /** Project-relative PNG of the center of the board viewport, used only by the node card. */
+  boardPreviewPath?: string;
+  boardPreviewUpdatedAt?: number;
   generationStatus?: 'idle' | 'generating' | 'error';
   generationError?: string;
 }

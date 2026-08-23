@@ -17,6 +17,8 @@ const testUserDataDir = path.join(root, 'test-results', `electron-user-data-${ru
 const testWorkspaceDir = path.join(root, 'test-results', `skill-workspace-${runId}`)
 let electronApp: ElectronApplication
 let page: Page
+let mainWindow: JSHandle<BrowserWindow>
+let currentProjectId = ''
 let xvfbProcess: ChildProcess | undefined
 
 function startXvfbOnLinux(): Promise<void> {
@@ -52,8 +54,8 @@ test.beforeAll(async () => {
   })
   page = await electronApp.firstWindow()
 
-  const mainWin: JSHandle<BrowserWindow> = await electronApp.browserWindow(page)
-  await mainWin.evaluate(async (win) => {
+  mainWindow = await electronApp.browserWindow(page)
+  await mainWindow.evaluate(async (win) => {
     win.webContents.executeJavaScript('console.log("Execute JavaScript with e2e testing.")')
   })
 })
@@ -86,9 +88,10 @@ test.describe('AIGC CANVAS Electron UI', () => {
   })
 
   test('slash opens the available skill menu and inserts a selection', async () => {
-    await page.evaluate(async (folderPath) => {
+    currentProjectId = await page.evaluate(async (folderPath) => {
       const project = await window.electronAPI.createProject('Skill E2E', folderPath)
       await window.electronAPI.loadProject(project.id)
+      return project.id
     }, testWorkspaceDir)
     await page.reload()
 
@@ -154,9 +157,15 @@ test.describe('AIGC CANVAS Electron UI', () => {
 
   test('3D director stage creates a persisted composition reference node', async () => {
     await page.getByTitle('添加3D 导演台节点').click()
-    await page.getByRole('button', { name: '打开导演台' }).click()
+    const directorNode = page.locator('.react-flow__node').filter({ has: page.getByRole('button', { name: '打开导演台' }) })
+    const directorId = await directorNode.getAttribute('data-id')
+    expect(directorId).toBeTruthy()
+    await directorNode.getByRole('button', { name: '打开导演台' }).click()
 
     await expect(page.getByText('白模调度 · 多机位 · Shot 快照 · 24fps 工程')).toBeVisible()
+    await page.keyboard.press('Delete')
+    await expect(page.getByText('白模调度 · 多机位 · Shot 快照 · 24fps 工程')).toBeVisible()
+    await expect(page.locator(`.react-flow__node[data-id="${directorId}"]`)).toHaveCount(1)
     await expect(page.locator('canvas')).toBeVisible()
     await expect(page.getByText('双击场景物体激活', { exact: true })).toBeVisible()
     const stageToolbar = page.getByRole('toolbar', { name: '添加到片场工具栏' })
@@ -280,40 +289,100 @@ test.describe('AIGC CANVAS Electron UI', () => {
     expect(directorVideos.some((file) => file.endsWith('.webm'))).toBe(true)
   })
 
-  test('image editor loads connected images and exports the selection as a linked node', async () => {
+  test('board opens blank, loads connected images, and exports the selection as a linked node', async () => {
     test.setTimeout(60000)
-    await page.getByTitle('添加图片编辑节点').click()
+    await page.getByTitle('添加画板节点').click()
     const sourceNode = page.locator('.react-flow__node').filter({ hasText: '镜头 02 · 构图参考' })
-    const editorNode = page.locator('.react-flow__node').filter({ has: page.getByRole('button', { name: '打开图片编辑器' }) })
-    const sourceHandleBox = await sourceNode.locator('.react-flow__handle-right').boundingBox()
-    const targetHandleBox = await editorNode.locator('.react-flow__handle-left').boundingBox()
-    expect(sourceHandleBox).not.toBeNull()
-    expect(targetHandleBox).not.toBeNull()
-    await page.mouse.move(sourceHandleBox!.x + sourceHandleBox!.width / 2, sourceHandleBox!.y + sourceHandleBox!.height / 2)
-    await page.mouse.down()
-    await page.mouse.move(targetHandleBox!.x + targetHandleBox!.width / 2, targetHandleBox!.y + targetHandleBox!.height / 2, { steps: 12 })
-    await page.mouse.up()
-
-    const openEditorButton = editorNode.getByRole('button', { name: '打开图片编辑器' })
+    const editorNode = page.locator('.react-flow__node').filter({ has: page.getByRole('button', { name: '打开画板' }) })
+    const sourceId = await sourceNode.getAttribute('data-id')
+    const editorId = await editorNode.getAttribute('data-id')
+    expect(sourceId).toBeTruthy()
+    expect(editorId).toBeTruthy()
+    const openEditorButton = editorNode.getByRole('button', { name: '打开画板' })
     await expect(openEditorButton).toBeEnabled()
     await openEditorButton.click()
-    await expect(page.getByText(/Excalidraw 素材编辑台 · 已载入 1 张连接图片/)).toBeVisible()
+    await expect(page.getByText('Excalidraw 自由画板 · 无连接素材')).toBeVisible()
+    await page.keyboard.press('Delete')
+    await expect(page.getByText('Excalidraw 自由画板 · 无连接素材')).toBeVisible()
+    await expect(page.locator(`.react-flow__node[data-id="${editorId}"]`)).toHaveCount(1)
+    let excalidrawCanvas = page.locator('canvas.excalidraw__canvas.interactive')
+    await expect(excalidrawCanvas).toBeVisible()
+    let canvasBox = await excalidrawCanvas.boundingBox()
+    expect(canvasBox).not.toBeNull()
+    const drawingStart = { x: canvasBox!.x + canvasBox!.width / 2 - 90, y: canvasBox!.y + 260 }
+    const drawingEnd = { x: drawingStart.x + 180, y: drawingStart.y + 110 }
+    await excalidrawCanvas.click({ position: { x: 100, y: 220 } })
+    await page.keyboard.press('r')
+    await expect(page.getByRole('radio', { name: /矩形/ })).toBeChecked()
+    await page.mouse.move(drawingStart.x, drawingStart.y)
+    await page.mouse.down()
+    await page.mouse.move(drawingEnd.x, drawingEnd.y, { steps: 8 })
+    await page.mouse.up()
+    await page.keyboard.press('Delete')
+    await expect(page.getByText('Excalidraw 自由画板 · 无连接素材')).toBeVisible()
+    await page.keyboard.press('r')
+    await page.mouse.move(drawingStart.x, drawingStart.y)
+    await page.mouse.down()
+    await page.mouse.move(drawingEnd.x, drawingEnd.y, { steps: 8 })
+    await page.mouse.up()
+    await page.keyboard.press('Control+a')
+    await page.mouse.click(drawingStart.x + 20, drawingStart.y + 20, { button: 'right' })
+    await expect(page.getByRole('button', { name: /导出所选素材/ })).toBeEnabled()
+    await page.getByRole('button', { name: '关闭并返回画布' }).click()
+    await page.waitForTimeout(900)
+    await page.reload()
+
+    const boardPreviewImage = editorNode.getByRole('img', { name: '画板中心预览' })
+    await expect(boardPreviewImage).toBeVisible()
+    await expect.poll(() => boardPreviewImage.evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBeGreaterThan(0)
+
+    const persistedBoard = await page.evaluate(async (folderPath) => {
+      const snapshot = await window.electronAPI.loadCanvasSnapshot(folderPath) as {
+        nodes?: Array<{ data?: { kind?: string; boardState?: { elements?: unknown[] }; boardPreviewPath?: string } }>
+      } | null
+      const board = snapshot?.nodes?.find((node) => node.data?.kind === 'image-editor')?.data
+      return { elementCount: board?.boardState?.elements?.length ?? 0, previewPath: board?.boardPreviewPath }
+    }, testWorkspaceDir)
+    expect(persistedBoard.elementCount).toBe(1)
+    expect(persistedBoard.previewPath).toMatch(/^\.aigc-line\/board-previews\/.+\.png$/)
+    await expect(fs.stat(path.join(testWorkspaceDir, persistedBoard.previewPath!))).resolves.toMatchObject({ size: expect.any(Number) })
+
+    await openEditorButton.click()
+    await expect(page.getByText('Excalidraw 自由画板 · 无连接素材')).toBeVisible()
+    excalidrawCanvas = page.locator('canvas.excalidraw__canvas.interactive')
+    await expect(excalidrawCanvas).toBeVisible()
+    await page.getByRole('button', { name: '关闭并返回画布' }).click()
+
+    await mainWindow.evaluate((win, request) => {
+      win.webContents.send('canvas:command', request)
+    }, {
+      requestId: `e2e-connect-${Date.now()}`,
+      projectId: currentProjectId,
+      action: 'connect-nodes',
+      payload: { connections: [{ source: sourceId!, target: editorId! }] },
+    })
+
+    await expect(openEditorButton).toBeEnabled()
+    await openEditorButton.click()
+    await expect(page.getByText(/Excalidraw 自由画板 · 已载入 1 张连接素材/)).toBeVisible()
     await expect(page.getByRole('button', { name: '保存编辑结果' })).toHaveCount(0)
 
-    const excalidrawCanvas = page.locator('canvas.excalidraw__canvas.interactive')
+    excalidrawCanvas = page.locator('canvas.excalidraw__canvas.interactive')
     await expect(excalidrawCanvas).toBeVisible()
-    const canvasBox = await excalidrawCanvas.boundingBox()
+    canvasBox = await excalidrawCanvas.boundingBox()
     expect(canvasBox).not.toBeNull()
     const center = { x: canvasBox!.width / 2, y: canvasBox!.height / 2 }
     await excalidrawCanvas.click({ position: center })
-    await excalidrawCanvas.click({ button: 'right', position: center })
+    await page.keyboard.press('Control+a')
+    await page.waitForTimeout(100)
+    await page.mouse.click(canvasBox!.x + center.x, canvasBox!.y + center.y, { button: 'right' })
     const exportButton = page.getByRole('button', { name: /导出所选素材/ })
     await expect(exportButton).toBeEnabled()
     await exportButton.click()
-    await expect(page.getByText(/已导出 1 个素材，并在外部画布创建图片节点/)).toBeVisible({ timeout: 15000 })
+    await expect(page.getByText(/已导出 \d+ 个素材，并在外部画布创建图片节点/)).toBeVisible({ timeout: 15000 })
     await page.getByRole('button', { name: '关闭并返回画布' }).click()
 
-    await expect(page.getByText(/图片编辑节点 \d+ · 导出 1/)).toBeVisible()
+    await expect(page.getByText(/画板节点 \d+ · 导出 1/)).toBeVisible()
     const exportedFiles = await fs.readdir(path.join(testWorkspaceDir, 'generated', 'image-edits'))
     expect(exportedFiles.some((file) => file.endsWith('.png'))).toBe(true)
   })

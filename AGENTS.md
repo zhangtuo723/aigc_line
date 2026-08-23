@@ -13,7 +13,7 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 
 | 路径 | 作用 |
 |---|---|
 | `electron/main/` | Electron 主进程入口与服务 |
-| `electron/main/index.ts` | 主进程入口：窗口、`local-file://` / `workspace://` 自定义协议（本地媒体预览、Range 视频流）、注册全部 IPC handler |
+| `electron/main/index.ts` | 主进程入口：窗口、`local-file://` / `workspace://` 自定义协议（本地媒体预览、Range 视频流；`.aigc-line` 默认拒绝，仅白名单只读画板预览 PNG）、注册全部 IPC handler |
 | `electron/main/ipc/` | IPC handler 层，只做参数转发 + 错误包装，业务逻辑在 services |
 | `electron/main/services/` | 主进程业务服务 |
 | `electron/main/services/agent/` | Agent 子系统：会话、流式输出、MCP 工具、系统提示词、画布桥接 |
@@ -28,7 +28,7 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 
 | `electron/main/services/google-network.service.ts` | Google API 网络层：使用 Electron 网络栈、可选独立 HTTP/HTTPS/SOCKS 代理及可读网络错误 |
 | `electron/main/services/qwen-video-analysis.service.ts` | 通用 Qwen 视频分析：接受项目内视频路径或公开 HTTP(S) URL，顺序扫描完整画面与音轨，按自由要求给出带时间证据、事实/转写/推断边界和不确定性的报告 |
 | `electron/main/services/project.store.ts` | 项目持久化：清单、追加式 JSONL 聊天事件日志、会话 id、画布快照（存项目目录下） |
-| `electron/main/services/project-media.service.ts` | 项目媒体资产：把本地图片/视频/音频复制到 `uploads/`，保存导演台构图、预演视频与图片编辑导出到 `generated/director-stills/`、`generated/director-videos/`、`generated/image-edits/`，扫描 `generated/` 与 `uploads/` 供资产面板使用 |
+| `electron/main/services/project-media.service.ts` | 项目媒体资产：把本地图片/视频/音频复制到 `uploads/`，保存导演台构图、预演视频与画板导出到 `generated/director-stills/`、`generated/director-videos/`、`generated/image-edits/`，保存画板节点缩略图到 `.aigc-line/board-previews/`，扫描 `generated/` 与 `uploads/` 供资产面板使用 |
 | `electron/main/services/settings.service.ts` | 应用设置：ComfyUI 地址、Agent API、token（safeStorage 加密） |
 | `electron/main/services/message-hub.ts` | 主进程内部事件总线（Agent 事件 → 渲染进程推送） |
 | `electron/preload/index.ts` | preload：`window.electronAPI` 的唯一出处，渲染进程只能用它访问主进程 |
@@ -40,7 +40,7 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 
 | `src/components/CanvasArea.tsx` | 画布核心：节点渲染、连线、工具栏、生成动作、canvas command 处理（agent 操作画布的入口） |
 | `src/components/canvas-capabilities.ts` | 内置节点 kind 的能力声明（在这里注册新节点类型） |
 | `src/features/director/` | 3D 导演台：白模/道具编辑、人物路径、多机位与跟拍约束、Shot 快照、构图截图与工程校验 |
-| `src/features/image-editor/` | 图片编辑台：按连线载入图片到全屏 Excalidraw，多选素材右键导出 PNG 并回写画布输出节点 |
+| `src/features/image-editor/` | 自由画板：无需输入即可打开全屏 Excalidraw，也可按连线载入图片；自动保存可序列化场景，多选内容右键导出 PNG 并回写画布输出节点 |
 | `src/components/` | 其他 UI：聊天面板、artifact 渲染、更新弹窗等 |
 | `src/pages/` | 三个页面：HomePage（项目列表）、ProjectPage（工作区）、SettingsPage |
 | `src/stores/app.store.ts` | zustand 全局状态（当前项目、artifacts 等） |
@@ -63,9 +63,9 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 
   - `environment-reference-generation`：为每个去重后的 `sceneId` 生成无人高机位斜俯视空间全景图，固定布局、出入口、行动路线、材质和主光方向；不生成普通平视图、垂直鸟瞰平面图、二维户型图或多视图拼贴，生成前必须取得用户明确确认。
   - `h3-prompt-writing`：MiniMax H3 官方提示词写作 Skill，负责 T2VA / I2VA / FL2VA / L2VA / Ref2VA 的最终提示词格式、引用标签、时间戳、对白和声音字段；`script-to-drama-video` 提供完整逐片段导演包、片段内 Shot 时间线及真实引用数组顺序，并在 Ref2VA 视频生成或重做时调用它，不自行复制或猜测官方格式。
   - `jianying-draft`：使用 pyJianYingDraft 生成剪映专业版草稿。
-- **画布**：React Flow，缩放/框选/连线/删除；快照防抖自动保存；支持 `image-editor` 图片编辑节点。旧版分镜表以及已废弃的 shot/text 节点自动迁移/清理为 image → video 链，旧文本内容会在目标 prompt 为空时转入直接相连的图片或视频。
-- **Excalidraw 图片编辑台**：严格读取连入 `image-editor` target 的、已有 `sourcePath` 的 image 节点，所有连接图片作为可选择、移动、缩放和旋转的普通 Excalidraw 图片元素同时载入全屏工作区，并可叠加画笔、图形、箭头和文字。编辑器不提供右上角整图保存；用户框选或 Shift 多选元素后右键“导出所选素材”，将所选元素合成为 PNG 并安全保存到 `generated/image-edits/`，随后在外部画布创建只读 image 节点和 `image-editor → image` 输出连线。同一会话允许重复导出多个结果；PNG 写回前必须复核项目、编辑节点和至少一个输入图片仍存在，并校验 PNG 头、IEND、真实尺寸、50MB 大小上限与 8192px 边长上限。画布快照不得写入 Excalidraw 图片 data URL。
-- **3D 导演台**：`director` 节点按需懒加载 Three.js 全屏编辑器；v2 工程支持演员白模、群众阵列，以及立方体、球体、圆柱、墙体、地面、平台、六级楼梯、楔形斜坡、圆锥和胶囊体基础搭景素材，全部可移动/旋转/缩放、显隐和锁定。人物支持姿势、多机位、导演/机位视角、FOV/Roll、16:9 / 9:16 / 4:3 / 1:1 画幅、24fps Shot 工程和站位快照。演员可在地面或基础几何模型表面点击绘制 Shot 内 XYZ 空间路径，沿三轴拖拽控制点、切换折线/平滑插值，并设置起止帧、行走/奔跑及自动朝向；底部人物轨道、播放、时间线拖动和 WebM 导出均按帧确定性采样三维人物位置与白模步态。导演视角显示当前 Shot 的最终相机运动轨迹；相机除自由关键帧外支持锁定注视演员和按演员朝向保持局部偏移的跟随模式，人物先采样、相机约束后求值。Agent 除更新完整 `directorProject` 外，可通过 `InvokeNodeAction` 的 `add-element`、`add-shot`、`set-actor-path`、`set-camera-constraint`、`set-camera-keyframe` 原子修改导演台。导演视角选中自由机位后复用 TransformControls：移动修改当前帧摄影机位置，旋转修改 target 并保留 Roll，拖动结束时一次性写入关键帧。镜头时长决定时间线终点；缩短时长会同时裁剪相机关键帧与人物路径范围。工程随画布节点持久化并通过共享严格 schema 和语义校验；旧 v1 工程不迁移，加载时直接回退为新的 v2 默认场景。拍摄或导出期间冻结编辑、强制保留地面网格并复用同一画幅裁切矩形；PNG 构图与 24fps WebM 预演分别安全保存并创建相连的只读图片/视频节点，每个异步阶段都要拒绝项目切换或源节点消失后的写回。
+- **画布**：React Flow，缩放/框选/连线/删除；快照防抖自动保存；支持 `image-editor` 自由画板节点。旧版分镜表以及已废弃的 shot/text 节点自动迁移/清理为 image → video 链，旧文本内容会在目标 prompt 为空时转入直接相连的图片或视频。
+- **Excalidraw 自由画板**：`image-editor` 无需任何输入即可打开全屏空白工作区并使用画笔、图形、箭头和文字。连入其 target 的、已有 `sourcePath` 的 image 节点会作为可选择、移动、缩放和旋转的普通图片元素载入。绘制元素、当前连接图片的变换和安全的 appState 子集保存在节点只读字段 `boardState`，编辑时 600ms 防抖写回，关闭时同步刷新；重开时按稳定元素 ID 合并当前连接素材，断开的输入会移除。关闭画板时必须截取当前可视区域中心的 16:9 PNG 到 `.aigc-line/board-previews/<nodeId>.png`，写入 `boardPreviewPath/boardPreviewUpdatedAt`，节点卡片优先显示该截图；尚无截图时才以最多九格网格显示输入素材，超出部分显示剩余数量。图片必须通过画布连线进入，Excalidraw 自带的本地图片插入工具禁用，画布快照严禁写入图片 data URL。画板 portal 必须带 `data-canvas-node-editor-dialog` 与 `data-image-editor-dialog`；通用编辑器标记存在期间 `handleNodesChange` 必须过滤 React Flow 的 remove change，使 Delete/Backspace 只删除 Excalidraw 选中元素，不能删除底层画布节点。画板不提供右上角整图保存；用户框选或 Shift 多选元素后右键“导出所选素材”，将所选内容合成为 PNG 并安全保存到 `generated/image-edits/`，随后在外部画布创建只读 image 节点和 `image-editor → image` 输出连线。同一会话允许重复导出多个结果；PNG 写回前必须复核项目和画板节点，若导出基于连接图片还须复核该输入节点，并校验 PNG 头、IEND、真实尺寸、50MB 大小上限与 8192px 边长上限。
+- **3D 导演台**：`director` 节点按需懒加载 Three.js 全屏编辑器；v2 工程支持演员白模、群众阵列，以及立方体、球体、圆柱、墙体、地面、平台、六级楼梯、楔形斜坡、圆锥和胶囊体基础搭景素材，全部可移动/旋转/缩放、显隐和锁定。人物支持姿势、多机位、导演/机位视角、FOV/Roll、16:9 / 9:16 / 4:3 / 1:1 画幅、24fps Shot 工程和站位快照。演员可在地面或基础几何模型表面点击绘制 Shot 内 XYZ 空间路径，沿三轴拖拽控制点、切换折线/平滑插值，并设置起止帧、行走/奔跑及自动朝向；底部人物轨道、播放、时间线拖动和 WebM 导出均按帧确定性采样三维人物位置与白模步态。导演视角显示当前 Shot 的最终相机运动轨迹；相机除自由关键帧外支持锁定注视演员和按演员朝向保持局部偏移的跟随模式，人物先采样、相机约束后求值。Agent 除更新完整 `directorProject` 外，可通过 `InvokeNodeAction` 的 `add-element`、`add-shot`、`set-actor-path`、`set-camera-constraint`、`set-camera-keyframe` 原子修改导演台。导演视角选中自由机位后复用 TransformControls：移动修改当前帧摄影机位置，旋转修改 target 并保留 Roll，拖动结束时一次性写入关键帧。镜头时长决定时间线终点；缩短时长会同时裁剪相机关键帧与人物路径范围。工程随画布节点持久化并通过共享严格 schema 和语义校验；旧 v1 工程不迁移，加载时直接回退为新的 v2 默认场景。导演台 portal 必须带 `data-canvas-node-editor-dialog` 与 `data-director-stage-dialog`，打开期间 Delete/Backspace 不得删除底层导演台节点。拍摄或导出期间冻结编辑、强制保留地面网格并复用同一画幅裁切矩形；PNG 构图与 24fps WebM 预演分别安全保存并创建相连的只读图片/视频节点，每个异步阶段都要拒绝项目切换或源节点消失后的写回。
 - **节点显示尺寸**：`image` / `video` 节点使用 620px 宽媒体卡，预览区按所选画幅自动计算高度，prompt 输入框最小高度为 140px；图片/视频工作流选择器使用加宽触发框和下拉菜单以完整展示模型名称与类型标签；全模态参考轨保留图片/视频/音频数量显示和上限校验，但不再额外显示引用标签说明框。
 - **3D 导演台默认工程**：新建 director 工程的元素清单为空，不预置演员、群众或几何道具；仍保留一个默认 Shot/机位，供时间线、机位视角、截图和导出使用。损坏或不支持版本回退时也生成同样的空元素工程。
 - **3D 导演台素材工具栏**：演员、群众和全部基础几何的添加入口不占用左侧栏；导演视角下统一放在视口底部、时间线上方的横向悬浮工具栏，按“人物 / 常用几何 / 建筑与路径表面”分隔。工具栏允许横向滚动以适配窄视口，拍摄/导出冻结期间禁用；机位视角隐藏，避免与机位移动提示重叠。左侧栏只保留连线参考图、Agent 搭景要求和场景清单。
@@ -78,7 +78,7 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 
 - **画布写入语义**：Canvas MCP 写工具按节点 ID/字段直接应用，采用最后写入者生效（Last Write Wins），不接收或校验全局画布版本号；仍校验节点存在性、ID 唯一性、字段能力和连线合法性。
 - **节点类型**（`CanvasNodeKind`）：
   - `image` 图片：ComfyUI 的 Krea 2 Turbo、Z-Image Turbo 当前仅文生图；Nano Banana 2 / Pro 支持最多 14 张有序参考图，Doubao-Seedream-5.0-pro / lite 支持最多 10 张有序参考图；画幅支持 16:9 / 9:16 / 1:1 / 4:3，全部模型使用 2K 输出，ComfyUI 图片工作流直接保存 VAE 解码结果且不经过 RTX 放大
-  - `image-editor` 图片编辑：把所有连入的有效图片作为普通元素载入 Excalidraw；多选右键导出后创建相连的只读 image 输出节点，编辑节点自身不保存合成图或 base64 图片数据
+  - `image-editor` 画板：可直接打开空白 Excalidraw，也可把所有连入的有效图片作为普通元素载入；`boardState` 自动保存矢量场景和连接图片变换但不保存图片 data URL；多选右键导出后创建相连的只读 image 输出节点
   - `video` 视频：MiniMax H3 文生视频 / 首尾帧 / 全模态参考（图片 9 + 视频 3 + 音频 3，提示词用 `<Picture n>` 等引用），全模态参考可选择标准 20 步或带 Turbo 8 步 LoRA 的加速工作流；也支持火山方舟 Agent Plan Doubao Seedance 2.0 文生视频与全模态参考，提示词用“图片 n / 视频 n / 音频 n”引用素材，默认 720p 并生成同步音频
   - `audio` 音频：导入本地音频并预览
   - `upscale` 视频放大：RTX Video Super Resolution，连入视频节点作为输入（多输入可点选，`inputNodeId`），倍数 2x/3x/4x，质量 FAST/MEDIUM/HIGH/ULTRA，帧率经 VHS_VideoInfo 自动跟随源视频

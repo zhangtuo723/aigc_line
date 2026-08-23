@@ -197,7 +197,7 @@ const DEFAULT_VIEWPORT: Viewport = { x: 80, y: 70, zoom: 0.86 }
 const PROJECT_ASSET_DRAG_TYPE = 'application/x-aigc-project-media'
 const KIND_LABELS: Record<StoryNodeKind, string> = {
   image: '图片',
-  'image-editor': '图片编辑',
+  'image-editor': '画板',
   video: '视频',
   audio: '音频',
   upscale: '视频放大',
@@ -1131,6 +1131,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
   const [audioImporting, setAudioImporting] = useState(false)
   const [directorOpen, setDirectorOpen] = useState(false)
   const [imageEditorOpen, setImageEditorOpen] = useState(false)
+  const [boardPreviewFailed, setBoardPreviewFailed] = useState(false)
   const isUpscale = data.kind === 'upscale'
   const isDirector = data.kind === 'director'
   const isImageEditor = data.kind === 'image-editor'
@@ -1166,17 +1167,28 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
     title: node.data.title,
     url: node.data.preview ?? workspacePreview(currentProject.id, node.data.sourcePath!),
   })) : [], [currentProject, imageEditorInputs])
+  const imageEditorPreviewSources = imageEditorSources.slice(0, 9)
+  const imageEditorPreviewColumns = imageEditorPreviewSources.length <= 3
+    ? Math.max(1, imageEditorPreviewSources.length)
+    : imageEditorPreviewSources.length === 4 ? 2 : 3
+  const imageEditorPreviewRows = Math.ceil(imageEditorPreviewSources.length / imageEditorPreviewColumns)
+  const boardPreview = currentProject && data.boardPreviewPath
+    ? `${workspacePreview(currentProject.id, data.boardPreviewPath)}?v=${data.boardPreviewUpdatedAt ?? 0}`
+    : undefined
+  useEffect(() => setBoardPreviewFailed(false), [boardPreview])
 
   const exportImageEditorSelection = async ({ pngData, width, height }: { pngData: ArrayBuffer; width: number; height: number }) => {
-    if (!currentProject || !selectedImageEditorInput) throw new Error('没有可用的输入图片')
+    if (!currentProject) throw new Error('当前项目不可用')
     const projectId = currentProject.id
-    const inputNodeId = selectedImageEditorInput.id
+    const inputNodeId = selectedImageEditorInput?.id
     const assertContext = () => {
       if (useAppStore.getState().currentProject?.id !== projectId) throw new Error('项目已切换，已取消写回图片编辑结果')
       const editorNode = getNodes().find((node) => node.id === id && node.data.kind === 'image-editor')
-      if (!editorNode) throw new Error('图片编辑节点已不存在，已取消写回')
-      const input = getNodes().find((node) => node.id === inputNodeId && node.data.kind === 'image')
-      if (!input) throw new Error('输入图片节点已不存在，已取消写回')
+      if (!editorNode) throw new Error('画板节点已不存在，已取消写回')
+      if (inputNodeId) {
+        const input = getNodes().find((node) => node.id === inputNodeId && node.data.kind === 'image')
+        if (!input) throw new Error('输入图片节点已不存在，已取消写回')
+      }
     }
     assertContext()
     const result = await window.electronAPI.saveImageEdit({ projectId, nodeId: id, inputNodeId, pngData, width, height })
@@ -1188,7 +1200,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
     const aspectRatio: StoryNodeData['aspectRatio'] = ratio > 1.55 ? '16:9' : ratio > 1.15 ? '4:3' : ratio < 0.72 ? '9:16' : '1:1'
     const liveNodes = getNodes()
     const editorNode = liveNodes.find((node) => node.id === id)
-    if (!editorNode) throw new Error('图片编辑节点已不存在，已取消创建输出节点')
+    if (!editorNode) throw new Error('画板节点已不存在，已取消创建输出节点')
     const outputCount = canvasEdges.filter((edge) => edge.source === id).length
     const imageNode = makeNode('image', liveNodes.length + 1, {
       x: editorNode.position.x + 600 + outputCount * 680,
@@ -1205,6 +1217,30 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
     }
     setNodes((nodes) => [...nodes, imageNode])
     setEdges((edges) => [...edges, makeLinkedEdge(`edge-${id}-${imageNode.id}`, id, imageNode.id)])
+  }
+
+  const updateBoardState = (boardState: NonNullable<StoryNodeData['boardState']>) => {
+    setNodes((nodes) => nodes.map((node) => node.id === id && node.data.kind === 'image-editor'
+      ? { ...node, data: { ...node.data, boardState } }
+      : node))
+  }
+
+  const saveBoardPreview = async ({ pngData, width, height }: { pngData: ArrayBuffer; width: number; height: number }) => {
+    if (!currentProject) throw new Error('当前项目不可用')
+    const projectId = currentProject.id
+    const assertContext = () => {
+      if (useAppStore.getState().currentProject?.id !== projectId) throw new Error('项目已切换，已取消保存画板预览')
+      if (!getNodes().some((node) => node.id === id && node.data.kind === 'image-editor')) {
+        throw new Error('画板节点已不存在，已取消保存预览')
+      }
+    }
+    assertContext()
+    const result = await window.electronAPI.saveBoardPreview({ projectId, nodeId: id, pngData, width, height })
+    if (!result.success || !result.relativePath) throw new Error(result.error || '画板预览保存失败')
+    assertContext()
+    setNodes((nodes) => nodes.map((node) => node.id === id && node.data.kind === 'image-editor'
+      ? { ...node, data: { ...node.data, boardPreviewPath: result.relativePath, boardPreviewUpdatedAt: Date.now() } }
+      : node))
   }
 
   const updateDirectorProject = (directorProject: DirectorProject) => {
@@ -1416,20 +1452,46 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
         {isImageEditor ? (
           <div className="nodrag nowheel overflow-hidden rounded-[11px] bg-[#121318]" onPointerDown={(event) => event.stopPropagation()}>
             <div className="relative aspect-video overflow-hidden bg-[radial-gradient(circle_at_50%_35%,#273148_0%,#11141c_50%,#090a0e_100%)]">
-              {selectedImageEditorInput?.data.preview ? (
-                <img src={selectedImageEditorInput.data.preview} alt="图片编辑输入预览" className="h-full w-full object-contain" draggable={false} />
+              {boardPreview && !boardPreviewFailed ? (
+                <div className="relative h-full w-full bg-[#0d0f14]">
+                  <img src={boardPreview} alt="画板中心预览" className="h-full w-full object-cover" draggable={false} onError={() => setBoardPreviewFailed(true)} />
+                  <span className="absolute bottom-3 left-3 rounded-md border border-white/10 bg-black/55 px-2 py-1 text-[9px] text-white/65">画板中心预览</span>
+                </div>
+              ) : imageEditorPreviewSources.length > 0 ? (
+                <div
+                  className="grid h-full w-full gap-0.5 bg-black/45"
+                  style={{
+                    gridTemplateColumns: `repeat(${imageEditorPreviewColumns}, minmax(0, 1fr))`,
+                    gridTemplateRows: `repeat(${imageEditorPreviewRows}, minmax(0, 1fr))`,
+                  }}
+                >
+                  {imageEditorPreviewSources.map((source, index) => {
+                    const hiddenCount = imageEditorSources.length - imageEditorPreviewSources.length
+                    const showOverflow = hiddenCount > 0 && index === imageEditorPreviewSources.length - 1
+                    return (
+                      <div key={source.nodeId} className="relative min-h-0 overflow-hidden bg-[#0d0f14]" title={source.title}>
+                        <img src={source.url} alt={source.title} className="h-full w-full object-cover" draggable={false} />
+                        {showOverflow && (
+                          <div className="absolute inset-0 flex items-center justify-center bg-black/65 text-lg font-semibold text-white/85 backdrop-blur-[1px]">
+                            +{hiddenCount}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
               ) : (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-white/30">
                   <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-[#d4af37]/25 bg-[#d4af37]/10 text-2xl text-[#e8c766]">✎</div>
-                  <div className="text-center"><p className="text-xs text-white/55">请连接一个或多个已有输出的图片节点</p><p className="mt-1 text-[10px]">连接图片会作为普通素材进入 Excalidraw</p></div>
+                  <div className="text-center"><p className="text-xs text-white/55">从空白画板开始创作</p><p className="mt-1 text-[10px]">也可连接图片，将其作为可编辑素材载入</p></div>
                 </div>
               )}
               {imageEditorInputs.length > 0 && <span className="absolute bottom-3 left-3 rounded-md border border-white/10 bg-black/55 px-2 py-1 text-[9px] text-white/65">已连接 {imageEditorInputs.length} 张图片</span>}
             </div>
             <div className="space-y-2 border-t border-white/8 px-4 py-3">
               <div className="flex items-center gap-2">
-                <div className="min-w-0 flex-1"><p className="text-[11px] text-white/65">Excalidraw 素材编辑台</p><p className="mt-0.5 truncate text-[9px] text-white/30">{imageEditorInputs.length > 0 ? `${imageEditorInputs.length} 张输入 · 多选后右键导出` : '等待图片输入'}</p></div>
-                <button disabled={!selectedImageEditorInput} onClick={() => setImageEditorOpen(true)} className="rounded-lg border border-[#d4af37]/30 bg-[#d4af37]/10 px-4 py-2 text-[10px] font-medium text-[#f0d98c] hover:bg-[#d4af37]/15 disabled:opacity-35">打开图片编辑器</button>
+                <div className="min-w-0 flex-1"><p className="text-[11px] text-white/65">Excalidraw 自由画板</p><p className="mt-0.5 truncate text-[9px] text-white/30">{imageEditorInputs.length > 0 ? `${imageEditorInputs.length} 张连接素材 · 多选后右键导出` : '无需输入 · 可直接绘制并导出'}</p></div>
+                <button onClick={() => setImageEditorOpen(true)} className="rounded-lg border border-[#d4af37]/30 bg-[#d4af37]/10 px-4 py-2 text-[10px] font-medium text-[#f0d98c] hover:bg-[#d4af37]/15">打开画板</button>
               </div>
             </div>
           </div>
@@ -1532,12 +1594,15 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
           />
         </Suspense>
       )}
-      {imageEditorOpen && isImageEditor && imageEditorSources.length > 0 && currentProject && (
-        <Suspense fallback={<div className="fixed inset-0 z-[220] flex items-center justify-center bg-[#090a0e] text-sm text-[#e8c766]">正在加载图片编辑器…</div>}>
+      {imageEditorOpen && isImageEditor && currentProject && (
+        <Suspense fallback={<div className="fixed inset-0 z-[220] flex items-center justify-center bg-[#090a0e] text-sm text-[#e8c766]">正在加载画板…</div>}>
           <ImageEditorDialog
             key={imageEditorSources.map((source) => source.nodeId).join('|')}
             title={data.title}
             sources={imageEditorSources}
+            boardState={data.boardState}
+            onChange={updateBoardState}
+            onPreview={saveBoardPreview}
             onExport={exportImageEditorSelection}
             onClose={() => setImageEditorOpen(false)}
           />
@@ -2376,11 +2441,18 @@ function CanvasFlow() {
   }, [artifacts, dismissedArtifacts, nodes, setEdges, setNodes])
 
   const handleNodesChange = useCallback((changes: NodeChange<StoryNode>[]) => {
+    // React Flow listens for Delete/Backspace globally. Full-screen node editors
+    // are rendered in portals, so their keyboard events can still produce
+    // node-removal changes. Keep non-removal changes, but never remove underlying
+    // canvas nodes while any node editor is mounted.
+    const safeChanges = document.querySelector('[data-canvas-node-editor-dialog]')
+      ? changes.filter((change) => change.type !== 'remove')
+      : changes
     const removedIds = new Set(
-      changes.filter((change) => change.type === 'remove').map((change) => change.id),
+      safeChanges.filter((change) => change.type === 'remove').map((change) => change.id),
     )
     if (removedIds.size === 0) {
-      onNodesChange(changes)
+      if (safeChanges.length > 0) onNodesChange(safeChanges)
       return
     }
 
@@ -2402,7 +2474,7 @@ function CanvasFlow() {
       })
     }
 
-    onNodesChange(changes)
+    onNodesChange(safeChanges)
     setEdges((current) => current.filter((edge) => !removedIds.has(edge.source) && !removedIds.has(edge.target)))
   }, [artifacts, nodes, onNodesChange, setEdges])
 

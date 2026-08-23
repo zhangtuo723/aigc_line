@@ -166,8 +166,10 @@ function registerWorkspaceProtocol() {
         return new Response('Unknown project', { status: 404 })
       }
       const rel = decodeURIComponent(url.pathname).replace(/^\/+/, '')
-      // Never expose app-internal state (chat history, sessions, ...)
-      if (rel === '.aigc-line' || rel.startsWith('.aigc-line/')) {
+      // Never expose app-internal state (chat history, sessions, ...). The only
+      // exception is a flat PNG thumbnail directory containing board previews.
+      const isBoardPreview = /^\.aigc-line\/board-previews\/[^/]+\.png$/i.test(rel)
+      if ((rel === '.aigc-line' || rel.startsWith('.aigc-line/')) && !isBoardPreview) {
         return new Response('Forbidden', { status: 403 })
       }
       const root = path.resolve(project.folderPath)

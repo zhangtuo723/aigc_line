@@ -2,10 +2,10 @@ import { ipcMain } from 'electron';
 import { IPC_CHANNELS } from '../../../src/shared/ipc.channels';
 import * as projectStore from '../services/project.store';
 import log from 'electron-log/main';
-import type { CanvasCommandResponse, SaveImageEditRequest, SaveImageEditResult } from '../../../src/shared/ipc.types';
+import type { CanvasCommandResponse, SaveBoardPreviewRequest, SaveBoardPreviewResult, SaveImageEditRequest, SaveImageEditResult } from '../../../src/shared/ipc.types';
 import type { SaveDirectorStillRequest, SaveDirectorStillResult, SaveDirectorVideoRequest, SaveDirectorVideoResult } from '../../../src/shared/director.types';
 import { resolveCanvasCommand } from '../services/agent/canvas-bridge';
-import { saveDirectorStill, saveDirectorVideo, saveImageEdit } from '../services/project-media.service';
+import { saveBoardPreview, saveDirectorStill, saveDirectorVideo, saveImageEdit } from '../services/project-media.service';
 
 export function registerCanvasHandlers(): void {
   ipcMain.on(
@@ -76,6 +76,26 @@ export function registerCanvasHandlers(): void {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         log.error('[Canvas] image edit save failed:', message);
+        return { success: false, error: message };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.canvas.saveBoardPreview,
+    async (_event, request: SaveBoardPreviewRequest): Promise<SaveBoardPreviewResult> => {
+      try {
+        const relativePath = await saveBoardPreview(
+          request.projectId,
+          request.nodeId,
+          request.pngData,
+          request.width,
+          request.height,
+        );
+        return { success: true, relativePath };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log.error('[Canvas] board preview save failed:', message);
         return { success: false, error: message };
       }
     },
