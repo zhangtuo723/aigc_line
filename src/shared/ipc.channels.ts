@@ -22,6 +22,7 @@ export const IPC_CHANNELS = {
     load: 'canvas:load',
     saveDirectorStill: 'canvas:saveDirectorStill',
     saveDirectorVideo: 'canvas:saveDirectorVideo',
+    saveImageEdit: 'canvas:saveImageEdit',
     commandResult: 'canvas:commandResult',
   },
   artifact: {

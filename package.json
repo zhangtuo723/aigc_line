@@ -19,6 +19,7 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.214",
     "@anthropic-ai/sdk": "^0.112.3",
+    "@excalidraw/excalidraw": "^0.18.1",
     "@react-three/drei": "^10.7.8",
     "@react-three/fiber": "^9.7.0",
     "@xyflow/react": "^12.11.2",

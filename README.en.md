@@ -25,6 +25,7 @@ Organize shots, reference images, generated videos, and upscaled outputs on one 
 - **Node-referenced chat**: select a canvas node and click **Add to chat** to attach it to the next message, letting the Agent update that exact node by ID.
 - **React Flow infinite canvas** with zoom, pan, marquee/multi-selection, drag, delete, Bézier connections, and per-project snapshots.
 - **Text, image, video, audio, and video-upscale nodes**. A generated segment lives directly on its video node, while internal shots and timing live in the video prompt. Audio nodes can import and preview local files.
+- **3D Director Stage** for editable blocking scenes, procedural actors, XYZ movement paths, camera keyframes and actor-follow constraints, Agent-assisted image-to-geometry drafting, 24fps timelines, still capture, and WebM previs. See the dedicated section below.
 - **Node-native production pipeline**: the Agent directly creates reference-image → video chains, with canvas nodes as the single source of truth.
 - **Multi-model image generation** with ComfyUI, Google Nano Banana 2 / Pro, and Volcengine Ark Doubao-Seedream-5.0-pro / lite. Cloud models support 2K text-to-image and single-reference image-to-image at 16:9 / 1:1 / 4:3.
 - **MiniMax H3 text / first-last-frame video**. Connected images become candidates and can be dragged into explicit first-frame and last-frame slots; either slot is optional.
@@ -33,6 +34,83 @@ Organize shots, reference images, generated videos, and upscaled outputs on one 
 - **In-canvas media preview**, including Range-based streaming for generated videos.
 - **Application settings** for ComfyUI, Agent, Google AI, Volcengine Ark Seedream, Qwen3.5-Omni Plus, and the default image model. Google/Qwen secrets use Electron safe storage; the Seedream key is stored as local plaintext by design.
 - **Project persistence** for chat history, canvas layout, node parameters, and generated assets.
+
+## 3D Director Stage
+
+The 3D Director Stage is a low-cost blocking workspace for validating scale, actor positions, spatial movement, camera placement, and framing before committing to image or video generation. Its serializable project lives directly on a `director` canvas node.
+
+![A complete blocking scene in the 3D Director Stage](docs/screenshots/director-stage-building.png)
+
+![Crowd blocking and the bottom asset toolbar](docs/screenshots/director-stage-crowd-toolbar.png)
+
+This view demonstrates multi-actor blocking, crowd arrays, varied character actions, a rigged character, primitive scenery, a camera guide, and the asset toolbar placed at the bottom of the viewport.
+
+### Project and blocking library
+
+A new project starts with an empty element list and one usable 24fps Shot/camera. The stage supports director and camera views plus 16:9, 9:16, 4:3, and 1:1 framing. The same crop is used for preview, PNG stills, and WebM previs.
+
+| Element | Purpose |
+|---|---|
+| Actor / crowd | Replaceable articulated mannequins, body presets, poses, paths, and lightweight crowd arrays |
+| Box / sphere / cylinder / wall | General architecture, furniture, columns, and proxy volumes |
+| Floor / platform | Walkable ground, stages, plinths, and raised areas |
+| Stairs | A procedural six-step staircase with individually hittable treads |
+| Ramp | A true wedge mesh for slopes, roofs, and inclined surfaces |
+| Cone / capsule | Markers, sculptures, props, and special proxy volumes |
+
+Every element supports position, rotation, scale, color, visibility, locking, and deletion. Primitive transforms use a bottom anchor: `scale.y` is full height and `position.y` is bottom elevation. Agent-authored `ground` elements are forced to `Y=0`, while truly raised `elevated` structures keep their height.
+
+Actor, crowd, and primitive creation lives in a horizontal floating toolbar at the bottom of Director view, immediately above the timeline. The toolbar groups people, common primitives, and architectural/path surfaces, scrolls horizontally on narrow viewports, and is hidden in Camera view. The left sidebar is reserved for connected references, Agent drafting instructions, and the scene list.
+
+Viewport objects require a double-click to activate; a single click cannot steal selection. TransformControls only appear for an active object and use `V / R / Z` for translate, rotate, and scale. The active element stays locked during a gizmo drag so overlapping geometry cannot be selected accidentally.
+
+### Actor models, body types, actions, and XYZ paths
+
+Actors use a stable model registry rather than embedding rendering details in Shot data. The default `director-rig-v1` loads a real SkinnedMesh UE mannequin, clones its skeleton and materials per instance, and applies body shape and action offsets directly to named bones. The reduced-detail `lightweight-v1` remains available for distant actors, crowds, and load failures. A same-skeleton GLB can replace a registry entry without changing paths, Shots, or persisted actor identity.
+
+Five non-uniform body presets are available: standard, heavy, slim, short, and tall. They independently change head ratio, shoulder and hip width, torso width/depth, limb length, and limb thickness; editable height is not used as a substitute for body shape. Actions now include stand, walk, sit, arms crossed, point, one-knee kneel, hands on hips, wave, hands up, crouch, lean, and look back. During the active portion of a spatial path, deterministic walk/run gait temporarily overrides the selected static action and restores it when movement ends. Front-facing glasses, mouth, and shoe tips keep orientation readable.
+
+The rigged asset is William Luque's [UE Mannequin (Retopology)](https://sketchfab.com/3d-models/ue-mannequin-retopology-5394d9f894374a2ab7c57a21929ce4c2), with implementation patterns adapted from the MIT-licensed [storyai-3d-director-desk](https://github.com/jiguang132/storyai-3d-director-desk). The model itself has a separate Sketchfab Standard License; its source notice and license file are preserved under `public/models/` and must accompany redistributed builds.
+
+![XYZ actor paths and the extended blocking library](docs/screenshots/director-stage-spatial-path.png)
+
+Each actor can own one path per Shot:
+
+- Ground clicks create `Y=0` points.
+- Clicking stairs, ramps, platforms, or other non-actor surfaces records the exact R3F XYZ world intersection.
+- Control points can be dragged on all three axes or edited numerically.
+- Paths support linear or Catmull-Rom interpolation, start/end frames, walk/run motion, and automatic path-facing.
+- Playback, timeline scrubbing, camera following, and WebM export sample the path deterministically at constant 3D arc-length speed.
+
+These are authored spatial paths, not NavMesh pathfinding. The stage does not yet auto-route around obstacles or provide stair IK, collision solving, foot locking, or animation blending.
+
+### Shots, cameras, and timeline
+
+- Every Shot stores duration, aspect ratio, camera, FOV, Roll, camera keys, actor paths, and an element-position snapshot.
+- Camera interpolation supports `hold`, `linear`, `smooth`, `ease-in`, and `ease-out`.
+- Cameras can be free, locked to look at an actor, or follow an actor with a local-space offset.
+- Evaluation order is deterministic: actor transform → free camera curve → look-at/follow constraint.
+- Director view displays the final constrained camera trajectory.
+- Camera view supports `W/S`, `A/D`, `Space`, `Ctrl`, and left-mouse look.
+- Shortening a Shot trims out-of-range camera keys and actor path ranges.
+
+### Agent-assisted scene drafting
+
+![Director nodes, composition references, and generated image nodes on the canvas](docs/screenshots/director-canvas-agent-reference.png)
+
+Only image nodes connected into the director node and carrying a `sourcePath` appear in the reference panel. The current multimodal conversation Agent reads the selected image directly—no separate vision model—and applies a strict `apply-scene-draft` containing up to 40 editable `box / wall / cylinder / sphere / floor / platform / stairs / ramp / cone / capsule` elements.
+
+Rebuilding from the same image replaces only unlocked geometry created from that reference, preserving actors, manual elements, geometry from other images, and all cameras. The Agent can also use atomic `add-element`, `add-shot`, `set-actor-path`, `set-camera-constraint`, and `set-camera-keyframe` actions.
+
+### Autosave and outputs
+
+- Changes are debounced for 600ms, written back to the director node, and then persisted by the canvas snapshot system.
+- The header reports pending, saving, saved, and error states. Close, explicit save, and Agent submission flush the latest draft synchronously.
+- Still capture writes PNG files under `generated/director-stills/` and creates connected read-only image nodes.
+- 24fps previs export writes WebM files under `generated/director-videos/` and creates connected read-only video nodes.
+- Editing is frozen during capture/export, and asynchronous completion verifies both project and source-node identity before writing back.
+- The strict v2 format does not migrate legacy v1 director scenes; unsupported or damaged input falls back to a new empty v2 project.
+
 
 ## Creation Flow
 

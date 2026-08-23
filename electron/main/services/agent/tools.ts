@@ -92,11 +92,11 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
       ),
       tool(
         'CreateCanvasNodes',
-        'Create one or more live canvas nodes. Use image nodes for still references or keyframes, video nodes for generated clips, audio nodes for imported sound, and upscale nodes for video enlargement. Normally connect an image node directly to its video node. Store all generation requirements in the image/video prompt fields. Only fields registered for the node kind are applied; call GetCanvasCapabilities to discover them. Canvas writes use last-write-wins and do not accept a revision precondition.',
+        'Create one or more live canvas nodes. Use image nodes for still references or keyframes, image-editor nodes for an Excalidraw workspace fed by connected image nodes, video nodes for generated clips, audio nodes for imported sound, and upscale nodes for video enlargement. Normally connect an image node directly to its video or image-editor node. Store all generation requirements in the image/video prompt fields. Only fields registered for the node kind are applied; call GetCanvasCapabilities to discover them. Canvas writes use last-write-wins and do not accept a revision precondition.',
         {
           nodes: z.array(z.object({
             id: z.string().optional(),
-            kind: z.enum(['image', 'video', 'audio', 'upscale', 'director']),
+            kind: z.enum(['image', 'image-editor', 'video', 'audio', 'upscale', 'director']),
             position: positionSchema.optional(),
             ...nodeFields,
           })).min(1),

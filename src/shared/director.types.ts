@@ -1,7 +1,35 @@
 export type DirectorAspectRatio = '16:9' | '9:16' | '4:3' | '1:1'
-export type DirectorElementKind = 'actor' | 'box' | 'sphere' | 'cylinder' | 'wall' | 'crowd'
-export type DirectorPoseId = 'stand' | 'walk' | 'sit' | 'arms-crossed' | 'point' | 'kneel'
+export type DirectorElementKind =
+  | 'actor'
+  | 'crowd'
+  | 'box'
+  | 'sphere'
+  | 'cylinder'
+  | 'wall'
+  | 'floor'
+  | 'platform'
+  | 'stairs'
+  | 'ramp'
+  | 'cone'
+  | 'capsule'
+export type DirectorPoseId =
+  | 'stand'
+  | 'walk'
+  | 'sit'
+  | 'arms-crossed'
+  | 'point'
+  | 'kneel'
+  | 'hands-on-hips'
+  | 'wave'
+  | 'hands-up'
+  | 'crouch'
+  | 'lean'
+  | 'look-back'
+export type DirectorActorModelId = 'director-rig-v1' | 'lightweight-v1'
+export type DirectorBodyType = 'standard' | 'heavy' | 'slim' | 'short' | 'tall'
 export type DirectorTransformMode = 'translate' | 'rotate' | 'scale'
+export type DirectorActorMotion = 'walk' | 'run'
+export type DirectorCameraConstraintMode = 'free' | 'look-at' | 'follow'
 export type DirectorCameraMove =
   | 'static'
   | 'push'
@@ -35,6 +63,8 @@ export interface DirectorElement {
   visible: boolean
   locked: boolean
   poseId?: DirectorPoseId
+  actorModelId?: DirectorActorModelId
+  bodyType?: DirectorBodyType
   heightM?: number
   rows?: number
   columns?: number
@@ -58,6 +88,26 @@ export interface DirectorCameraKeyframe {
   locked?: boolean
 }
 
+export interface DirectorActorTrack {
+  id: string
+  elementId: string
+  startFrame: number
+  endFrame: number
+  points: DirectorVec3[]
+  interpolation: 'linear' | 'smooth'
+  orientToPath: boolean
+  motion: DirectorActorMotion
+}
+
+export interface DirectorCameraConstraint {
+  mode: DirectorCameraConstraintMode
+  targetElementId?: string
+  /** World-space offset added to the actor root when aiming the camera. */
+  targetOffset: DirectorVec3
+  /** Actor-local offset used by follow mode. Positive Z is the actor's front. */
+  followOffset: DirectorVec3
+}
+
 export interface DirectorShot {
   id: string
   name: string
@@ -69,6 +119,8 @@ export interface DirectorShot {
   rollDeg: number
   cameraMove: DirectorCameraMove
   cameraKeyframes: DirectorCameraKeyframe[]
+  actorTracks: DirectorActorTrack[]
+  cameraConstraint: DirectorCameraConstraint
   elementStates: Record<string, DirectorElementState>
   locked: boolean
   notes?: string
@@ -77,7 +129,7 @@ export interface DirectorShot {
 
 /** Serializable 3D previs document persisted inside a canvas node snapshot. */
 export interface DirectorProject {
-  version: 1
+  version: 2
   fps: 24
   name: string
   backgroundColor: string
@@ -88,6 +140,24 @@ export interface DirectorProject {
   shots: DirectorShot[]
   activeShotId: string
   updatedAt: number
+}
+
+export type DirectorSceneDraftPrimitiveKind = Exclude<DirectorElementKind, 'actor' | 'crowd'>
+export type DirectorSceneDraftPlacement = 'ground' | 'elevated'
+
+export interface DirectorSceneDraftPrimitive {
+  kind: DirectorSceneDraftPrimitiveKind
+  name: string
+  color: string
+  placement: DirectorSceneDraftPlacement
+  transform: DirectorTransform
+}
+
+export interface DirectorSceneDraft {
+  summary: string
+  groundColor?: string
+  backgroundColor?: string
+  elements: DirectorSceneDraftPrimitive[]
 }
 
 export interface SaveDirectorStillRequest {

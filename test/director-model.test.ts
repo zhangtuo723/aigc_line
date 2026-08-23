@@ -3,32 +3,45 @@ import {
   activateDirectorShot,
   addDirectorElement,
   applyShotElementStates,
+  applyDirectorSceneDraft,
   createDefaultDirectorProject,
   createDirectorElement,
   createDirectorShot,
   directorCropRect,
+  directorActorPathPoints,
   directorMaxFrame,
   normalizeDirectorProject,
   patchDirectorShot,
   removeDirectorElement,
   removeDirectorCameraKeyframe,
+  sampleDirectorActorPosition,
+  sampleDirectorActorTransform,
+  sampleDirectorConstrainedCamera,
   sampleDirectorCamera,
+  upsertDirectorActorTrack,
   snapshotElements,
   updateDirectorElement,
   upsertDirectorCameraKeyframe,
   validateDirectorProject,
 } from '../src/features/director/director-model'
 import { directorProjectSchema } from '../src/shared/director-schema'
+import { directorBodyProfile } from '../src/features/director/actor-model'
+
+const createProjectWithActor = () => addDirectorElement(
+  createDefaultDirectorProject(),
+  createDirectorElement('actor', 0),
+)
 
 describe('director project model', () => {
   it('creates a serializable 24fps project with stable element and shot ids', () => {
     const project = createDefaultDirectorProject('测试导演台')
 
+    expect(project.version).toBe(2)
     expect(project.fps).toBe(24)
-    expect(project.elements).toHaveLength(2)
+    expect(project.elements).toHaveLength(0)
     expect(project.shots).toHaveLength(1)
     expect(project.activeShotId).toBe(project.shots[0].id)
-    expect(new Set(project.elements.map((element) => element.id)).size).toBe(2)
+    expect(project.shots[0].elementStates).toEqual({})
     expect(() => JSON.stringify(project)).not.toThrow()
     expect(validateDirectorProject(project)).toEqual([])
   })
@@ -58,15 +71,18 @@ describe('director project model', () => {
     expect(validateDirectorProject(project)).toHaveLength(2)
   })
 
-  it('rejects malformed agent documents and safely normalizes damaged snapshots', () => {
+  it('rejects malformed or legacy documents and starts a fresh v2 scene', () => {
     expect(directorProjectSchema.safeParse({}).success).toBe(false)
-    const normalized = normalizeDirectorProject({}, '修复后的导演台')
-    expect(normalized.name).toBe('修复后的导演台')
+    const current = createDefaultDirectorProject()
+    expect(directorProjectSchema.safeParse({ ...current, version: 1 }).success).toBe(false)
+    const normalized = normalizeDirectorProject({ ...current, version: 1 }, '新的导演台')
+    expect(normalized.version).toBe(2)
+    expect(normalized.name).toBe('新的导演台')
     expect(validateDirectorProject(normalized)).toEqual([])
   })
 
   it('commits blocking when switching shots and keeps added elements independent', () => {
-    let project = createDefaultDirectorProject()
+    let project = createProjectWithActor()
     const secondShot = createDirectorShot(project.elements, 1)
     project = { ...project, shots: [...project.shots, secondShot] }
     const firstActor = project.elements[0]
@@ -93,7 +109,7 @@ describe('director project model', () => {
   })
 
   it('enforces locks, cascades deletion, and synchronizes camera frame zero', () => {
-    let project = createDefaultDirectorProject()
+    let project = createProjectWithActor()
     const actor = project.elements[0]
     project = updateDirectorElement(project, { ...actor, locked: true })
     const locked = project.elements[0]
@@ -115,7 +131,7 @@ describe('director project model', () => {
   })
 
   it('reports semantic dangling references and invalid active shots', () => {
-    const project = createDefaultDirectorProject()
+    const project = createProjectWithActor()
     project.shots[0].elementStates.ghost = structuredClone(project.shots[0].elementStates[project.elements[0].id])
     project.activeShotId = 'missing-shot'
     expect(validateDirectorProject(project)).toEqual(expect.arrayContaining([
@@ -163,6 +179,212 @@ describe('director project model', () => {
     project = patchDirectorShot(project, shotId, { durationSec: 1 })
     expect(directorMaxFrame(project.shots[0], project.fps)).toBe(23)
     expect(project.shots[0].cameraKeyframes.every((keyframe) => keyframe.frame <= 23)).toBe(true)
+    expect(validateDirectorProject(project)).toEqual([])
+  })
+
+  it('samples actor paths at constant speed and constrains the camera to the moving actor', () => {
+    let project = createProjectWithActor()
+    const actor = project.elements[0]
+    const shotId = project.activeShotId
+    const start = actor.transform.position
+    project = upsertDirectorActorTrack(project, shotId, {
+      id: 'track-actor-1',
+      elementId: actor.id,
+      startFrame: 0,
+      endFrame: 24,
+      points: [start, { x: start.x + 10, y: start.y, z: start.z }],
+      interpolation: 'linear',
+      orientToPath: true,
+      motion: 'walk',
+    })
+    let shot = project.shots[0]
+    const track = shot.actorTracks[0]
+    expect(sampleDirectorActorPosition(track, 12).x).toBeCloseTo(start.x + 5)
+    expect(sampleDirectorActorTransform(shot, actor, 12).rotation.y).toBeCloseTo(90)
+
+    shot = {
+      ...shot,
+      cameraConstraint: {
+        ...shot.cameraConstraint,
+        mode: 'look-at',
+        targetElementId: actor.id,
+      },
+    }
+    const freeView = sampleDirectorCamera(shot, 12)
+    const constrained = sampleDirectorConstrainedCamera(shot, project.elements, 12)
+    expect(constrained.position).toEqual(freeView.position)
+    expect(constrained.target).toMatchObject({
+      x: start.x + 5,
+      y: start.y + 1.45,
+      z: start.z,
+    })
+  })
+
+  it('creates replaceable actors with persistent body presets and expanded actions', () => {
+    const actor = createDirectorElement('actor', 0)
+    const crowd = createDirectorElement('crowd', 1)
+    expect(actor).toMatchObject({ actorModelId: 'director-rig-v1', bodyType: 'standard', poseId: 'stand', heightM: 1.72 })
+    expect(crowd.actorModelId).toBe('lightweight-v1')
+
+    const heavy = directorBodyProfile('heavy')
+    const slim = directorBodyProfile('slim')
+    const short = directorBodyProfile('short')
+    expect(heavy.torsoWidth).toBeGreaterThan(slim.torsoWidth)
+    expect(heavy.armThickness).toBeGreaterThan(slim.armThickness)
+    expect(short.defaultHeightM).toBeLessThan(directorBodyProfile('standard').defaultHeightM)
+
+    const project = addDirectorElement(createDefaultDirectorProject(), { ...actor, bodyType: 'heavy', poseId: 'wave' })
+    const saved = JSON.parse(JSON.stringify(project))
+    expect(normalizeDirectorProject(saved).elements[0]).toMatchObject({ bodyType: 'heavy', poseId: 'wave' })
+    expect(directorProjectSchema.safeParse(saved).success).toBe(true)
+  })
+
+  it('samples actor paths through XYZ space for stairs and raised platforms', () => {
+    const project = createProjectWithActor()
+    const actor = project.elements[0]
+    const track = {
+      id: 'spatial-track',
+      elementId: actor.id,
+      startFrame: 0,
+      endFrame: 24,
+      points: [
+        { x: 0, y: 0, z: 0 },
+        { x: 0, y: 2, z: 1.5 },
+        { x: 0, y: 4, z: 3 },
+      ],
+      interpolation: 'linear' as const,
+      orientToPath: true,
+      motion: 'walk' as const,
+    }
+    const shot = { ...project.shots[0], actorTracks: [track] }
+
+    expect(sampleDirectorActorPosition(track, 12)).toEqual({ x: 0, y: 2, z: 1.5 })
+    expect(sampleDirectorActorTransform(shot, actor, 18).position).toEqual({ x: 0, y: 3, z: 2.25 })
+  })
+
+  it('expands smooth actor paths deterministically while preserving endpoints', () => {
+    const project = createProjectWithActor()
+    const actor = project.elements[0]
+    const points = [
+      actor.transform.position,
+      { x: actor.transform.position.x + 2, y: actor.transform.position.y, z: actor.transform.position.z + 3 },
+      { x: actor.transform.position.x + 5, y: actor.transform.position.y, z: actor.transform.position.z },
+    ]
+    const track = {
+      id: 'smooth-track',
+      elementId: actor.id,
+      startFrame: 0,
+      endFrame: 48,
+      points,
+      interpolation: 'smooth' as const,
+      orientToPath: true,
+      motion: 'walk' as const,
+    }
+    const expanded = directorActorPathPoints(track, 8)
+    expect(expanded).toHaveLength(17)
+    expect(expanded[0]).toEqual(points[0])
+    expect(expanded.at(-1)).toEqual(points.at(-1))
+    expect(directorActorPathPoints(track, 8)).toEqual(expanded)
+  })
+
+  it('replaces only geometry generated from the same scene reference', () => {
+    let project = createDefaultDirectorProject()
+    const manual = createDirectorElement('box', project.elements.length)
+    project = addDirectorElement(project, manual)
+    const makeDraft = (name: string, x: number) => ({
+      summary: '测试草案',
+      groundColor: '#202020',
+      elements: [{
+        kind: 'wall' as const,
+        name,
+        color: '#808080',
+        placement: 'ground' as const,
+        transform: {
+          position: { x, y: 1.5, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 4, y: 3, z: 0.2 },
+        },
+      }],
+    })
+    project = applyDirectorSceneDraft(project, 'image-a', makeDraft('旧墙', 0))
+    project = applyDirectorSceneDraft(project, 'image-b', makeDraft('另一参考墙', 6))
+    project = applyDirectorSceneDraft(project, 'image-a', makeDraft('新墙', 2))
+    expect(project.elements.some((element) => element.id === manual.id)).toBe(true)
+    expect(project.elements.filter((element) => element.referenceNodeId === 'image-a').map((element) => element.name)).toEqual(['新墙'])
+    expect(project.elements.filter((element) => element.referenceNodeId === 'image-b')).toHaveLength(1)
+    expect(project.shots.every((shot) => Object.keys(shot.elementStates).length === project.elements.length)).toBe(true)
+    expect(validateDirectorProject(project)).toEqual([])
+  })
+
+  it('creates the extended blocking primitive library with useful defaults', () => {
+    const kinds = ['floor', 'platform', 'stairs', 'ramp', 'cone', 'capsule'] as const
+    let project = createDefaultDirectorProject()
+    for (const [index, kind] of kinds.entries()) {
+      project = addDirectorElement(project, createDirectorElement(kind, index))
+    }
+
+    expect(project.elements.map((element) => element.kind)).toEqual(kinds)
+    expect(project.elements.find((element) => element.kind === 'floor')?.transform.scale).toEqual({ x: 8, y: 0.08, z: 8 })
+    expect(project.elements.find((element) => element.kind === 'stairs')?.transform.scale.y).toBe(1.5)
+    expect(validateDirectorProject(project)).toEqual([])
+  })
+
+  it('does not overwrite locked geometry generated from a scene reference', () => {
+    let project = createDefaultDirectorProject()
+    project = applyDirectorSceneDraft(project, 'locked-image', {
+      summary: '测试',
+      elements: [{
+        kind: 'box',
+        name: '锁定方块',
+        color: '#808080',
+        placement: 'ground',
+        transform: {
+          position: { x: 0, y: 0.5, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 1, y: 1, z: 1 },
+        },
+      }],
+    })
+    const generated = project.elements.find((element) => element.referenceNodeId === 'locked-image')!
+    project = updateDirectorElement(project, { ...generated, locked: true })
+    expect(() => applyDirectorSceneDraft(project, 'locked-image', {
+      summary: '重做',
+      elements: [{
+        kind: 'box',
+        name: '新方块',
+        color: generated.color,
+        placement: 'ground',
+        transform: generated.transform,
+      }],
+    })).toThrow(/已锁定/)
+  })
+
+  it('trims actor tracks with shot duration and cascades actor deletion into camera constraints', () => {
+    let project = createProjectWithActor()
+    const actor = project.elements[0]
+    const shotId = project.activeShotId
+    project = upsertDirectorActorTrack(project, shotId, {
+      id: 'track-delete',
+      elementId: actor.id,
+      startFrame: 12,
+      endFrame: 96,
+      points: [actor.transform.position, { ...actor.transform.position, z: actor.transform.position.z + 4 }],
+      interpolation: 'smooth',
+      orientToPath: true,
+      motion: 'run',
+    })
+    project = patchDirectorShot(project, shotId, {
+      durationSec: 1,
+      cameraConstraint: {
+        ...project.shots[0].cameraConstraint,
+        mode: 'follow',
+        targetElementId: actor.id,
+      },
+    })
+    expect(project.shots[0].actorTracks[0].endFrame).toBe(23)
+    project = removeDirectorElement(project, actor.id)
+    expect(project.shots[0].actorTracks).toEqual([])
+    expect(project.shots[0].cameraConstraint.mode).toBe('free')
     expect(validateDirectorProject(project)).toEqual([])
   })
 })

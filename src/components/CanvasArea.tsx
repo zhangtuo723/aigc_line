@@ -47,14 +47,31 @@ import {
   validateNodeFieldValue,
 } from '../shared/node-capabilities'
 import { buildCanvasNodeDetail, buildCanvasOverview } from '../shared/canvas-read-model'
+import { connectedDirectorImageNodeIds } from '../shared/director-references'
 import { orderImageReferences } from '../shared/image-references'
-import type { DirectorProject, DirectorShot } from '../shared/director.types'
-import { directorProjectSchema } from '../shared/director-schema'
-import { createDefaultDirectorProject, normalizeDirectorProject, validateDirectorProject } from '../features/director/director-model'
+import type { DirectorActorModelId, DirectorAspectRatio, DirectorBodyType, DirectorElementKind, DirectorPoseId, DirectorProject, DirectorShot, DirectorVec3 } from '../shared/director.types'
+import { directorProjectSchema, directorSceneDraftSchema } from '../shared/director-schema'
+import {
+  addDirectorElement,
+  applyDirectorSceneDraft,
+  createDefaultDirectorProject,
+  createDirectorElement,
+  createDirectorShot,
+  directorId,
+  directorMaxFrame,
+  normalizeDirectorProject,
+  patchDirectorShot,
+  upsertDirectorActorTrack,
+  upsertDirectorCameraKeyframe,
+  validateDirectorProject,
+} from '../features/director/director-model'
 import './canvas-capabilities'
 
 const DirectorStageDialog = lazy(() => import('../features/director/DirectorStageDialog').then((module) => ({
   default: module.DirectorStageDialog,
+})))
+const ImageEditorDialog = lazy(() => import('../features/image-editor/ImageEditorDialog').then((module) => ({
+  default: module.ImageEditorDialog,
 })))
 
 type StoryNodeKind = CanvasNodeKind
@@ -74,11 +91,113 @@ interface FlowSnapshot {
   dismissedArtifacts?: Record<string, number>
 }
 
+const isDirectorVec3 = (value: unknown): value is DirectorVec3 => {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return ['x', 'y', 'z'].every((key) => typeof record[key] === 'number' && Number.isFinite(record[key]))
+}
+
+const requireDirectorParam = (params: Record<string, unknown>, key: string): unknown => {
+  if (!(key in params)) throw new Error(`缺少参数：${key}`)
+  return params[key]
+}
+
+function applyDirectorAtomicAction(
+  project: DirectorProject,
+  actionId: string,
+  params: Record<string, unknown>,
+): DirectorProject {
+  if (actionId === 'add-element') {
+    const kind = requireDirectorParam(params, 'kind')
+    const kinds: DirectorElementKind[] = ['actor', 'crowd', 'box', 'sphere', 'cylinder', 'wall', 'floor', 'platform', 'stairs', 'ramp', 'cone', 'capsule']
+    if (typeof kind !== 'string' || !kinds.includes(kind as DirectorElementKind)) throw new Error('kind 无效')
+    let element = createDirectorElement(kind as DirectorElementKind, project.elements.length)
+    if (typeof params.name === 'string') element = { ...element, name: params.name }
+    if (isDirectorVec3(params.position)) element = { ...element, transform: { ...element.transform, position: params.position } }
+    if (kind === 'actor' || kind === 'crowd') {
+      if (['director-rig-v1', 'lightweight-v1'].includes(String(params.actorModelId))) element = { ...element, actorModelId: params.actorModelId as DirectorActorModelId }
+      if (['standard', 'heavy', 'slim', 'short', 'tall'].includes(String(params.bodyType))) element = { ...element, bodyType: params.bodyType as DirectorBodyType }
+      if (['stand', 'walk', 'sit', 'arms-crossed', 'point', 'kneel', 'hands-on-hips', 'wave', 'hands-up', 'crouch', 'lean', 'look-back'].includes(String(params.poseId))) element = { ...element, poseId: params.poseId as DirectorPoseId }
+      if (typeof params.heightM === 'number' && Number.isFinite(params.heightM)) element = { ...element, heightM: Math.max(0.8, Math.min(2.4, params.heightM)) }
+    }
+    return addDirectorElement(project, element)
+  }
+  if (actionId === 'add-shot') {
+    let shot = createDirectorShot(project.elements, project.shots.length)
+    if (typeof params.name === 'string') shot = { ...shot, name: params.name }
+    if (typeof params.durationSec === 'number' && Number.isFinite(params.durationSec) && params.durationSec > 0) shot = { ...shot, durationSec: params.durationSec }
+    if (['16:9', '9:16', '4:3', '1:1'].includes(String(params.aspectRatio))) shot = { ...shot, aspectRatio: params.aspectRatio as DirectorAspectRatio }
+    return { ...project, shots: [...project.shots, shot], activeShotId: shot.id }
+  }
+  if (actionId === 'apply-scene-draft') {
+    const referenceNodeId = requireDirectorParam(params, 'referenceNodeId')
+    if (typeof referenceNodeId !== 'string' || !referenceNodeId.trim()) throw new Error('referenceNodeId 无效')
+    const sceneDraft = directorSceneDraftSchema.safeParse(requireDirectorParam(params, 'draft'))
+    if (!sceneDraft.success) {
+      const issue = sceneDraft.error.issues.slice(0, 5).map((item) => `${item.path.join('.') || 'root'} ${item.message}`).join('；')
+      throw new Error(`场景草案不符合约束：${issue}`)
+    }
+    return applyDirectorSceneDraft(project, referenceNodeId, sceneDraft.data)
+  }
+  const shotId = requireDirectorParam(params, 'shotId')
+  if (typeof shotId !== 'string' || !project.shots.some((shot) => shot.id === shotId)) throw new Error('shotId 无效')
+  const shot = project.shots.find((item) => item.id === shotId)!
+  if (actionId === 'set-actor-path') {
+    const elementId = requireDirectorParam(params, 'elementId')
+    const points = requireDirectorParam(params, 'points')
+    if (typeof elementId !== 'string' || !project.elements.some((element) => element.id === elementId && element.kind === 'actor')) throw new Error('elementId 必须指向演员')
+    if (!Array.isArray(points) || points.length < 2 || !points.every(isDirectorVec3)) throw new Error('points 至少需要两个有效三维坐标')
+    const maxFrame = directorMaxFrame(shot, project.fps)
+    const startFrame = typeof params.startFrame === 'number' ? Math.floor(params.startFrame) : 0
+    const endFrame = typeof params.endFrame === 'number' ? Math.floor(params.endFrame) : maxFrame
+    return upsertDirectorActorTrack(project, shotId, {
+      id: shot.actorTracks.find((track) => track.elementId === elementId)?.id ?? directorId('actor-track'),
+      elementId,
+      startFrame,
+      endFrame,
+      points,
+      interpolation: params.interpolation === 'linear' ? 'linear' : 'smooth',
+      orientToPath: params.orientToPath !== false,
+      motion: params.motion === 'run' ? 'run' : 'walk',
+    })
+  }
+  if (actionId === 'set-camera-constraint') {
+    const mode = requireDirectorParam(params, 'mode')
+    if (!['free', 'look-at', 'follow'].includes(String(mode))) throw new Error('mode 无效')
+    const targetElementId = typeof params.targetElementId === 'string' ? params.targetElementId : undefined
+    if (mode !== 'free' && !project.elements.some((element) => element.id === targetElementId && element.kind === 'actor')) throw new Error('注视/跟随模式必须提供有效演员 targetElementId')
+    return patchDirectorShot(project, shotId, {
+      cameraConstraint: {
+        mode: mode as 'free' | 'look-at' | 'follow',
+        targetElementId: mode === 'free' ? undefined : targetElementId,
+        targetOffset: isDirectorVec3(params.targetOffset) ? params.targetOffset : shot.cameraConstraint.targetOffset,
+        followOffset: isDirectorVec3(params.followOffset) ? params.followOffset : shot.cameraConstraint.followOffset,
+      },
+    })
+  }
+  if (actionId === 'set-camera-keyframe') {
+    const frame = requireDirectorParam(params, 'frame')
+    const position = requireDirectorParam(params, 'position')
+    const target = requireDirectorParam(params, 'target')
+    if (typeof frame !== 'number' || !Number.isFinite(frame) || !isDirectorVec3(position) || !isDirectorVec3(target)) throw new Error('frame/position/target 无效')
+    const interpolation = ['hold', 'linear', 'smooth', 'ease-in', 'ease-out'].includes(String(params.interpolation))
+      ? params.interpolation as 'hold' | 'linear' | 'smooth' | 'ease-in' | 'ease-out'
+      : 'smooth'
+    return upsertDirectorCameraKeyframe(project, shotId, frame, {
+      position,
+      target,
+      fov: typeof params.fov === 'number' && Number.isFinite(params.fov) ? params.fov : shot.fov,
+    }, interpolation)
+  }
+  throw new Error(`未知导演台动作：${actionId}`)
+}
+
 const SAVE_DEBOUNCE_MS = 700
 const DEFAULT_VIEWPORT: Viewport = { x: 80, y: 70, zoom: 0.86 }
 const PROJECT_ASSET_DRAG_TYPE = 'application/x-aigc-project-media'
 const KIND_LABELS: Record<StoryNodeKind, string> = {
   image: '图片',
+  'image-editor': '图片编辑',
   video: '视频',
   audio: '音频',
   upscale: '视频放大',
@@ -227,10 +346,12 @@ const nodeIcon = (kind: StoryNodeKind) => {
       </svg>
     )
   }
-  if (kind === 'image') {
+  if (kind === 'image' || kind === 'image-editor') {
     return (
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="h-3.5 w-3.5">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="m3 16 5-5 4 4 2-2 7 7M14.5 7.5h.01M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" />
+        {kind === 'image-editor'
+          ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M4 16.5V20h3.5L18.8 8.7a2.1 2.1 0 0 0-3-3L4.5 17M13.8 7.7l2.5 2.5M4 4h7M4 8h5" />
+          : <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="m3 16 5-5 4 4 2-2 7 7M14.5 7.5h.01M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" />}
       </svg>
     )
   }
@@ -1000,14 +1121,19 @@ function NodeDeleteButton({ id }: { id: string }) {
 
 function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
   const canvasNodes = useNodes<StoryNode>()
+  const canvasEdges = useEdges<StoryEdge>()
   const { getNodes, setNodes, setEdges } = useReactFlow<StoryNode, StoryEdge>()
   const currentProject = useAppStore((state) => state.currentProject)
   const addCanvasNodeReference = useAppStore((state) => state.addCanvasNodeReference)
+  const sendScopedAgentMessage = useAppStore((state) => state.sendScopedAgentMessage)
+  const agentThinkingByProject = useAppStore((state) => state.agentThinkingByProject)
   const isReferencedInChat = useAppStore((state) => state.referencedCanvasNodes.some((ref) => ref.id === id))
   const [audioImporting, setAudioImporting] = useState(false)
   const [directorOpen, setDirectorOpen] = useState(false)
+  const [imageEditorOpen, setImageEditorOpen] = useState(false)
   const isUpscale = data.kind === 'upscale'
   const isDirector = data.kind === 'director'
+  const isImageEditor = data.kind === 'image-editor'
   const visualMediaKind = data.kind === 'image' || data.kind === 'video'
     ? data.kind
     : isUpscale ? 'video' : null
@@ -1018,6 +1144,68 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
     () => isDirector ? normalizeDirectorProject(data.directorProject, data.title) : undefined,
     [data.directorProject, data.title, isDirector],
   )
+  const directorAgentBusy = currentProject ? agentThinkingByProject[currentProject.id] === true : false
+  const directorReferenceImages = useMemo(() => {
+    const incomingIds = new Set(connectedDirectorImageNodeIds(id, canvasNodes, canvasEdges))
+    return canvasNodes
+      .filter((node) => incomingIds.has(node.id) && node.data.kind === 'image' && typeof node.data.sourcePath === 'string')
+      .map((node) => ({
+        nodeId: node.id,
+        title: node.data.title,
+        sourcePath: node.data.sourcePath!,
+        preview: node.data.preview ?? (currentProject ? workspacePreview(currentProject.id, node.data.sourcePath!) : undefined),
+      }))
+  }, [canvasEdges, canvasNodes, currentProject, id])
+  const imageEditorInputs = useMemo(() => {
+    const incomingIds = new Set(canvasEdges.filter((edge) => edge.target === id).map((edge) => edge.source))
+    return canvasNodes.filter((node) => incomingIds.has(node.id) && node.data.kind === 'image' && typeof node.data.sourcePath === 'string')
+  }, [canvasEdges, canvasNodes, id])
+  const selectedImageEditorInput = isImageEditor ? imageEditorInputs[0] : undefined
+  const imageEditorSources = useMemo(() => currentProject ? imageEditorInputs.map((node) => ({
+    nodeId: node.id,
+    title: node.data.title,
+    url: node.data.preview ?? workspacePreview(currentProject.id, node.data.sourcePath!),
+  })) : [], [currentProject, imageEditorInputs])
+
+  const exportImageEditorSelection = async ({ pngData, width, height }: { pngData: ArrayBuffer; width: number; height: number }) => {
+    if (!currentProject || !selectedImageEditorInput) throw new Error('没有可用的输入图片')
+    const projectId = currentProject.id
+    const inputNodeId = selectedImageEditorInput.id
+    const assertContext = () => {
+      if (useAppStore.getState().currentProject?.id !== projectId) throw new Error('项目已切换，已取消写回图片编辑结果')
+      const editorNode = getNodes().find((node) => node.id === id && node.data.kind === 'image-editor')
+      if (!editorNode) throw new Error('图片编辑节点已不存在，已取消写回')
+      const input = getNodes().find((node) => node.id === inputNodeId && node.data.kind === 'image')
+      if (!input) throw new Error('输入图片节点已不存在，已取消写回')
+    }
+    assertContext()
+    const result = await window.electronAPI.saveImageEdit({ projectId, nodeId: id, inputNodeId, pngData, width, height })
+    if (!result.success || !result.relativePath) throw new Error(result.error || '图片编辑结果保存失败')
+    assertContext()
+    const sourcePath = result.relativePath
+    const preview = workspacePreview(projectId, sourcePath)
+    const ratio = width / height
+    const aspectRatio: StoryNodeData['aspectRatio'] = ratio > 1.55 ? '16:9' : ratio > 1.15 ? '4:3' : ratio < 0.72 ? '9:16' : '1:1'
+    const liveNodes = getNodes()
+    const editorNode = liveNodes.find((node) => node.id === id)
+    if (!editorNode) throw new Error('图片编辑节点已不存在，已取消创建输出节点')
+    const outputCount = canvasEdges.filter((edge) => edge.source === id).length
+    const imageNode = makeNode('image', liveNodes.length + 1, {
+      x: editorNode.position.x + 600 + outputCount * 680,
+      y: editorNode.position.y,
+    })
+    imageNode.data = {
+      ...imageNode.data,
+      title: `${data.title} · 导出 ${outputCount + 1}`,
+      aspectRatio,
+      sourcePath,
+      preview,
+      prompt: '',
+      readOnly: true,
+    }
+    setNodes((nodes) => [...nodes, imageNode])
+    setEdges((edges) => [...edges, makeLinkedEdge(`edge-${id}-${imageNode.id}`, id, imageNode.id)])
+  }
 
   const updateDirectorProject = (directorProject: DirectorProject) => {
     setNodes((nodes) => nodes.map((node) => node.id === id
@@ -1079,6 +1267,23 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
     ])
     setEdges((edges) => [...edges, makeLinkedEdge(`edge-${id}-${imageNode.id}`, id, imageNode.id)])
     return relativePath
+  }
+
+  const requestDirectorSceneFromAgent = async (
+    reference: { nodeId: string; title: string; sourcePath: string },
+    instruction: string,
+  ): Promise<void> => {
+    if (!currentProject) throw new Error('当前项目不可用')
+    const liveReference = getNodes().find((node) => node.id === reference.nodeId && node.data.kind === 'image')
+    if (!liveReference || liveReference.data.sourcePath !== reference.sourcePath) throw new Error('参考图片节点已变化，请重新选择')
+    const extra = instruction.trim() ? `\n补充要求：${instruction.trim()}` : ''
+    await sendScopedAgentMessage(
+      `请使用你的多模态能力读取所引用图片节点的 sourcePath，并分析图片内容；然后为所引用的 3D 导演台生成一个可编辑的简易白模空间。先调用 GetCanvasCapabilities 获取 director 的 apply-scene-draft 参数约束，再调用 InvokeNodeAction 将草案应用到导演台。只使用 box、wall、cylinder、sphere、floor、platform、stairs、ramp、cone、capsule，最多 40 个体块；优先用 floor/platform/stairs/ramp 表达地面、高台、楼梯和斜坡。每个体块必须正确声明 ground/elevated，地面、道路、建筑主体、围墙和家具必须 ground，只有屋顶、横梁、招牌等真实离地结构才使用 elevated。注意 position 是底面锚点而不是中心点，scale.y 才是完整高度。保留演员、手工元素、其他参考图生成的元素和全部机位。完成后用 GetCanvasNode 核对导演台工程，并确认全部 ground 元素的 position.y 都为 0。${extra}`,
+      [
+        { id, title: data.title, kind: 'director' },
+        { id: reference.nodeId, title: reference.title, kind: 'image' },
+      ],
+    )
   }
 
   const exportDirectorVideo = async (
@@ -1175,7 +1380,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
   }
 
   return (
-    <div className={data.kind === 'image' || data.kind === 'video' ? 'w-[620px]' : isDirector ? 'w-[520px]' : 'w-[420px]'}>
+    <div className={data.kind === 'image' || data.kind === 'video' ? 'w-[620px]' : isDirector || isImageEditor ? 'w-[520px]' : 'w-[420px]'}>
       <div className="mb-1.5 flex items-center gap-1 text-[11px] text-white/48">
         {nodeIcon(data.kind)}
         <span className="min-w-0 truncate">{data.title}</span>
@@ -1208,7 +1413,27 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
         className={`relative overflow-visible rounded-xl border bg-[#202023] shadow-[0_10px_35px_rgba(0,0,0,0.3)] transition ${selected ? 'border-[#e8c766]/75 shadow-[0_0_0_1px_rgba(232,199,102,0.18),0_18px_45px_rgba(0,0,0,0.4)]' : 'border-white/[0.13]'}`}
       >
         <Handle type="target" position={Position.Left} className="story-handle" />
-        {isDirector ? (
+        {isImageEditor ? (
+          <div className="nodrag nowheel overflow-hidden rounded-[11px] bg-[#121318]" onPointerDown={(event) => event.stopPropagation()}>
+            <div className="relative aspect-video overflow-hidden bg-[radial-gradient(circle_at_50%_35%,#273148_0%,#11141c_50%,#090a0e_100%)]">
+              {selectedImageEditorInput?.data.preview ? (
+                <img src={selectedImageEditorInput.data.preview} alt="图片编辑输入预览" className="h-full w-full object-contain" draggable={false} />
+              ) : (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-white/30">
+                  <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-[#d4af37]/25 bg-[#d4af37]/10 text-2xl text-[#e8c766]">✎</div>
+                  <div className="text-center"><p className="text-xs text-white/55">请连接一个或多个已有输出的图片节点</p><p className="mt-1 text-[10px]">连接图片会作为普通素材进入 Excalidraw</p></div>
+                </div>
+              )}
+              {imageEditorInputs.length > 0 && <span className="absolute bottom-3 left-3 rounded-md border border-white/10 bg-black/55 px-2 py-1 text-[9px] text-white/65">已连接 {imageEditorInputs.length} 张图片</span>}
+            </div>
+            <div className="space-y-2 border-t border-white/8 px-4 py-3">
+              <div className="flex items-center gap-2">
+                <div className="min-w-0 flex-1"><p className="text-[11px] text-white/65">Excalidraw 素材编辑台</p><p className="mt-0.5 truncate text-[9px] text-white/30">{imageEditorInputs.length > 0 ? `${imageEditorInputs.length} 张输入 · 多选后右键导出` : '等待图片输入'}</p></div>
+                <button disabled={!selectedImageEditorInput} onClick={() => setImageEditorOpen(true)} className="rounded-lg border border-[#d4af37]/30 bg-[#d4af37]/10 px-4 py-2 text-[10px] font-medium text-[#f0d98c] hover:bg-[#d4af37]/15 disabled:opacity-35">打开图片编辑器</button>
+              </div>
+            </div>
+          </div>
+        ) : isDirector ? (
           <div className="nodrag nowheel overflow-hidden rounded-[11px] bg-[#121318]" onPointerDown={(event) => event.stopPropagation()}>
             <div className="relative aspect-video overflow-hidden bg-[radial-gradient(circle_at_50%_30%,#273148_0%,#11141c_48%,#090a0e_100%)]">
               {data.preview ? (
@@ -1220,7 +1445,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
                 </div>
               )}
               <div className="absolute bottom-3 left-3 flex gap-2 text-[9px] text-white/55">
-                <span className="rounded-md border border-white/10 bg-black/45 px-2 py-1">{directorProject?.elements.length ?? 2} 个元素</span>
+                <span className="rounded-md border border-white/10 bg-black/45 px-2 py-1">{directorProject?.elements.length ?? 0} 个元素</span>
                 <span className="rounded-md border border-white/10 bg-black/45 px-2 py-1">{directorProject?.shots.length ?? 1} 个 Shot</span>
                 <span className="rounded-md border border-white/10 bg-black/45 px-2 py-1">24 FPS</span>
               </div>
@@ -1300,7 +1525,21 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
             onChange={updateDirectorProject}
             onCapture={captureDirectorStill}
             onExportVideo={exportDirectorVideo}
+            referenceImages={directorReferenceImages}
+            agentBusy={directorAgentBusy}
+            onRequestAgentScene={requestDirectorSceneFromAgent}
             onClose={() => setDirectorOpen(false)}
+          />
+        </Suspense>
+      )}
+      {imageEditorOpen && isImageEditor && imageEditorSources.length > 0 && currentProject && (
+        <Suspense fallback={<div className="fixed inset-0 z-[220] flex items-center justify-center bg-[#090a0e] text-sm text-[#e8c766]">正在加载图片编辑器…</div>}>
+          <ImageEditorDialog
+            key={imageEditorSources.map((source) => source.nodeId).join('|')}
+            title={data.title}
+            sources={imageEditorSources}
+            onExport={exportImageEditorSelection}
+            onClose={() => setImageEditorOpen(false)}
           />
         </Suspense>
       )}
@@ -1318,7 +1557,7 @@ const makeNode = (kind: StoryNodeKind, index: number, position?: { x: number; y:
     kind,
     title: `${KIND_LABELS[kind]}节点 ${index}`,
     ...(kind === 'image' || kind === 'video' ? { prompt: '' } : {}),
-    aspectRatio: kind === 'image' || kind === 'video' || kind === 'upscale' ? '16:9' : undefined,
+    aspectRatio: kind === 'image' || kind === 'image-editor' || kind === 'video' || kind === 'upscale' ? '16:9' : undefined,
     duration: kind === 'video' ? 5 : undefined,
     scale: kind === 'upscale' ? 2 : undefined,
     quality: kind === 'upscale' ? 'ULTRA' : undefined,
@@ -1681,10 +1920,30 @@ function CanvasFlow() {
     const unregisterImage = registerNodeKindAction('image', 'generate', (nodeId) => generateImageNode(nodeId))
     const unregisterVideo = registerNodeKindAction('video', 'generate', (nodeId) => generateVideoNode(nodeId))
     const unregisterUpscale = registerNodeKindAction('upscale', 'generate', (nodeId) => upscaleVideoNode(nodeId))
+    const directorActions = ['add-element', 'add-shot', 'set-actor-path', 'set-camera-constraint', 'set-camera-keyframe', 'apply-scene-draft']
+    const unregisterDirector = directorActions.map((actionId) => registerNodeKindAction('director', actionId, async (nodeId, params = {}) => {
+      const node = nodesRef.current.find((item) => item.id === nodeId)
+      if (!node || node.data.kind !== 'director') throw new Error(`导演台节点不存在：${nodeId}`)
+      if (actionId === 'apply-scene-draft') {
+        const referenceNodeId = typeof params.referenceNodeId === 'string' ? params.referenceNodeId : ''
+        const referenceNode = nodesRef.current.find((item) => item.id === referenceNodeId && item.data.kind === 'image')
+        if (!referenceNode?.data.sourcePath) throw new Error('referenceNodeId 必须指向已有输出的图片节点')
+      }
+      const current = normalizeDirectorProject(node.data.directorProject, node.data.title)
+      const next = { ...applyDirectorAtomicAction(current, actionId, params), updatedAt: Date.now() }
+      const issues = validateDirectorProject(next)
+      if (issues.length > 0) throw new Error(issues.join('；'))
+      nodesRef.current = nodesRef.current.map((item) => item.id === nodeId
+        ? { ...item, data: { ...item.data, directorProject: next } }
+        : item)
+      setNodes(nodesRef.current)
+      return { action: actionId, nodeId, updatedAt: next.updatedAt }
+    }))
     return () => {
       unregisterImage()
       unregisterVideo()
       unregisterUpscale()
+      unregisterDirector.forEach((unregister) => unregister())
     }
     // Handlers only touch stable refs/setters, so registering once is safe.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1792,47 +2051,37 @@ function CanvasFlow() {
           const params = payload.params && typeof payload.params === 'object'
             ? payload.params as Record<string, unknown>
             : undefined
-          const results = nodeIds.map((nodeId) => {
-            const node = nodesRef.current.find((item) => item.id === nodeId)
-            if (!node) return { nodeId, accepted: false as const, error: `找不到节点：${nodeId}` }
-            if (node.data.readOnly) {
-              return { nodeId, accepted: false as const, error: '该节点是只读构图参考，不能修改或执行生成动作' }
-            }
-            const actionDescriptor = getNodeCapabilities(node.data.kind)
-              ?.actions.find((item) => item.id === actionId)
-            if (!actionDescriptor) {
-              return { nodeId, accepted: false as const, error: `该节点类型（${node.data.kind}）不支持动作：${actionId || '(未提供 action)'}` }
-            }
-            // Prefer a live per-node handler; fall back to the kind-level
-            // handler, which works even when the node component is unmounted.
-            const nodeHandler = getNodeAction(nodeId, actionId)
-            const kindHandler = getNodeKindAction(node.data.kind, actionId)
-            if (!nodeHandler && !kindHandler) {
-              return { nodeId, accepted: false as const, error: '动作处理器尚未注册（画布未就绪）' }
-            }
-            // Fire-and-forget: async action progress and errors surface through
-            // the node's data (statusField), which the caller polls via get-node.
-            void Promise.resolve(
-              nodeHandler ? nodeHandler(params) : kindHandler!(nodeId, params),
-            ).catch(() => undefined)
-            return {
-              nodeId,
-              accepted: true as const,
-              async: actionDescriptor.async === true,
-              statusField: actionDescriptor.statusField,
-            }
-          })
-          const acceptedCount = results.filter((item) => item.accepted).length
-          respond({
-            success: acceptedCount > 0,
-            revision: revisionRef.current,
-            result: {
-              action: actionId,
-              accepted: acceptedCount,
-              total: nodeIds.length,
-              results,
-            },
-          })
+          void (async () => {
+            const results = await Promise.all(nodeIds.map(async (nodeId) => {
+              const node = nodesRef.current.find((item) => item.id === nodeId)
+              if (!node) return { nodeId, accepted: false as const, error: `找不到节点：${nodeId}` }
+              if (node.data.readOnly) return { nodeId, accepted: false as const, error: '该节点是只读构图参考，不能修改或执行生成动作' }
+              const actionDescriptor = getNodeCapabilities(node.data.kind)
+                ?.actions.find((item) => item.id === actionId)
+              if (!actionDescriptor) return { nodeId, accepted: false as const, error: `该节点类型（${node.data.kind}）不支持动作：${actionId || '(未提供 action)'}` }
+              const nodeHandler = getNodeAction(nodeId, actionId)
+              const kindHandler = getNodeKindAction(node.data.kind, actionId)
+              if (!nodeHandler && !kindHandler) return { nodeId, accepted: false as const, error: '动作处理器尚未注册（画布未就绪）' }
+              const invoke = () => nodeHandler ? nodeHandler(params) : kindHandler!(nodeId, params)
+              if (actionDescriptor.async) {
+                void Promise.resolve(invoke()).catch(() => undefined)
+                return { nodeId, accepted: true as const, async: true, statusField: actionDescriptor.statusField }
+              }
+              try {
+                const output = await Promise.resolve(invoke())
+                return { nodeId, accepted: true as const, async: false, output }
+              } catch (error) {
+                return { nodeId, accepted: false as const, error: error instanceof Error ? error.message : String(error) }
+              }
+            }))
+            const acceptedCount = results.filter((item) => item.accepted).length
+            respond({
+              success: acceptedCount > 0,
+              revision: revisionRef.current,
+              result: { action: actionId, accepted: acceptedCount, total: nodeIds.length, results },
+              ...(acceptedCount > 0 ? {} : { error: results.map((item) => 'error' in item ? item.error : '').filter(Boolean).join('；') }),
+            })
+          })()
           return
         }
 
@@ -1842,7 +2091,7 @@ function CanvasFlow() {
           const occupied = new Set(nodesRef.current.map((node) => node.id))
           const created = inputs.map((input, index) => {
             const kind = input.kind as StoryNodeKind
-            if (!['image', 'video', 'audio', 'upscale', 'director'].includes(kind)) throw new Error(`无效节点类型：${String(kind)}`)
+            if (!['image', 'image-editor', 'video', 'audio', 'upscale', 'director'].includes(kind)) throw new Error(`无效节点类型：${String(kind)}`)
             const id = typeof input.id === 'string' && input.id.trim()
               ? input.id.trim()
               : `${kind}-${Date.now().toString(36)}-${index}-${Math.random().toString(36).slice(2, 7)}`
@@ -1859,7 +2108,7 @@ function CanvasFlow() {
               title: typeof input.title === 'string' ? input.title : base.data.title,
             }
             if (
-              (kind === 'image' || kind === 'video' || kind === 'audio' || kind === 'upscale' || kind === 'director') &&
+              (kind === 'image' || kind === 'image-editor' || kind === 'video' || kind === 'audio' || kind === 'upscale' || kind === 'director') &&
               data.sourcePath && !data.preview
             ) {
               data.preview = `workspace://${currentProject.id}/${data.sourcePath.split('/').map(encodeURIComponent).join('/')}`
@@ -1897,7 +2146,7 @@ function CanvasFlow() {
               : node.position
             const data = { ...node.data, ...pickMutableNodeData(node.data.kind, update), kind: node.data.kind }
             if (
-              (node.data.kind === 'image' || node.data.kind === 'video' || node.data.kind === 'audio' || node.data.kind === 'upscale' || node.data.kind === 'director') &&
+              (node.data.kind === 'image' || node.data.kind === 'image-editor' || node.data.kind === 'video' || node.data.kind === 'audio' || node.data.kind === 'upscale' || node.data.kind === 'director') &&
               typeof update.sourcePath === 'string' && !('preview' in update)
             ) {
               data.preview = update.sourcePath
@@ -2207,7 +2456,7 @@ function CanvasFlow() {
         </svg>
       </button>
       <div className="mx-1 h-5 w-px bg-white/10" />
-      {(['image', 'video', 'audio', 'upscale', 'director'] as StoryNodeKind[]).map((kind) => (
+      {(['image', 'image-editor', 'video', 'audio', 'upscale', 'director'] as StoryNodeKind[]).map((kind) => (
         <button
           key={kind}
           onClick={() => addNode(kind)}
@@ -2261,7 +2510,7 @@ function CanvasFlow() {
           position="bottom-right"
           pannable
           zoomable
-          nodeColor={(node) => node.data.kind === 'image' ? '#8b7355' : node.data.kind === 'video' ? '#566b7f' : node.data.kind === 'audio' ? '#7f6656' : node.data.kind === 'upscale' ? '#4f7f74' : node.data.kind === 'director' ? '#b08b2f' : '#67636e'}
+          nodeColor={(node) => node.data.kind === 'image' ? '#8b7355' : node.data.kind === 'image-editor' ? '#9a6d8d' : node.data.kind === 'video' ? '#566b7f' : node.data.kind === 'audio' ? '#7f6656' : node.data.kind === 'upscale' ? '#4f7f74' : node.data.kind === 'director' ? '#b08b2f' : '#67636e'}
           maskColor="rgba(5,5,8,0.72)"
         />
       </ReactFlow>

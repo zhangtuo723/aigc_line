@@ -151,9 +151,23 @@ registerNodeCapabilities({
   kind: 'director',
   label: '3D 导演台',
   fields: [
-    { key: 'directorProject', type: 'object', description: '完整的可序列化 3D 预演工程：演员、道具、机位、Shot 与关键帧' },
+    { key: 'directorProject', type: 'object', description: '完整的可序列化 3D 预演工程 v2：可替换角色模型、标准/壮硕/纤瘦/矮小/高大体型、人物动作、道具、Shot、人物路径、相机关键帧以及注视/跟随人物约束；Agent 可通过更新此字段编排导演台' },
     { key: 'sourcePath', type: 'string', readonly: true, description: '最近一次机位截图的项目相对路径（只读）' },
     { key: 'preview', type: 'string', readonly: true, description: '最近一次机位截图预览（只读）' },
   ],
+  actions: [
+    { id: 'add-element', label: '添加场景元素', description: '原子添加 actor/crowd/box/sphere/cylinder/wall/floor/platform/stairs/ramp/cone/capsule；params: { kind, name?, position?: {x,y,z}, actorModelId?: director-rig-v1|lightweight-v1, bodyType?: standard|heavy|slim|short|tall, poseId?, heightM? }。人物动作支持 stand/walk/sit/arms-crossed/point/kneel/hands-on-hips/wave/hands-up/crouch/lean/look-back。基础几何的 position 是底面锚点，贴地时 y=0，不是几何中心坐标。' },
+    { id: 'add-shot', label: '添加 Shot', description: '原子添加机位 Shot；params: { name?, durationSec?, aspectRatio? }' },
+    { id: 'set-actor-path', label: '设置人物路径', description: '原子设置某 Shot 的人物三维空间运动；params: { shotId, elementId, points:[{x,y,z},...], startFrame?, endFrame?, motion?, interpolation?, orientToPath? }。路径点保留真实 Y 高度，可用于台阶、坡道和不同高度的平台，不要把所有 y 强制写成 0。' },
+    { id: 'set-camera-constraint', label: '设置相机约束', description: '原子设置自由/注视/跟随；params: { shotId, mode, targetElementId?, targetOffset?, followOffset? }' },
+    { id: 'set-camera-keyframe', label: '设置相机关键帧', description: '原子设置相机轨迹关键帧；params: { shotId, frame, position, target, fov?, interpolation? }' },
+    { id: 'apply-scene-draft', label: '应用场景草案', description: '把 Agent 多模态分析得到的基础几何写入导演台；params: { referenceNodeId, draft: { summary, groundColor?, backgroundColor?, elements:[{kind,name,color,placement,transform}] } }。kind 支持 box/wall/cylinder/sphere/floor/platform/stairs/ramp/cone/capsule，最多 40 个；floor/platform/stairs/ramp 分别适合地面、高台、楼梯和斜坡。placement 必须为 ground 或 elevated。transform.scale 是完整宽/高/深；transform.position 是底面锚点而非中心坐标。地面、道路、建筑主体、家具等使用 ground，写入时强制底面落在 y=0（草案里的 position.y 会被忽略）；屋顶、横梁、招牌等确实离地的结构使用 elevated，并用 position.y 指定底面离地高度。' },
+  ],
+})
+
+registerNodeCapabilities({
+  kind: 'image-editor',
+  label: '图片编辑节点',
+  fields: [],
   actions: [],
 })

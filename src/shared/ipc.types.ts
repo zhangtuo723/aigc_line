@@ -168,7 +168,22 @@ export interface CanvasNodeRef {
 }
 
 // Live canvas bridge used by the Agent's Canvas MCP tools.
-export type CanvasNodeKind = 'image' | 'video' | 'audio' | 'upscale' | 'director';
+export type CanvasNodeKind = 'image' | 'image-editor' | 'video' | 'audio' | 'upscale' | 'director';
+
+export interface SaveImageEditRequest {
+  projectId: string;
+  nodeId: string;
+  inputNodeId: string;
+  pngData: ArrayBuffer;
+  width: number;
+  height: number;
+}
+
+export interface SaveImageEditResult {
+  success: boolean;
+  relativePath?: string;
+  error?: string;
+}
 
 export interface CanvasPoint {
   x: number;

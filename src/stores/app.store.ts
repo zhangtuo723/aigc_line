@@ -42,6 +42,7 @@ interface AppState {
   selectProject: (id: string) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
   sendChatMessage: (content: string, attachments?: ChatMessage['attachments']) => Promise<void>;
+  sendScopedAgentMessage: (content: string, nodeRefs: CanvasNodeRef[]) => Promise<void>;
   loadChatHistory: () => Promise<void>;
 }
 
@@ -234,6 +235,34 @@ export const useAppStore = create<AppState>((set, get) => ({
           : {}),
       }));
       throw err;
+    }
+  },
+
+  sendScopedAgentMessage: async (content, nodeRefs) => {
+    const { currentProject, agentThinkingByProject } = get();
+    if (!currentProject) throw new Error('当前项目不可用');
+    if (agentThinkingByProject[currentProject.id]) throw new Error('Agent 正在处理其他任务，请等待当前回合结束');
+    const message: ChatMessage = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      content,
+      timestamp: Date.now(),
+      nodeRefs,
+    };
+    set((state) => ({
+      messages: [...state.messages, message],
+      agentThinkingByProject: { ...state.agentThinkingByProject, [currentProject.id]: true },
+    }));
+    try {
+      await electronAPI.sendChatMessage(currentProject.id, message);
+    } catch (error) {
+      set((state) => ({
+        agentThinkingByProject: { ...state.agentThinkingByProject, [currentProject.id]: false },
+        ...(state.currentProject?.id === currentProject.id
+          ? { messages: state.messages.filter((item) => item.id !== message.id) }
+          : {}),
+      }));
+      throw error;
     }
   },
 }));

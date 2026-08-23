@@ -68,6 +68,7 @@ export function buildCanvasOverview(
 ): CanvasOverview {
   const countsByKind: Record<CanvasNodeKind, number> = {
     image: 0,
+    'image-editor': 0,
     video: 0,
     audio: 0,
     upscale: 0,

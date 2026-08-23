@@ -6,7 +6,7 @@
 
 AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 无限画布、Three.js 3D 导演台和 ComfyUI 生成管线整合在一个项目工作区里，用于 AI 分镜视频创作。用户在聊天里让 Agent 创建“参考图片 → 视频”节点链，在画布上连边、调参、触发生成；生成结果落盘到项目目录并回显到节点。生成片段直接由 video 节点承载，片段内生成 Shot 仍只存在于提示词时间线中；`director` 节点另有用于白模预演的可编辑 Shot/机位工程。
 
-技术栈：Electron + Vite + React 19 + TypeScript + Tailwind CSS 4 + @xyflow/react（画布）+ Three.js / React Three Fiber（3D 导演台）+ zustand（状态）+ @anthropic-ai/claude-agent-sdk（Agent）+ zod（工具入参校验）。包管理用 pnpm。
+技术栈：Electron + Vite + React 19 + TypeScript + Tailwind CSS 4 + @xyflow/react（画布）+ Excalidraw（图片编辑台）+ Three.js / React Three Fiber（3D 导演台）+ zustand（状态）+ @anthropic-ai/claude-agent-sdk（Agent）+ zod（工具入参校验）。包管理用 pnpm。
 
 ## 目录结构
 
@@ -28,7 +28,7 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 
 | `electron/main/services/google-network.service.ts` | Google API 网络层：使用 Electron 网络栈、可选独立 HTTP/HTTPS/SOCKS 代理及可读网络错误 |
 | `electron/main/services/qwen-video-analysis.service.ts` | 通用 Qwen 视频分析：接受项目内视频路径或公开 HTTP(S) URL，顺序扫描完整画面与音轨，按自由要求给出带时间证据、事实/转写/推断边界和不确定性的报告 |
 | `electron/main/services/project.store.ts` | 项目持久化：清单、追加式 JSONL 聊天事件日志、会话 id、画布快照（存项目目录下） |
-| `electron/main/services/project-media.service.ts` | 项目媒体资产：把本地图片/视频/音频复制到 `uploads/`，保存导演台构图与预演视频到 `generated/director-stills/`、`generated/director-videos/`，扫描 `generated/` 与 `uploads/` 供资产面板使用 |
+| `electron/main/services/project-media.service.ts` | 项目媒体资产：把本地图片/视频/音频复制到 `uploads/`，保存导演台构图、预演视频与图片编辑导出到 `generated/director-stills/`、`generated/director-videos/`、`generated/image-edits/`，扫描 `generated/` 与 `uploads/` 供资产面板使用 |
 | `electron/main/services/settings.service.ts` | 应用设置：ComfyUI 地址、Agent API、token（safeStorage 加密） |
 | `electron/main/services/message-hub.ts` | 主进程内部事件总线（Agent 事件 → 渲染进程推送） |
 | `electron/preload/index.ts` | preload：`window.electronAPI` 的唯一出处，渲染进程只能用它访问主进程 |
@@ -36,10 +36,11 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 
 | `src/shared/ipc.types.ts` | 全部 IPC 请求/响应类型 + `CanvasNodeKind` + 节点 data 结构 |
 | `src/shared/ipc.channels.ts` | IPC 通道名常量（唯一定义处） |
 | `src/shared/node-capabilities.ts` | 节点能力注册表：每种节点可读写哪些字段、可调用哪些动作（Agent 通过它发现能力） |
-| `src/shared/director.types.ts` / `director-schema.ts` | 3D 导演台可序列化工程类型及共享严格 Zod schema：元素、Transform、Shot、机位关键帧与 IPC 结果 |
+| `src/shared/director.types.ts` / `director-schema.ts` | 3D 导演台 v2 可序列化工程类型及共享严格 Zod schema：元素、Transform、Shot、人物路径、相机关键帧/跟随约束与 IPC 结果 |
 | `src/components/CanvasArea.tsx` | 画布核心：节点渲染、连线、工具栏、生成动作、canvas command 处理（agent 操作画布的入口） |
 | `src/components/canvas-capabilities.ts` | 内置节点 kind 的能力声明（在这里注册新节点类型） |
-| `src/features/director/` | 3D 导演台：白模/道具编辑、多机位、Shot 快照、构图截图与工程校验 |
+| `src/features/director/` | 3D 导演台：白模/道具编辑、人物路径、多机位与跟拍约束、Shot 快照、构图截图与工程校验 |
+| `src/features/image-editor/` | 图片编辑台：按连线载入图片到全屏 Excalidraw，多选素材右键导出 PNG 并回写画布输出节点 |
 | `src/components/` | 其他 UI：聊天面板、artifact 渲染、更新弹窗等 |
 | `src/pages/` | 三个页面：HomePage（项目列表）、ProjectPage（工作区）、SettingsPage |
 | `src/stores/app.store.ts` | zustand 全局状态（当前项目、artifacts 等） |
@@ -62,19 +63,26 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 
   - `environment-reference-generation`：为每个去重后的 `sceneId` 生成无人高机位斜俯视空间全景图，固定布局、出入口、行动路线、材质和主光方向；不生成普通平视图、垂直鸟瞰平面图、二维户型图或多视图拼贴，生成前必须取得用户明确确认。
   - `h3-prompt-writing`：MiniMax H3 官方提示词写作 Skill，负责 T2VA / I2VA / FL2VA / L2VA / Ref2VA 的最终提示词格式、引用标签、时间戳、对白和声音字段；`script-to-drama-video` 提供完整逐片段导演包、片段内 Shot 时间线及真实引用数组顺序，并在 Ref2VA 视频生成或重做时调用它，不自行复制或猜测官方格式。
   - `jianying-draft`：使用 pyJianYingDraft 生成剪映专业版草稿。
-- **画布**：React Flow，缩放/框选/连线/删除；快照防抖自动保存；旧版分镜表以及已废弃的 shot/text 节点自动迁移/清理为 image → video 链，旧文本内容会在目标 prompt 为空时转入直接相连的图片或视频。
-- **3D 导演台**：`director` 节点按需懒加载 Three.js 全屏编辑器；支持演员白模、群众阵列和基础几何道具，移动/旋转/缩放、显隐/锁定、人物姿势、多机位、导演/机位视角、FOV/Roll、16:9 / 9:16 / 4:3 / 1:1 画幅、24fps Shot 工程和站位快照。导演视角选中机位后复用 TransformControls：移动直接修改当前帧摄影机位置，旋转按摄影机前向量修改 target 并保留 Roll，拖动结束时一次性写入当前帧关键帧。镜头时长决定时间线终点；可播放/暂停、逐帧拖动、跳转关键帧，并在任意帧新增、更新或删除相机关键帧，位置/目标/FOV 按 hold/linear/smooth/ease-in/ease-out 插值，缩短时长会清理越界关键帧。工程直接随画布节点持久化并通过共享 schema 校验，损坏快照自动归一化；切换/保存前提交当前 Shot，元素增删和锁定保持跨 Shot 一致。拍摄或导出期间冻结编辑、强制保留地面网格并复用同一画幅裁切矩形；PNG 构图安全保存到 `generated/director-stills/` 并创建 `readOnly: true` 的 `image` 节点，24fps WebM 预演保存到 `generated/director-videos/` 并创建 `readOnly: true` 的 `video` 节点。两类输出均与导演节点连线，可预览/播放、移动、连线、引用和删除，但不能修改内容或执行生成动作；每个异步阶段都要拒绝项目切换或源节点消失后的写回。
+- **画布**：React Flow，缩放/框选/连线/删除；快照防抖自动保存；支持 `image-editor` 图片编辑节点。旧版分镜表以及已废弃的 shot/text 节点自动迁移/清理为 image → video 链，旧文本内容会在目标 prompt 为空时转入直接相连的图片或视频。
+- **Excalidraw 图片编辑台**：严格读取连入 `image-editor` target 的、已有 `sourcePath` 的 image 节点，所有连接图片作为可选择、移动、缩放和旋转的普通 Excalidraw 图片元素同时载入全屏工作区，并可叠加画笔、图形、箭头和文字。编辑器不提供右上角整图保存；用户框选或 Shift 多选元素后右键“导出所选素材”，将所选元素合成为 PNG 并安全保存到 `generated/image-edits/`，随后在外部画布创建只读 image 节点和 `image-editor → image` 输出连线。同一会话允许重复导出多个结果；PNG 写回前必须复核项目、编辑节点和至少一个输入图片仍存在，并校验 PNG 头、IEND、真实尺寸、50MB 大小上限与 8192px 边长上限。画布快照不得写入 Excalidraw 图片 data URL。
+- **3D 导演台**：`director` 节点按需懒加载 Three.js 全屏编辑器；v2 工程支持演员白模、群众阵列，以及立方体、球体、圆柱、墙体、地面、平台、六级楼梯、楔形斜坡、圆锥和胶囊体基础搭景素材，全部可移动/旋转/缩放、显隐和锁定。人物支持姿势、多机位、导演/机位视角、FOV/Roll、16:9 / 9:16 / 4:3 / 1:1 画幅、24fps Shot 工程和站位快照。演员可在地面或基础几何模型表面点击绘制 Shot 内 XYZ 空间路径，沿三轴拖拽控制点、切换折线/平滑插值，并设置起止帧、行走/奔跑及自动朝向；底部人物轨道、播放、时间线拖动和 WebM 导出均按帧确定性采样三维人物位置与白模步态。导演视角显示当前 Shot 的最终相机运动轨迹；相机除自由关键帧外支持锁定注视演员和按演员朝向保持局部偏移的跟随模式，人物先采样、相机约束后求值。Agent 除更新完整 `directorProject` 外，可通过 `InvokeNodeAction` 的 `add-element`、`add-shot`、`set-actor-path`、`set-camera-constraint`、`set-camera-keyframe` 原子修改导演台。导演视角选中自由机位后复用 TransformControls：移动修改当前帧摄影机位置，旋转修改 target 并保留 Roll，拖动结束时一次性写入关键帧。镜头时长决定时间线终点；缩短时长会同时裁剪相机关键帧与人物路径范围。工程随画布节点持久化并通过共享严格 schema 和语义校验；旧 v1 工程不迁移，加载时直接回退为新的 v2 默认场景。拍摄或导出期间冻结编辑、强制保留地面网格并复用同一画幅裁切矩形；PNG 构图与 24fps WebM 预演分别安全保存并创建相连的只读图片/视频节点，每个异步阶段都要拒绝项目切换或源节点消失后的写回。
 - **节点显示尺寸**：`image` / `video` 节点使用 620px 宽媒体卡，预览区按所选画幅自动计算高度，prompt 输入框最小高度为 140px；图片/视频工作流选择器使用加宽触发框和下拉菜单以完整展示模型名称与类型标签；全模态参考轨保留图片/视频/音频数量显示和上限校验，但不再额外显示引用标签说明框。
-- **3D 导演台人物白模**：人物双脚的鞋头固定指向模型正面，脸部正面带有眼镜和嘴巴标识，用于区分正反朝向；“单膝跪地”会降低骨盆，以一条屈膝承重腿和一条膝盖落地、小腿后伸的结构表现，不得退化成双腿悬空的坐姿。
+- **3D 导演台默认工程**：新建 director 工程的元素清单为空，不预置演员、群众或几何道具；仍保留一个默认 Shot/机位，供时间线、机位视角、截图和导出使用。损坏或不支持版本回退时也生成同样的空元素工程。
+- **3D 导演台素材工具栏**：演员、群众和全部基础几何的添加入口不占用左侧栏；导演视角下统一放在视口底部、时间线上方的横向悬浮工具栏，按“人物 / 常用几何 / 建筑与路径表面”分隔。工具栏允许横向滚动以适配窄视口，拍摄/导出冻结期间禁用；机位视角隐藏，避免与机位移动提示重叠。左侧栏只保留连线参考图、Agent 搭景要求和场景清单。
+- **3D 导演台自动保存**：编辑器内元素、Shot、人物路径、相机与场景设置变更后 600ms 防抖写回 director 节点，再由画布快照机制落盘；Header 显示等待/保存中/已自动保存/错误状态。工程语义校验失败时禁止自动保存。原“取消”按钮改为“关闭”；关闭、显式“保存并返回画布”或提交参考图 Agent 搭景前必须同步刷新最后一次草稿，避免防抖窗口内丢失修改。
+- **3D 导演台物体激活与变换隔离**：导演视角中的场景元素只允许双击模型激活，单击只拦截当前射线且不得改变选中；只有已激活元素才显示 TransformControls 并可移动、旋转或缩放，顶部工具条显示“双击场景物体激活”或当前激活名称。元素列表中的明确点击仍可直接激活，人物路径绘制和路径点选择仍使用单击。TransformControls 开始拖动时锁定当前元素 ID并重新确认其选中状态，拖动结束才解除；锁定期间，相邻或后方模型的重叠射线命中以及 Canvas `onPointerMissed` 均不得切换或清空选中。
+- **3D 导演台人物白模**：主演员通过 `actorModelId` 走可替换模型注册层，当前 `director-rig-v1` 使用 `public/models/ue-mannequin-retopology.glb` 的真实 SkinnedMesh/骨骼与 `SkeletonUtils.clone` 实例隔离，`lightweight-v1` 是适合远景、群众和加载失败兜底的程序化白模；群众创建时固定优先轻量模型。GLB 原作者和 Sketchfab Standard 资产许可必须随 `public/models/ue-mannequin-retopology.license.txt` 与同目录 README 保留，不能把项目源码的 MIT 许可误用于模型。人物支持 `standard/heavy/slim/short/tall` 五种非等比体型，骨骼模型通过骨盆、脊柱、锁骨、四肢和头骨缩放实现，轻量模型通过独立身体比例实现，不能用统一缩放冒充体型。动作支持自然站立、行走、坐姿、抱臂、指向、单膝跪地、叉腰、挥手、举手、蹲下、前倾和回头；两种模型共用动作语义，路径播放仍以行走/奔跑步态覆盖静态动作。轻量白模双脚鞋头固定指向模型正面，脸部正面带眼镜和嘴巴标识；“单膝跪地”必须降低骨盆并表现一条承重腿和一条落地膝。模型注册与体型参数集中在 `src/features/director/actor-model.ts`，GLB 骨骼应用在 `RiggedActorModel.tsx`，不得改变持久化 `actorModelId/bodyType` 语义。
+- **3D 导演台参考图搭景**：参考图来源严格等于连入导演台 target 的、有 `sourcePath` 输出的 image 节点，不扫描全画布，也不接受导演台指向图片的反向出边；编辑器直接显示连接图片的预览与名称，多图时点击缩略图选择，断开连接后立即移除。提交时保存当前工程，再向当前项目 Agent 会话发送带导演台/图片精确节点引用的可见消息；若 Agent 正忙则拒绝提交。Agent 用 GetCanvasNode 取得项目内 `sourcePath`，再用 Read 和当前多模态模型理解图片，不调用独立视觉模型；结果通过 `apply-scene-draft` 原子动作写入。共享 schema 只接受最多 40 个 `box/wall/cylinder/sphere/floor/platform/stairs/ramp/cone/capsule`、严格 Transform、十六进制颜色以及必填的 `ground/elevated` placement。基础几何使用底面锚点：`scale.y` 是完整高度，`position.y` 是底面离地高度；ground 元素在 mutation 层强制归零，避免模型按中心坐标理解导致悬浮，只有屋顶、横梁、招牌等真实离地结构使用 elevated 并保留高度。相同 `referenceNodeId` 重做时只替换其未锁定几何；存在锁定几何时明确报错，保留演员、其他参考图几何、手工道具和机位。
 - **媒体上传与资产库**：画布左侧独立工具栏提供“上传”和“资产”按钮。上传可多选本地图片、视频、音频，文件复制到当前项目 `uploads/<类型>/` 后自动创建对应节点；资产面板扫描当前项目 `generated/` 与 `uploads/` 下的可预览媒体，支持按类型筛选、刷新，并可拖到画布落点创建节点。媒体文件始终通过 `workspace://<projectId>/...` 预览。
 - **前端隔离与异步状态**：HTML Artifact iframe 不得同时启用脚本与同源权限，当前使用无同源权限的 sandbox；画布快照加载和图片/视频/放大结果回写必须复核发起时的项目，防止切换项目后串写。Agent 运行状态按 `projectId` 保存，切回后台运行项目时仍能显示状态和停止按钮。ComfyUI 工作流列表在渲染进程共享缓存，避免每个节点重复 IPC 查询。
 - **画布写入语义**：Canvas MCP 写工具按节点 ID/字段直接应用，采用最后写入者生效（Last Write Wins），不接收或校验全局画布版本号；仍校验节点存在性、ID 唯一性、字段能力和连线合法性。
 - **节点类型**（`CanvasNodeKind`）：
   - `image` 图片：ComfyUI 的 Krea 2 Turbo、Z-Image Turbo 当前仅文生图；Nano Banana 2 / Pro 支持最多 14 张有序参考图，Doubao-Seedream-5.0-pro / lite 支持最多 10 张有序参考图；画幅支持 16:9 / 9:16 / 1:1 / 4:3，全部模型使用 2K 输出，ComfyUI 图片工作流直接保存 VAE 解码结果且不经过 RTX 放大
+  - `image-editor` 图片编辑：把所有连入的有效图片作为普通元素载入 Excalidraw；多选右键导出后创建相连的只读 image 输出节点，编辑节点自身不保存合成图或 base64 图片数据
   - `video` 视频：MiniMax H3 文生视频 / 首尾帧 / 全模态参考（图片 9 + 视频 3 + 音频 3，提示词用 `<Picture n>` 等引用），全模态参考可选择标准 20 步或带 Turbo 8 步 LoRA 的加速工作流；也支持火山方舟 Agent Plan Doubao Seedance 2.0 文生视频与全模态参考，提示词用“图片 n / 视频 n / 音频 n”引用素材，默认 720p 并生成同步音频
   - `audio` 音频：导入本地音频并预览
   - `upscale` 视频放大：RTX Video Super Resolution，连入视频节点作为输入（多输入可点选，`inputNodeId`），倍数 2x/3x/4x，质量 FAST/MEDIUM/HIGH/ULTRA，帧率经 VHS_VideoInfo 自动跟随源视频
-  - `director` 3D 导演台：保存可序列化 `directorProject`，包含稳定元素 ID、Transform、姿势、可锁定 Shot、相机位置/目标/FOV/Roll、24fps 关键帧和各 Shot 的人物站位快照；最近构图路径写入 `sourcePath`
+  - `director` 3D 导演台：保存严格 v2 的可序列化 `directorProject`，包含稳定元素 ID、Transform、姿势、可锁定 Shot、人物路径、相机位置/目标/FOV/Roll、24fps 关键帧、注视/跟随人物约束和各 Shot 站位快照；最近构图路径写入 `sourcePath`
 - **图片/视频生成集成**：ComfyUI 工作流模板在 `resources/comfyui-workflows/`，`comfyui.service.ts` 注入参数 → 排队 → 轮询 history → 下载结果；默认 ComfyUI 文生图为 `krea2-turbo-t2i`，使用 `krea2_turbo_fp8_scaled.safetensors` 和 8 步 Euler/simple 采样，Krea 2 Turbo 与 Z-Image Turbo 均直接以标准 2K 尺寸生成并保存，图片工作流不包含 RTX 放大节点；旧 Flux2 Klein 文生图/图生图工作流已移除且旧默认设置自动迁移到 Krea 2 Turbo。`minimax-h3-r2v` 是标准全模态参考，`minimax-h3-r2v-turbo` 是加载 `minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors` 的 8 步加速版本，两者共用相同参考轨语义；MiniMax H3 视频使用 1024 档，16:9 / 9:16 / 4:3 / 1:1 分别为 1024×576 / 576×1024 / 1024×768 / 1024×1024。火山方舟 `seedance-2.0` 工作流使用模型 `doubao-seedance-2-0-260128`，通过 `/contents/generations/tasks` 异步提交与轮询，支持 5/10/15 秒文生视频和最多 9 图 + 3 视频 + 3 音频的项目内参考素材，默认 720p、同步音频、无水印，完成后下载到 `generated/videos/`。ComfyUI/Google 图片使用标准 2K 映射：16:9 为 2048×1152、9:16 为 1152×2048、4:3 为 2048×1536、1:1 为 2048×2048；Seedream 使用官方 2K 参考尺寸 2816×1584、1584×2816、2368×1776、2048×2048。Google Gemini 图片 API 由 `google-image.service.ts` 调用 Nano Banana 2 / Pro；火山方舟图片 API 由 `seedream-image.service.ts` 调用 Doubao-Seedream-5.0-pro / lite；两者固定生成 2K 图片并支持项目内参考图。
 - **设置页**：宽屏使用基础服务双栏、AI 云服务三栏布局，同一排的配置卡片等宽等高；可配置 ComfyUI 地址、Agent API URL/token、Google AI Studio API key 与可选代理、火山方舟 Seedream/Seedance 普通 API 或 Agent Plan Base URL/key、Qwen3.5-Omni Plus API URL/key 和默认生图模型，并提供 ComfyUI/Google AI/Qwen/方舟连接测试。方舟 Base URL 会自动移除用户误粘贴的一个或多个 `/images/generations` 后缀。Qwen/Google Key 使用 safeStorage；方舟 Key 按用户要求明文保存在本机 `settings.json`。所有配置统一使用页面顶部“保存配置”，方舟配置保存后再次读取主进程设置确认落盘，并在卡片内显示“已保存”与清除选项。
 - **自动更新**：electron-updater。
@@ -133,6 +141,10 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 
 - **导演台机位视角自由控制**：机位视角下 `W/S` 沿镜头朝向前后移动，`A/D` 沿镜头右向量左右移动，`Space/Ctrl` 按世界 Y 轴升降；按住鼠标左键拖动修改 yaw/pitch。连续控制期间只更新临时机位，松开全部移动键或鼠标时才一次性写入当前帧关键帧。
 
 - **导演台变换快捷键**：场景元素的移动/旋转/缩放工具分别使用 `V` / `R` / `Z`；缩放禁止再使用 `S`，因为机位视角将 `S` 固定用于后退。
+
+- **导演台人物路径与相机约束**：人物路径属于具体 Shot，每个演员最多一条，使用绝对 XYZ 世界坐标路径点、起止帧、linear/smooth、walk/run 与 `orientToPath`。路径绘制时，透明地面提供 `Y=0` 落点，全部非人物基础搭景素材的可见表面直接使用 R3F 世界交点，从而可沿楼梯、斜坡和高台取点；路径控制点 TransformControls 开放 X/Y/Z 三轴，并在拖动结束时扣除可视标记偏移后提交真实坐标，右侧同时提供精确 XYZ 数值编辑。刚开始绘制但未添加有效第二点就点击完成时，必须删除重复占位点轨道，不能留下阻止工程保存的无效路径。平滑路径先确定性展开为三维 Catmull-Rom 采样折线，再按三维弧长恒速采样，禁止累计上一帧位移。相机求值顺序固定为人物 Transform → 自由相机曲线 → look-at/follow 约束；follow 偏移位于人物局部坐标，轨迹辅助线显示约束后的最终机位。删除演员时必须级联删除其路径，并把引用该演员的相机约束重置为 free；缩短 Shot 时裁剪人物路径结束帧。
+
+- **导演工程版本**：当前严格 schema 为 `version: 2`，不兼容也不迁移 v1；旧版本或结构损坏输入统一由 `normalizeDirectorProject` 回退为新的 v2 默认场景。
 
 - **TransformControls 绑定对象**：必须用 `object={objectRef}` 直接绑定带 Transform 的场景元素；不要把已定位元素作为 children 包进 TransformControls 的内部 wrapper，否则实际拖动的是外层、持久化读取的是内层，重新选择元素时会恢复旧位置。
 
