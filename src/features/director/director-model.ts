@@ -6,7 +6,6 @@ import type {
   DirectorCameraKeyframe,
   DirectorElement,
   DirectorElementKind,
-  DirectorElementState,
   DirectorPoseId,
   DirectorProject,
   DirectorSceneDraft,
@@ -53,12 +52,6 @@ export const transform = (
   rotation = vec3(),
   scale = vec3(1, 1, 1),
 ): DirectorTransform => ({ position, rotation, scale })
-
-const elementState = (element: DirectorElement): DirectorElementState => ({
-  transform: clone(element.transform),
-  visible: element.visible,
-  poseId: element.poseId,
-})
 
 export function createDirectorElement(kind: DirectorElementKind, index: number): DirectorElement {
   const actorLike = kind === 'actor' || kind === 'crowd'
@@ -107,7 +100,7 @@ export function createDirectorElement(kind: DirectorElementKind, index: number):
   }
 }
 
-export function createDirectorShot(elements: DirectorElement[], index: number): DirectorShot {
+export function createDirectorShot(index: number): DirectorShot {
   const position = index % 2 === 0 ? vec3(0, 2.3, 7.5) : vec3(4.5, 2, 5.5)
   const target = vec3(0, 1, 0)
   const id = directorId('shot')
@@ -135,14 +128,13 @@ export function createDirectorShot(elements: DirectorElement[], index: number): 
       targetOffset: vec3(0, 1.45, 0),
       followOffset: vec3(0, 1.8, -4),
     },
-    elementStates: Object.fromEntries(elements.map((element) => [element.id, elementState(element)])),
     locked: false,
   }
 }
 
 export function createDefaultDirectorProject(name = '未命名导演场景'): DirectorProject {
   const elements: DirectorElement[] = []
-  const shot = createDirectorShot(elements, 0)
+  const shot = createDirectorShot(0)
   return {
     version: 2,
     fps: 24,
@@ -158,54 +150,19 @@ export function createDefaultDirectorProject(name = '未命名导演场景'): Di
   }
 }
 
-export function snapshotElements(elements: DirectorElement[]): Record<string, DirectorElementState> {
-  return Object.fromEntries(elements.map((element) => [element.id, elementState(element)]))
-}
-
-export function applyShotElementStates(elements: DirectorElement[], shot: DirectorShot): DirectorElement[] {
-  return elements.map((element) => {
-    const state = shot.elementStates[element.id]
-    return state ? {
-      ...element,
-      transform: clone(state.transform),
-      visible: state.visible,
-      poseId: state.poseId ?? element.poseId,
-    } : element
-  })
-}
-
-/** Persist the live blocking into the active Shot before any Shot transition or save. */
-export function snapshotActiveShot(project: DirectorProject): DirectorProject {
-  const active = project.shots.find((shot) => shot.id === project.activeShotId)
-  if (!active || active.locked) return project
+export function activateDirectorShot(project: DirectorProject, shotId: string): DirectorProject {
+  const target = project.shots.find((shot) => shot.id === shotId)
+  if (!target) return project
   return {
     ...project,
-    shots: project.shots.map((shot) => shot.id === active.id
-      ? { ...shot, elementStates: snapshotElements(project.elements) }
-      : shot),
-  }
-}
-
-export function activateDirectorShot(project: DirectorProject, shotId: string): DirectorProject {
-  const committed = snapshotActiveShot(project)
-  const target = committed.shots.find((shot) => shot.id === shotId)
-  if (!target) return committed
-  return {
-    ...committed,
     activeShotId: target.id,
-    elements: applyShotElementStates(committed.elements, target),
   }
 }
 
 export function addDirectorElement(project: DirectorProject, element: DirectorElement): DirectorProject {
-  const state = elementState(element)
   return {
     ...project,
     elements: [...project.elements, element],
-    shots: project.shots.map((shot) => ({
-      ...shot,
-      elementStates: { ...shot.elementStates, [element.id]: clone(state) },
-    })),
   }
 }
 
@@ -220,9 +177,6 @@ export function updateDirectorElement(
   return {
     ...project,
     elements,
-    shots: project.shots.map((shot) => shot.id === project.activeShotId && !shot.locked
-      ? { ...shot, elementStates: { ...shot.elementStates, [next.id]: elementState(next) } }
-      : shot),
   }
 }
 
@@ -233,13 +187,11 @@ export function removeDirectorElement(project: DirectorProject, elementId: strin
     ...project,
     elements: project.elements.filter((element) => element.id !== elementId),
     shots: project.shots.map((shot) => {
-      const { [elementId]: _removed, ...elementStates } = shot.elementStates
       const cameraConstraint = shot.cameraConstraint.targetElementId === elementId
         ? { ...shot.cameraConstraint, mode: 'free' as const, targetElementId: undefined }
         : shot.cameraConstraint
       return {
         ...shot,
-        elementStates,
         actorTracks: shot.actorTracks.filter((track) => track.elementId !== elementId),
         cameraConstraint,
       }
@@ -387,17 +339,42 @@ export function directorActorPathPoints(track: DirectorActorTrack, samplesPerSeg
   return result
 }
 
+interface DirectorActorPathGeometry {
+  sourcePoints: DirectorVec3[]
+  interpolation: DirectorActorTrack['interpolation']
+  points: DirectorVec3[]
+  lengths: number[]
+  totalLength: number
+}
+
+const actorPathGeometryCache = new WeakMap<DirectorActorTrack, DirectorActorPathGeometry>()
+
+function directorActorPathGeometry(track: DirectorActorTrack): DirectorActorPathGeometry {
+  const cached = actorPathGeometryCache.get(track)
+  if (cached?.sourcePoints === track.points && cached.interpolation === track.interpolation) return cached
+  const points = directorActorPathPoints(track)
+  const lengths = points.slice(1).map((point, index) => distance3(points[index], point))
+  const geometry = {
+    sourcePoints: track.points,
+    interpolation: track.interpolation,
+    points,
+    lengths,
+    totalLength: lengths.reduce((sum, length) => sum + length, 0),
+  }
+  actorPathGeometryCache.set(track, geometry)
+  return geometry
+}
+
 /** Samples a deterministic, constant-speed position along a persisted actor polyline. */
 export function sampleDirectorActorPosition(track: DirectorActorTrack, frame: number): DirectorVec3 {
-  const points = directorActorPathPoints(track)
+  const { points, lengths, totalLength } = directorActorPathGeometry(track)
   if (points.length === 0) return vec3()
   if (points.length === 1) return clone(points[0])
   const duration = Math.max(1, track.endFrame - track.startFrame)
-  const amount = Math.min(1, Math.max(0, (Math.floor(frame) - track.startFrame) / duration))
-  const lengths = points.slice(1).map((point, index) => distance3(points[index], point))
-  const total = lengths.reduce((sum, length) => sum + length, 0)
-  if (total <= 1e-6) return clone(points[0])
-  let remaining = amount * total
+  const safeFrame = Number.isFinite(frame) ? frame : track.startFrame
+  const amount = Math.min(1, Math.max(0, (safeFrame - track.startFrame) / duration))
+  if (totalLength <= 1e-6) return clone(points[0])
+  let remaining = amount * totalLength
   for (let index = 0; index < lengths.length; index += 1) {
     const length = lengths[index]
     if (remaining <= length || index === lengths.length - 1) {
@@ -506,12 +483,12 @@ export function sampleDirectorConstrainedCamera(
   }
 }
 
-/** Samples the persisted camera curve at an exact 24fps playhead frame. */
+/** Samples the persisted camera curve at an integer or fractional 24fps timeline position. */
 export function sampleDirectorCamera(shot: DirectorShot, frame: number): DirectorCameraView {
   const keyframes = [...shot.cameraKeyframes].sort((a, b) => a.frame - b.frame)
   const fallback = { position: clone(shot.position), target: clone(shot.target), fov: shot.fov }
   if (keyframes.length === 0) return fallback
-  const clampedFrame = Math.max(0, Math.floor(frame))
+  const clampedFrame = Math.max(0, Number.isFinite(frame) ? frame : 0)
   const rightIndex = keyframes.findIndex((keyframe) => keyframe.frame >= clampedFrame)
   if (rightIndex === 0) return clone(keyframes[0])
   if (rightIndex < 0) return clone(keyframes[keyframes.length - 1])
@@ -582,7 +559,17 @@ export function removeDirectorCameraKeyframe(
  * falls back to a fresh document; valid input is cleaned up semantically.
  */
 export function normalizeDirectorProject(value: unknown, fallbackName = '未命名导演场景'): DirectorProject {
-  const parsed = directorProjectSchema.safeParse(value)
+  const candidate = value && typeof value === 'object' && Array.isArray((value as Record<string, unknown>).shots)
+    ? {
+        ...(value as Record<string, unknown>),
+        shots: ((value as Record<string, unknown>).shots as unknown[]).map((shot) => {
+          if (!shot || typeof shot !== 'object') return shot
+          const { elementStates: _legacyElementStates, ...rest } = shot as Record<string, unknown>
+          return rest
+        }),
+      }
+    : value
+  const parsed = directorProjectSchema.safeParse(candidate)
   if (!parsed.success) return createDefaultDirectorProject(fallbackName)
   const source = parsed.data as DirectorProject
   const elementIds = new Set<string>()
@@ -643,10 +630,6 @@ export function normalizeDirectorProject(value: unknown, fallbackName = '未命�
       cameraKeyframes: normalizedKeyframes,
       actorTracks,
       cameraConstraint,
-      elementStates: Object.fromEntries(elements.map((element) => [
-        element.id,
-        clone(shot.elementStates[element.id] ?? elementState(element)),
-      ])),
     }
   })
   if (shots.length === 0) return createDefaultDirectorProject(source.name || fallbackName)
@@ -697,9 +680,6 @@ export function validateDirectorProject(project: DirectorProject): string[] {
     shotIds.add(shot.id)
     if (shot.durationSec <= 0) issues.push(`${shot.name} 的时长无效`)
     if (shot.fov < 10 || shot.fov > 120) issues.push(`${shot.name} 的 FOV 应为 10–120`)
-    for (const elementId of Object.keys(shot.elementStates)) {
-      if (!ids.has(elementId)) issues.push(`${shot.name} 引用了不存在的元素：${elementId}`)
-    }
     const maxFrame = Math.max(0, Math.ceil(shot.durationSec * project.fps) - 1)
     if (shot.cameraKeyframes.some((keyframe) => keyframe.frame > maxFrame)) {
       issues.push(`${shot.name} 存在超出时长的相机关键帧`)

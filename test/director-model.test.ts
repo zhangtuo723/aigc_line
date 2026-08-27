@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   activateDirectorShot,
   addDirectorElement,
-  applyShotElementStates,
   applyDirectorSceneDraft,
   createDefaultDirectorProject,
   createDirectorElement,
@@ -19,13 +18,13 @@ import {
   sampleDirectorConstrainedCamera,
   sampleDirectorCamera,
   upsertDirectorActorTrack,
-  snapshotElements,
   updateDirectorElement,
   upsertDirectorCameraKeyframe,
   validateDirectorProject,
 } from '../src/features/director/director-model'
 import { directorProjectSchema } from '../src/shared/director-schema'
 import { directorBodyProfile } from '../src/features/director/actor-model'
+import { directorLightweightFootOffset } from '../src/features/director/actor-foot-anchor'
 
 const createProjectWithActor = () => addDirectorElement(
   createDefaultDirectorProject(),
@@ -41,26 +40,21 @@ describe('director project model', () => {
     expect(project.elements).toHaveLength(0)
     expect(project.shots).toHaveLength(1)
     expect(project.activeShotId).toBe(project.shots[0].id)
-    expect(project.shots[0].elementStates).toEqual({})
+    expect('elementStates' in project.shots[0]).toBe(false)
     expect(() => JSON.stringify(project)).not.toThrow()
     expect(validateDirectorProject(project)).toEqual([])
   })
 
-  it('records and restores per-shot blocking without sharing transform references', () => {
-    const project = createDefaultDirectorProject()
-    const thirdActor = createDirectorElement('actor', 2)
-    const elements = [...project.elements, thirdActor]
-    const shot = createDirectorShot(elements, 1)
-    shot.elementStates = snapshotElements(elements)
+  it('migrates legacy per-shot blocking away without discarding the scene', () => {
+    const project = createProjectWithActor()
+    const legacy = structuredClone(project) as typeof project & { shots: Array<(typeof project.shots)[number] & { elementStates: Record<string, unknown> }> }
+    legacy.shots[0].elementStates = { legacy: { transform: project.elements[0].transform, visible: true } }
 
-    const moved = elements.map((element, index) => index === 0
-      ? { ...element, transform: { ...element.transform, position: { x: 99, y: 0, z: 0 } } }
-      : element)
-    const restored = applyShotElementStates(moved, shot)
-
-    expect(restored[0].transform.position.x).not.toBe(99)
-    restored[0].transform.position.x = 42
-    expect(shot.elementStates[restored[0].id].transform.position.x).not.toBe(42)
+    expect(directorProjectSchema.safeParse(legacy).success).toBe(false)
+    const normalized = normalizeDirectorProject(legacy)
+    expect(normalized.elements).toHaveLength(1)
+    expect('elementStates' in normalized.shots[0]).toBe(false)
+    expect(validateDirectorProject(normalized)).toEqual([])
   })
 
   it('reports invalid shot timing and camera ranges', () => {
@@ -81,9 +75,9 @@ describe('director project model', () => {
     expect(validateDirectorProject(normalized)).toEqual([])
   })
 
-  it('commits blocking when switching shots and keeps added elements independent', () => {
+  it('keeps one global element layout when switching shots', () => {
     let project = createProjectWithActor()
-    const secondShot = createDirectorShot(project.elements, 1)
+    const secondShot = createDirectorShot(1)
     project = { ...project, shots: [...project.shots, secondShot] }
     const firstActor = project.elements[0]
     project = updateDirectorElement(project, {
@@ -96,15 +90,11 @@ describe('director project model', () => {
 
     const prop = createDirectorElement('box', project.elements.length)
     project = addDirectorElement(project, prop)
-    expect(project.shots.every((shot) => shot.elementStates[prop.id])).toBe(true)
-    const firstShotId = project.activeShotId
     project = updateDirectorElement(project, {
       ...prop,
       transform: { ...prop.transform, position: { x: 12, y: 0, z: 0 } },
     })
     project = activateDirectorShot(project, secondShot.id)
-    expect(project.elements.find((element) => element.id === prop.id)?.transform.position.x).not.toBe(12)
-    project = activateDirectorShot(project, firstShotId)
     expect(project.elements.find((element) => element.id === prop.id)?.transform.position.x).toBe(12)
   })
 
@@ -127,15 +117,15 @@ describe('director project model', () => {
     })
 
     project = removeDirectorElement(project, actor.id)
-    expect(project.shots.every((item) => !(actor.id in item.elementStates))).toBe(true)
+    expect(project.elements.some((item) => item.id === actor.id)).toBe(false)
   })
 
   it('reports semantic dangling references and invalid active shots', () => {
     const project = createProjectWithActor()
-    project.shots[0].elementStates.ghost = structuredClone(project.shots[0].elementStates[project.elements[0].id])
+    project.shots[0].cameraConstraint = { ...project.shots[0].cameraConstraint, mode: 'look-at', targetElementId: 'ghost' }
     project.activeShotId = 'missing-shot'
     expect(validateDirectorProject(project)).toEqual(expect.arrayContaining([
-      expect.stringContaining('不存在的元素'),
+      expect.stringContaining('相机跟随目标无效'),
       '当前 Shot 不存在',
     ]))
   })
@@ -160,6 +150,12 @@ describe('director project model', () => {
     expect(sampleDirectorCamera(shot, 12)).toMatchObject({
       position: { x: start.x + 5, y: start.y, z: start.z },
       fov: 55,
+    })
+    const fractionalAmount = 12.5 / 24
+    const smoothAmount = fractionalAmount * fractionalAmount * (3 - 2 * fractionalAmount)
+    expect(sampleDirectorCamera(shot, 12.5)).toMatchObject({
+      position: { x: start.x + 10 * smoothAmount, y: start.y, z: start.z },
+      fov: 45 + 20 * smoothAmount,
     })
 
     project = removeDirectorCameraKeyframe(project, shotId, 24)
@@ -200,6 +196,7 @@ describe('director project model', () => {
     let shot = project.shots[0]
     const track = shot.actorTracks[0]
     expect(sampleDirectorActorPosition(track, 12).x).toBeCloseTo(start.x + 5)
+    expect(sampleDirectorActorPosition(track, 12.5).x).toBeCloseTo(start.x + (10 * 12.5) / 24)
     expect(sampleDirectorActorTransform(shot, actor, 12).rotation.y).toBeCloseTo(90)
 
     shot = {
@@ -237,6 +234,22 @@ describe('director project model', () => {
     const saved = JSON.parse(JSON.stringify(project))
     expect(normalizeDirectorProject(saved).elements[0]).toMatchObject({ bodyType: 'heavy', poseId: 'wave' })
     expect(directorProjectSchema.safeParse(saved).success).toBe(true)
+  })
+
+  it('keeps the lightweight mannequin shoe sole on the actor root across body types and poses', () => {
+    const standard = directorLightweightFootOffset({}, directorBodyProfile('standard').legLength)
+    const short = directorLightweightFootOffset({}, directorBodyProfile('short').legLength)
+    const walking = directorLightweightFootOffset({
+      leftLeg: [0.45, 0, 0],
+      rightLeg: [-0.45, 0, 0],
+      leftKnee: [0.2, 0, 0],
+      rightKnee: [0.05, 0, 0],
+    }, directorBodyProfile('standard').legLength)
+
+    expect(standard).toBeCloseTo(0.104, 3)
+    expect(short).toBeCloseTo(-0.1508, 3)
+    expect(Number.isFinite(walking)).toBe(true)
+    expect(walking).not.toBe(standard)
   })
 
   it('samples actor paths through XYZ space for stairs and raised platforms', () => {
@@ -312,7 +325,6 @@ describe('director project model', () => {
     expect(project.elements.some((element) => element.id === manual.id)).toBe(true)
     expect(project.elements.filter((element) => element.referenceNodeId === 'image-a').map((element) => element.name)).toEqual(['新墙'])
     expect(project.elements.filter((element) => element.referenceNodeId === 'image-b')).toHaveLength(1)
-    expect(project.shots.every((shot) => Object.keys(shot.elementStates).length === project.elements.length)).toBe(true)
     expect(validateDirectorProject(project)).toEqual([])
   })
 

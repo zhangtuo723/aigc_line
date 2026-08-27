@@ -7,6 +7,7 @@ import {
   Group,
   MeshStandardMaterial,
   Quaternion,
+  Vector3,
   type Material,
   type Object3D,
   type SkinnedMesh,
@@ -199,14 +200,27 @@ export function RiggedActorModel({ color, bodyType = 'standard', poseId = 'stand
   const scene = useMemo(() => cloneSkeleton(gltf.scene) as Group, [gltf.scene])
   const restPose = useMemo(() => captureRestPose(scene), [scene])
 
+  useLayoutEffect(() => { tint(scene, color) }, [color, scene])
+
   useLayoutEffect(() => {
-    tint(scene, color)
     applyRig(scene, restPose, bodyType, dynamicControls(poseId, motionPhase))
+  }, [bodyType, motionPhase, poseId, restPose, scene])
+
+  useLayoutEffect(() => {
     scene.position.y = 0
     scene.updateMatrixWorld(true)
+    scene.traverse((object) => {
+      if (isSkinnedMesh(object)) object.skeleton.update()
+    })
     const bounds = new Box3().setFromObject(scene, true)
-    if (!bounds.isEmpty() && Number.isFinite(bounds.min.y)) scene.position.y -= bounds.min.y
-  }, [bodyType, color, motionPhase, poseId, restPose, scene])
+    const parent = scene.parent
+    if (!bounds.isEmpty() && Number.isFinite(bounds.min.y) && parent) {
+      const parentOriginY = parent.localToWorld(new Vector3()).y
+      const parentScaleY = Math.abs(parent.getWorldScale(new Vector3()).y)
+      scene.position.y += (parentOriginY - bounds.min.y) / Math.max(parentScaleY, 1e-6)
+      scene.updateMatrixWorld(true)
+    }
+  }, [bodyType, height, poseId, restPose, scene])
 
   return <group scale={height / 2.04}><primitive object={scene} /></group>
 }

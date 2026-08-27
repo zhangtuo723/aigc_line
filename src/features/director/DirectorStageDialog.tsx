@@ -1,6 +1,6 @@
-import { Component, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Component, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Canvas, useThree, type ThreeEvent } from '@react-three/fiber'
+import { Canvas, type ThreeEvent } from '@react-three/fiber'
 import { Grid, Line, OrbitControls, PerspectiveCamera, TransformControls } from '@react-three/drei'
 import * as THREE from 'three'
 import type {
@@ -39,8 +39,6 @@ import {
   sampleDirectorActorTransform,
   sampleDirectorConstrainedCamera,
   removeDirectorElement,
-  snapshotActiveShot,
-  snapshotElements,
   updateDirectorElement,
   upsertDirectorActorTrack,
   upsertDirectorCameraKeyframe,
@@ -48,6 +46,7 @@ import {
   vec3,
 } from './director-model'
 import { directorBodyProfile } from './actor-model'
+import { directorLightweightFootOffset, type DirectorMannequinPose } from './actor-foot-anchor'
 import { RiggedActorModel } from './RiggedActorModel'
 
 type ViewMode = 'director' | 'camera'
@@ -85,21 +84,36 @@ const STAGE_ELEMENT_TOOLS: Array<{ kind: DirectorElementKind; label: string; sho
   { kind: 'capsule', label: '添加胶囊体', shortLabel: '胶囊' },
 ]
 
-type MannequinPose = {
-  rootY?: number
-  leftArm?: [number, number, number]
-  rightArm?: [number, number, number]
-  leftForearm?: [number, number, number]
-  rightForearm?: [number, number, number]
-  leftLeg?: [number, number, number]
-  rightLeg?: [number, number, number]
-  leftKnee?: [number, number, number]
-  rightKnee?: [number, number, number]
-  leftFoot?: [number, number, number]
-  rightFoot?: [number, number, number]
+const TIMELINE_HEADER_WIDTH = 112
+
+function formatTimelineTimecode(frame: number, fps: number): string {
+  const safeFps = Math.max(1, Math.round(fps))
+  const safeFrame = Math.max(0, Math.floor(frame))
+  const totalSeconds = Math.floor(safeFrame / safeFps)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  const frames = safeFrame % safeFps
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}:${String(frames).padStart(2, '0')}`
 }
 
-const POSE_ROTATIONS: Record<DirectorPoseId, MannequinPose> = {
+function createTimelineTicks(durationSec: number): Array<{ seconds: number; label: string }> {
+  const safeDuration = Math.max(0, durationSec)
+  const targetStep = safeDuration / 8
+  const step = [0.5, 1, 2, 5, 10, 15, 30, 60].find((candidate) => candidate >= targetStep) ?? 60
+  const ticks = Array.from(
+    { length: Math.floor(safeDuration / step) + 1 },
+    (_, index) => index * step,
+  )
+  if (ticks[ticks.length - 1] !== safeDuration) ticks.push(safeDuration)
+  return ticks.map((seconds) => ({
+    seconds,
+    label: seconds < 60
+      ? `${seconds.toFixed(step < 1 ? 1 : 0)}s`
+      : `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`,
+  }))
+}
+
+const POSE_ROTATIONS: Record<DirectorPoseId, DirectorMannequinPose> = {
   stand: { leftArm: [0, 0, -0.08], rightArm: [0, 0, 0.08] },
   walk: { leftArm: [0.5, 0, -0.08], rightArm: [-0.5, 0, 0.08], leftLeg: [-0.42, 0, 0], rightLeg: [0.42, 0, 0] },
   sit: { leftLeg: [-1.4, 0, 0], rightLeg: [-1.4, 0, 0], leftKnee: [1.35, 0, 0], rightKnee: [1.35, 0, 0] },
@@ -109,7 +123,6 @@ const POSE_ROTATIONS: Record<DirectorPoseId, MannequinPose> = {
   // knee on the floor with its shin trailing behind. Foot counter-rotations
   // keep both shoes readable instead of inheriting the shin angle.
   kneel: {
-    rootY: -0.38,
     leftLeg: [-1, 0, 0],
     leftKnee: [1.9, 0, 0],
     leftFoot: [-0.9, 0, 0],
@@ -124,7 +137,6 @@ const POSE_ROTATIONS: Record<DirectorPoseId, MannequinPose> = {
   wave: { rightArm: [0, 0, 2.5], rightForearm: [-1.25, 0, 0.25], leftArm: [0, 0, -0.08] },
   'hands-up': { leftArm: [0, 0, 2.7], rightArm: [0, 0, -2.7], leftForearm: [0.15, 0, 0], rightForearm: [0.15, 0, 0] },
   crouch: {
-    rootY: -0.42,
     leftLeg: [-0.92, 0, 0.12], rightLeg: [-0.92, 0, -0.12],
     leftKnee: [1.65, 0, 0], rightKnee: [1.65, 0, 0],
   },
@@ -213,7 +225,7 @@ function Mannequin({
   const lightweight = modelId === 'lightweight-v1'
   const basePose = POSE_ROTATIONS[poseId]
   const swing = motionPhase === undefined ? 0.48 : Math.sin(motionPhase * Math.PI * 2) * 0.58
-  const pose: MannequinPose = poseId === 'walk' ? {
+  const pose: DirectorMannequinPose = poseId === 'walk' ? {
     ...basePose,
     leftArm: [-swing, 0, -0.08],
     rightArm: [swing, 0, 0.08],
@@ -222,9 +234,12 @@ function Mannequin({
   } : basePose
   const unit = height / profile.defaultHeightM
   const legLength = profile.legLength
-  const footOffset = Math.max(0.04, 0.91 * legLength - 0.84)
+  // Keep the actor root stable while the gait cycles; per-frame grounding
+  // would move the whole body up and down and read as path jitter.
+  const groundingPose = poseId === 'walk' ? basePose : pose
+  const footOffset = directorLightweightFootOffset(groundingPose, legLength)
   return (
-    <group scale={unit} position={[0, (pose.rootY ?? 0) + footOffset, 0]} rotation={poseId === 'lean' ? [-0.22, 0, 0] : poseId === 'look-back' ? [0, 0.42, 0] : [0, 0, 0]}>
+    <group scale={unit} position={[0, footOffset, 0]} rotation={poseId === 'lean' ? [-0.22, 0, 0] : poseId === 'look-back' ? [0, 0.42, 0] : [0, 0, 0]}>
       <mesh position={[0, 1.58, 0]} scale={[profile.head, profile.head, profile.head]} castShadow>
         <sphereGeometry args={[0.13, 18, 12]} />
         <meshStandardMaterial color="#d8b5a0" roughness={0.82} />
@@ -426,7 +441,7 @@ function SceneElement({
       scale={vector(element.transform.scale)}
       onPointerDown={(event: ThreeEvent<PointerEvent>) => {
         event.stopPropagation()
-        if (onPathPoint) {
+        if (onPathPoint && event.nativeEvent.ctrlKey) {
           onPathPoint(vec3(event.point.x, event.point.y, event.point.z))
         }
       }}
@@ -564,18 +579,22 @@ function CameraPathGuide({ shot, elements, fps }: { shot: DirectorShot; elements
 }
 
 function CameraRig({ view, rollDeg }: { view: { position: DirectorVec3; target: DirectorVec3; fov: number }; rollDeg: number }) {
-  const { camera } = useThree()
-  useEffect(() => {
+  const cameraRef = useRef<THREE.PerspectiveCamera>(null!)
+  // Position, orientation and projection must land in the same commit. A passive
+  // effect lets R3F render one frame with the new position and the old look-at,
+  // which presents as a forward/backward flash during playback.
+  useLayoutEffect(() => {
+    const camera = cameraRef.current
+    if (!camera) return
     camera.position.set(view.position.x, view.position.y, view.position.z)
     camera.up.set(0, 1, 0)
     camera.lookAt(view.target.x, view.target.y, view.target.z)
     camera.rotateZ(THREE.MathUtils.degToRad(rollDeg))
-    if (camera instanceof THREE.PerspectiveCamera) {
-      camera.fov = view.fov
-      camera.updateProjectionMatrix()
-    }
-  }, [camera, rollDeg, view])
-  return null
+    camera.fov = view.fov
+    camera.updateProjectionMatrix()
+    camera.updateMatrixWorld(true)
+  }, [rollDeg, view])
+  return <PerspectiveCamera ref={cameraRef} makeDefault />
 }
 
 function CameraMarker({
@@ -766,6 +785,7 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
   })
   const cameraControlViewRef = useRef<DirectorCameraView | null>(null)
   const currentFrameRef = useRef(0)
+  const playbackRunRef = useRef(0)
   const pressedMoveKeysRef = useRef(new Set<string>())
   const mouseLookRef = useRef({ dragging: false, x: 0, y: 0 })
 
@@ -776,6 +796,10 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
 
   const activeShot = draft.shots.find((shot) => shot.id === draft.activeShotId) ?? draft.shots[0]
   const maxFrame = activeShot ? directorMaxFrame(activeShot, draft.fps) : 0
+  const timelineTicks = useMemo(
+    () => createTimelineTicks(activeShot?.durationSec ?? 0),
+    [activeShot?.durationSec],
+  )
   const actorElements = useMemo(
     () => draft.elements.filter((element) => element.kind === 'actor'),
     [draft.elements],
@@ -798,6 +822,7 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
     [activeShot, currentFrame, draft.elements],
   )
   const displayedCamera = controlledCamera ?? sampledCamera
+  const displayFrame = Math.min(maxFrame, Math.max(0, Math.floor(currentFrame + 1e-6)))
   const playheadKeyframe = activeShot?.cameraKeyframes.find((keyframe) => keyframe.frame === currentFrame)
   const busy = capturing || exporting
   currentFrameRef.current = currentFrame
@@ -837,7 +862,7 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
       clearTimeout(autoSaveTimerRef.current)
       autoSaveTimerRef.current = null
     }
-    const next = snapshotActiveShot(source)
+    const next = source
     if (validateDirectorProject(next).length > 0) {
       setAutoSaveState('error')
       return false
@@ -976,7 +1001,7 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
     }
     setSceneAnalysisError('')
     try {
-      const next = { ...snapshotActiveShot(draftRef.current), updatedAt: Date.now() }
+      const next = { ...draftRef.current, updatedAt: Date.now() }
       if (!persistDirectorDraft(next)) throw new Error('导演台工程存在问题，暂时无法保存并提交给 Agent')
       await onRequestAgentScene(reference, sceneInstruction)
       onClose()
@@ -996,18 +1021,8 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
     mutate((current) => activateDirectorShot(current, shot.id))
   }
 
-  const saveActiveShot = () => {
-    if (!activeShot || activeShot.locked) return
-    mutate((current) => ({
-      ...current,
-      shots: current.shots.map((shot) => shot.id === activeShot.id
-        ? { ...shot, elementStates: snapshotElements(current.elements) }
-        : shot),
-    }))
-  }
-
   const addShotFromDirectorView = () => {
-    const shot = createDirectorShot(draft.elements, draft.shots.length)
+    const shot = createDirectorShot(draft.shots.length)
     const view = directorCameraRef.current
     shot.position = clone(view.position)
     shot.target = clone(view.target)
@@ -1056,7 +1071,14 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
   const togglePlayback = () => {
     if (!activeShot) return
     setViewMode('camera')
-    if (!isPlaying && currentFrame >= maxFrame) setCurrentFrame(0)
+    if (!isPlaying) {
+      pressedMoveKeysRef.current.clear()
+      mouseLookRef.current.dragging = false
+      setCameraMoving(false)
+      setMouseLooking(false)
+      setControlledCamera(null)
+      if (currentFrame >= maxFrame) setCurrentFrame(0)
+    }
     setIsPlaying((playing) => !playing)
   }
 
@@ -1234,13 +1256,15 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
 
   useEffect(() => {
     if (!isPlaying || !activeShot) return
-    const startFrame = currentFrame
+    const run = ++playbackRunRef.current
+    const startFrame = currentFrameRef.current
     const startedAt = performance.now()
     let animationFrame = 0
     const tick = (now: number) => {
-      const elapsedFrames = Math.floor(((now - startedAt) / 1000) * draft.fps)
+      if (playbackRunRef.current !== run) return
+      const elapsedFrames = ((now - startedAt) / 1000) * draft.fps
       const nextFrame = Math.min(maxFrame, startFrame + elapsedFrames)
-      setCurrentFrame(nextFrame)
+      setCurrentFrame((previousFrame) => Math.max(previousFrame, nextFrame))
       if (nextFrame >= maxFrame) {
         setIsPlaying(false)
         return
@@ -1248,7 +1272,10 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
       animationFrame = requestAnimationFrame(tick)
     }
     animationFrame = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(animationFrame)
+    return () => {
+      playbackRunRef.current += 1
+      cancelAnimationFrame(animationFrame)
+    }
   }, [isPlaying, activeShot?.id, draft.fps, maxFrame])
 
   useEffect(() => {
@@ -1284,7 +1311,7 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
     setCapturing(true)
     try {
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
-      const projectToCapture = snapshotActiveShot(draftRef.current)
+      const projectToCapture = draftRef.current
       const shotToCapture = projectToCapture.shots.find((shot) => shot.id === projectToCapture.activeShotId)
       if (!shotToCapture) throw new Error('当前 Shot 不存在')
       setDraft(projectToCapture)
@@ -1320,7 +1347,7 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
       if (typeof MediaRecorder === 'undefined') throw new Error('当前运行环境不支持 WebM 视频录制')
       if (activeShot.durationSec > 60) throw new Error('单次预演视频最长支持 60 秒')
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
-      const projectToExport = snapshotActiveShot(draftRef.current)
+      const projectToExport = draftRef.current
       const shotToExport = projectToExport.shots.find((shot) => shot.id === projectToExport.activeShotId)
       const sourceCanvas = glRef.current.domElement
       if (!shotToExport) throw new Error('当前 Shot 不存在')
@@ -1369,7 +1396,7 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
 
   const saveAndClose = () => {
     if (issues.length > 0) return
-    const next = { ...snapshotActiveShot(draftRef.current), updatedAt: Date.now() }
+    const next = { ...draftRef.current, updatedAt: Date.now() }
     if (persistDirectorDraft(next)) onClose()
   }
 
@@ -1380,7 +1407,7 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#d4af37]/15 text-[#e8c766]">◫</div>
         <div>
           <p className="text-sm font-semibold tracking-wide">3D 导演台</p>
-          <p className="text-[10px] text-white/35">白模调度 · 多机位 · Shot 快照 · 24fps 工程</p>
+          <p className="text-[10px] text-white/35">白模调度 · 多机位 · 人物路径 · 24fps 工程</p>
         </div>
         <div className="pointer-events-auto relative z-40 ml-5 flex rounded-lg border border-white/10 bg-black/20 p-1">
           {(['director', 'camera'] as ViewMode[]).map((mode) => (
@@ -1517,6 +1544,7 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
                 position={[0, 0.012, 0]}
                 onPointerDown={(event) => {
                   event.stopPropagation()
+                  if (!event.nativeEvent.ctrlKey) return
                   appendActorPathPoint(vec3(event.point.x, 0, event.point.z))
                 }}
               >
@@ -1542,10 +1570,7 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
                 }}
               />
             ) : activeShot && displayedCamera ? (
-              <>
-                <PerspectiveCamera makeDefault fov={displayedCamera.fov} position={vector(displayedCamera.position)} />
-                <CameraRig view={displayedCamera} rollDeg={activeShot.rollDeg} />
-              </>
+              <CameraRig view={displayedCamera} rollDeg={activeShot.rollDeg} />
             ) : null}
             <Suspense fallback={null}>
               {renderedElements.filter((element) => element.visible).map((element) => {
@@ -1720,7 +1745,7 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
                     </button>
                   </div>
                   {pathEditingElementId === selected.id && (
-                    <p className="rounded-lg bg-black/20 px-2 py-1.5 text-[9px] leading-4 text-amber-200/70">点击地面或台阶、平台等模型表面添加 XYZ 路径点；选中控制点后可沿三轴调整高度。完成后点击“完成绘制”。</p>
+                    <p className="rounded-lg bg-black/20 px-2 py-1.5 text-[9px] leading-4 text-amber-200/70">按住 Ctrl 并用鼠标左键点击地面、台阶或平台等模型表面添加 XYZ 路径点；普通点击不会取点。选中控制点后可沿三轴调整高度。</p>
                   )}
                   {selectedActorTrack && (
                     <>
@@ -1773,7 +1798,7 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
             <div className="space-y-4">
               <p className="text-[10px] uppercase tracking-[0.18em] text-white/35">当前机位</p>
               <input value={activeShot.name} onChange={(event) => updateActiveShot({ name: event.target.value })} className="w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-xs text-white/75 outline-none" />
-              <div className="rounded-lg border border-white/8 bg-black/15 px-2.5 py-2 text-[9px] text-white/35">正在编辑第 {currentFrame} 帧{playheadKeyframe ? ' · 关键帧' : ' · 插值机位（修改后自动生成关键帧）'}</div>
+              <div className="rounded-lg border border-white/8 bg-black/15 px-2.5 py-2 text-[9px] text-white/35">正在编辑第 {displayFrame} 帧{playheadKeyframe ? ' · 关键帧' : ' · 插值机位（修改后自动生成关键帧）'}</div>
               <label className="block space-y-1.5 text-[10px] text-white/45">相机约束
                 <select
                   value={activeShot.cameraConstraint.mode}
@@ -1835,79 +1860,112 @@ export function DirectorStageDialog({ project, onChange, onClose, onCapture, onE
         </aside>
       </div>
 
-      <footer className="pointer-events-auto relative z-20 flex h-52 flex-shrink-0 border-t border-white/10 bg-[#111217]">
-        <div className="flex w-64 flex-shrink-0 flex-col justify-center gap-2 border-r border-white/10 p-3">
+      <footer className="pointer-events-auto relative z-20 flex h-64 flex-shrink-0 border-t border-white/10 bg-[#0d0e12] shadow-[0_-12px_40px_rgba(0,0,0,0.28)]">
+        <div className="flex w-56 flex-shrink-0 flex-col justify-center gap-2 border-r border-white/10 p-3">
           <button onClick={addShotFromDirectorView} className="rounded-lg border border-[#d4af37]/25 bg-[#d4af37]/10 px-3 py-2 text-[10px] text-[#f0d98c]">＋ 从导演视角新增机位</button>
-          <button onClick={saveActiveShot} disabled={!activeShot || activeShot.locked} className="rounded-lg border border-white/10 px-3 py-2 text-[10px] text-white/55 disabled:opacity-35">更新当前 Shot 站位快照</button>
         </div>
-        <div className="flex min-w-0 flex-1 flex-col gap-2 p-3">
+        <div className="flex min-w-0 flex-1 flex-col p-2">
           {activeShot && (
-            <div className="flex items-center gap-2">
-              <button onClick={togglePlayback} className="flex h-7 w-9 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] text-[11px] text-white/70 hover:border-[#d4af37]/35 hover:text-[#f0d98c]" title={isPlaying ? '暂停预演' : '播放预演'}>{isPlaying ? 'Ⅱ' : '▶'}</button>
-              <span className="w-24 text-[9px] tabular-nums text-white/45">{(currentFrame / draft.fps).toFixed(2)}s / {activeShot.durationSec.toFixed(2)}s</span>
-              <div className="relative min-w-0 flex-1">
-                <input
-                  type="range"
-                  min={0}
-                  max={maxFrame}
-                  step={1}
-                  value={currentFrame}
-                  onChange={(event) => { setIsPlaying(false); setCurrentFrame(Number(event.target.value)); setViewMode('camera') }}
-                  className="h-2 w-full cursor-pointer accent-[#d4af37]"
-                  aria-label="镜头时间线"
-                />
-                {activeShot.cameraKeyframes.map((keyframe) => (
-                  <button
-                    key={keyframe.id}
-                    onClick={() => { setIsPlaying(false); setCurrentFrame(keyframe.frame); setViewMode('camera') }}
-                    className={`absolute top-1/2 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rotate-45 border ${keyframe.frame === currentFrame ? 'border-[#fff1a8] bg-[#d4af37]' : 'border-[#d4af37]/70 bg-[#342d18]'}`}
-                    style={{ left: `${maxFrame > 0 ? (keyframe.frame / maxFrame) * 100 : 0}%` }}
-                    title={`关键帧 ${keyframe.frame} · ${(keyframe.frame / draft.fps).toFixed(2)}s`}
+            <div className="flex h-9 flex-shrink-0 items-center gap-1.5 border-b border-white/8 px-1 pb-2">
+              <button onClick={() => { setIsPlaying(false); setCurrentFrame(0); setViewMode('camera') }} className="flex h-7 w-7 items-center justify-center rounded-md text-[10px] text-white/45 hover:bg-white/[0.06] hover:text-white/80" title="回到开头">▏◀</button>
+              <button onClick={() => { setIsPlaying(false); setCurrentFrame((frame) => Math.max(0, Math.ceil(frame) - 1)); setViewMode('camera') }} className="flex h-7 w-7 items-center justify-center rounded-md text-[10px] text-white/45 hover:bg-white/[0.06] hover:text-white/80" title="上一帧">◀</button>
+              <button onClick={togglePlayback} className="flex h-7 w-9 items-center justify-center rounded-md border border-[#d4af37]/30 bg-[#d4af37]/10 text-[11px] text-[#f0d98c] hover:bg-[#d4af37]/15" title={isPlaying ? '暂停预演' : '播放预演'}>{isPlaying ? 'Ⅱ' : '▶'}</button>
+              <button onClick={() => { setIsPlaying(false); setCurrentFrame((frame) => Math.min(maxFrame, Math.floor(frame) + 1)); setViewMode('camera') }} className="flex h-7 w-7 items-center justify-center rounded-md text-[10px] text-white/45 hover:bg-white/[0.06] hover:text-white/80" title="下一帧">▶</button>
+              <span className="ml-2 rounded-md border border-white/8 bg-black/25 px-2.5 py-1 font-mono text-[11px] tabular-nums text-white/75">{formatTimelineTimecode(currentFrame, draft.fps)}</span>
+              <span className="font-mono text-[9px] tabular-nums text-white/28">/ {formatTimelineTimecode(maxFrame, draft.fps)}</span>
+              <span className="ml-1 rounded bg-white/[0.045] px-1.5 py-1 text-[8px] text-white/35">{draft.fps} FPS</span>
+              <div className="flex-1" />
+              <span className="mr-1 w-[86px] whitespace-nowrap text-right text-[9px] tabular-nums text-white/30">帧 {displayFrame} / {maxFrame}</span>
+              <button onClick={addCameraKeyframe} disabled={activeShot.locked} className="rounded-md border border-[#d4af37]/25 px-2.5 py-1.5 text-[9px] text-[#f0d98c] disabled:opacity-35">{playheadKeyframe ? '更新关键帧' : '＋关键帧'}</button>
+              <button onClick={deleteCameraKeyframe} disabled={activeShot.locked || currentFrame === 0 || !playheadKeyframe} className="rounded-md border border-rose-400/20 px-2.5 py-1.5 text-[9px] text-rose-300 disabled:opacity-25" title="删除当前关键帧">删除</button>
+            </div>
+          )}
+          {activeShot && (
+            <div className="relative mt-2 min-h-0 flex-1 overflow-hidden rounded-lg border border-white/10 bg-[#111318]">
+              <div className="grid h-full" style={{ gridTemplateColumns: `${TIMELINE_HEADER_WIDTH}px minmax(0, 1fr)` }}>
+                <div className="flex h-7 items-center border-b border-r border-white/8 bg-[#16181e] px-2 text-[8px] uppercase tracking-[0.14em] text-white/28">轨道</div>
+                <div className="relative h-7 overflow-hidden border-b border-white/8 bg-[#16181e]">
+                  {timelineTicks.map((tick, index) => {
+                    const left = activeShot.durationSec > 0 ? (tick.seconds / activeShot.durationSec) * 100 : 0
+                    return (
+                      <span key={`${tick.seconds}-${index}`} className="absolute inset-y-0 border-l border-white/15" style={{ left: `${left}%` }}>
+                        <span className={`absolute top-1 whitespace-nowrap font-mono text-[8px] text-white/35 ${index === timelineTicks.length - 1 ? '-translate-x-full pr-1' : 'pl-1'}`}>{tick.label}</span>
+                        <span className="absolute bottom-0 left-0 h-1.5 border-l border-white/25" />
+                      </span>
+                    )
+                  })}
+                </div>
+
+                <div className="flex h-10 items-center gap-2 border-b border-r border-white/8 bg-[#14161b] px-2">
+                  <span className="flex h-5 w-5 items-center justify-center rounded bg-[#d4af37]/10 text-[9px] text-[#d4af37]">◆</span>
+                  <span className="min-w-0"><span className="block truncate text-[9px] text-white/60">机位关键帧</span><span className="block text-[7px] text-white/25">{activeShot.cameraKeyframes.length} 个标记</span></span>
+                </div>
+                <div className="relative h-10 overflow-hidden border-b border-white/8 bg-[linear-gradient(90deg,rgba(255,255,255,0.035)_1px,transparent_1px)] bg-[length:25%_100%]">
+                  <div className="absolute inset-x-0 top-1/2 h-px bg-[#d4af37]/35" />
+                  <input
+                    type="range"
+                    min={0}
+                    max={maxFrame}
+                    step={1}
+                    value={currentFrame}
+                    onChange={(event) => { setIsPlaying(false); setCurrentFrame(Number(event.target.value)); setViewMode('camera') }}
+                    className="absolute inset-0 z-10 h-full w-full cursor-ew-resize opacity-0"
+                    aria-label="镜头时间线"
                   />
-                ))}
+                  {activeShot.cameraKeyframes.map((keyframe) => (
+                    <button
+                      key={keyframe.id}
+                      onClick={() => { setIsPlaying(false); setCurrentFrame(keyframe.frame); setViewMode('camera') }}
+                      className={`absolute top-1/2 z-20 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rotate-45 rounded-[2px] border shadow-[0_0_0_2px_rgba(12,13,17,0.8)] ${keyframe.frame === currentFrame ? 'border-[#fff1a8] bg-[#d4af37]' : 'border-[#d4af37]/80 bg-[#3a321b] hover:bg-[#8a7326]'}`}
+                      style={{ left: `${maxFrame > 0 ? (keyframe.frame / maxFrame) * 100 : 0}%` }}
+                      title={`关键帧 ${keyframe.frame} · ${formatTimelineTimecode(keyframe.frame, draft.fps)}`}
+                    />
+                  ))}
+                </div>
+
+                <div className="col-span-2 min-h-0 overflow-y-auto">
+                  {activeShot.actorTracks.length === 0 ? (
+                    <div className="grid" style={{ gridTemplateColumns: `${TIMELINE_HEADER_WIDTH}px minmax(0, 1fr)` }}>
+                      <div className="flex h-10 items-center border-r border-white/8 bg-[#121419] px-2 text-[8px] text-white/22">暂无人物动作轨</div>
+                      <div className="h-10 bg-[linear-gradient(90deg,rgba(255,255,255,0.035)_1px,transparent_1px)] bg-[length:25%_100%]" />
+                    </div>
+                  ) : activeShot.actorTracks.map((track) => {
+                      const actor = actorElements.find((item) => item.id === track.elementId)
+                      const left = maxFrame > 0 ? (track.startFrame / maxFrame) * 100 : 0
+                      const width = maxFrame > 0 ? Math.max(0.8, ((track.endFrame - track.startFrame) / maxFrame) * 100) : 100
+                      return (
+                        <div key={track.id} className="grid" style={{ gridTemplateColumns: `${TIMELINE_HEADER_WIDTH}px minmax(0, 1fr)` }}>
+                          <button onClick={() => { setSelectedId(track.elementId); setSelectedCameraShotId(null) }} className="flex h-10 min-w-0 items-center gap-2 border-b border-r border-white/[0.055] bg-[#121419] px-2 text-left hover:bg-white/[0.025]" title={`${actor?.name ?? track.elementId} · ${track.startFrame}-${track.endFrame} 帧`}>
+                            <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded bg-sky-400/10 text-[8px] text-sky-300">人</span>
+                            <span className="min-w-0"><span className="block truncate text-[9px] text-white/55">{actor?.name ?? '人物'}</span><span className="block truncate text-[7px] text-white/25">{track.motion === 'run' ? '跑步' : '行走'} · {track.interpolation === 'smooth' ? '平滑' : '折线'}</span></span>
+                          </button>
+                          <button onClick={() => { setSelectedId(track.elementId); setSelectedCameraShotId(null) }} className="relative block h-10 w-full border-b border-white/[0.055] bg-[linear-gradient(90deg,rgba(255,255,255,0.035)_1px,transparent_1px)] bg-[length:25%_100%] text-left" title={`${actor?.name ?? track.elementId} · ${formatTimelineTimecode(track.startFrame, draft.fps)} - ${formatTimelineTimecode(track.endFrame, draft.fps)}`}>
+                            <span className="absolute top-1.5 flex h-7 min-w-3 items-center overflow-hidden rounded border border-sky-300/25 bg-sky-400/15 px-2 text-[8px] text-sky-100/70 shadow-[inset_3px_0_0_rgba(125,211,252,0.45)]" style={{ left: `${left}%`, width: `${width}%` }}>
+                              <span className="truncate">{actor?.name ?? '人物'} · {track.motion === 'run' ? '跑步' : '行走'}</span>
+                            </span>
+                          </button>
+                        </div>
+                      )
+                    })}
+                </div>
               </div>
-              <span className="w-20 text-right text-[9px] tabular-nums text-white/35">F {currentFrame}/{maxFrame}</span>
-              <button onClick={addCameraKeyframe} disabled={activeShot.locked} className="rounded-lg border border-[#d4af37]/25 px-2.5 py-1.5 text-[9px] text-[#f0d98c] disabled:opacity-35">{playheadKeyframe ? '更新关键帧' : '＋关键帧'}</button>
-              <button onClick={deleteCameraKeyframe} disabled={activeShot.locked || currentFrame === 0 || !playheadKeyframe} className="rounded-lg border border-rose-400/20 px-2.5 py-1.5 text-[9px] text-rose-300 disabled:opacity-25" title="删除当前关键帧">删除</button>
+              <div className="pointer-events-none absolute bottom-0 top-0 z-30" style={{ left: `calc(${TIMELINE_HEADER_WIDTH}px + (100% - ${TIMELINE_HEADER_WIDTH}px) * ${maxFrame > 0 ? currentFrame / maxFrame : 0})` }}>
+                <span className="absolute -left-1.5 top-0 h-0 w-0 border-x-[6px] border-t-[7px] border-x-transparent border-t-[#f6d653]" />
+                <span className="absolute bottom-0 top-0 w-px bg-[#f6d653] shadow-[0_0_5px_rgba(246,214,83,0.45)]" />
+              </div>
             </div>
           )}
-          {activeShot && activeShot.actorTracks.length > 0 && (
-            <div className="space-y-1 rounded-lg border border-white/8 bg-black/15 px-2 py-1.5">
-              {activeShot.actorTracks.map((track) => {
-                const actor = actorElements.find((item) => item.id === track.elementId)
-                const left = maxFrame > 0 ? (track.startFrame / maxFrame) * 100 : 0
-                const width = maxFrame > 0 ? Math.max(0.8, ((track.endFrame - track.startFrame) / maxFrame) * 100) : 100
-                return (
-                  <button
-                    key={track.id}
-                    onClick={() => { setSelectedId(track.elementId); setSelectedCameraShotId(null) }}
-                    className="flex w-full items-center gap-2 text-left"
-                    title={`${actor?.name ?? track.elementId} · ${track.startFrame}-${track.endFrame} 帧`}
-                  >
-                    <span className="w-20 truncate text-[8px] text-white/40">{actor?.name ?? '人物'}</span>
-                    <span className="relative h-2 flex-1 rounded bg-white/[0.05]">
-                      <span className="absolute top-0 h-2 rounded bg-[#d4af37]/65" style={{ left: `${left}%`, width: `${width}%` }} />
-                      <span className="absolute top-[-2px] h-3 w-px bg-white/65" style={{ left: `${maxFrame > 0 ? (currentFrame / maxFrame) * 100 : 0}%` }} />
-                    </span>
-                    <span className="w-12 text-right text-[8px] text-white/25">{track.motion === 'run' ? '跑' : '走'} · {track.interpolation === 'smooth' ? '滑' : '折'}</span>
-                  </button>
-                )
-              })}
-            </div>
-          )}
-          <div className="min-w-0 flex-1 overflow-x-auto">
-          <div className="flex min-w-max gap-2">
+          <div className="mt-2 flex h-10 flex-shrink-0 items-stretch gap-1.5 overflow-x-auto">
             {draft.shots.map((shot, index) => (
-              <button key={shot.id} onClick={() => activateShot(shot)} className={`w-40 rounded-xl border p-2.5 text-left ${shot.id === activeShot?.id ? 'border-[#d4af37]/45 bg-[#d4af37]/10' : 'border-white/10 bg-white/[0.025]'}`}>
-                <div className="flex items-center justify-between"><span className="text-[10px] text-white/35">SHOT {String(index + 1).padStart(2, '0')}</span><span className="text-[9px] text-white/25">{shot.durationSec}s</span></div>
-                <p className="mt-1 truncate text-[11px] text-white/70">{shot.name}</p>
-                <p className="mt-1 text-[9px] text-white/30">{shot.aspectRatio} · FOV {shot.fov} · {shot.cameraMove}</p>
+              <button key={shot.id} onClick={() => activateShot(shot)} className={`flex w-36 flex-shrink-0 items-center gap-2 rounded-md border px-2 text-left ${shot.id === activeShot?.id ? 'border-[#d4af37]/45 bg-[#d4af37]/10' : 'border-white/8 bg-white/[0.02] hover:bg-white/[0.04]'}`}>
+                <span className="sr-only">SHOT {String(index + 1).padStart(2, '0')}</span>
+                <span className={`flex h-6 w-6 flex-shrink-0 items-center justify-center rounded text-[8px] ${shot.id === activeShot?.id ? 'bg-[#d4af37]/20 text-[#f0d98c]' : 'bg-white/[0.05] text-white/35'}`}>{String(index + 1).padStart(2, '0')}</span>
+                <span className="min-w-0"><span className="block truncate text-[9px] text-white/60">{shot.name}</span><span className="block text-[7px] text-white/25">{shot.durationSec}s · {shot.aspectRatio}</span></span>
               </button>
             ))}
           </div>
-          </div>
         </div>
-        <div className="flex w-72 flex-shrink-0 flex-col justify-center gap-2 border-l border-white/10 p-3">
+        <div className="flex w-64 flex-shrink-0 flex-col justify-center gap-2 border-l border-white/10 p-3">
           {activeShot && (
             <div className="flex gap-2">
               <select value={activeShot.aspectRatio} onChange={(event) => updateActiveShot({ aspectRatio: event.target.value as DirectorAspectRatio })} className="flex-1 rounded-lg border border-white/10 bg-[#1c1d23] px-2 py-2 text-[10px] text-white/65">

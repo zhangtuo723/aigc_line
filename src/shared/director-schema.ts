@@ -36,12 +36,6 @@ export const directorElementSchema = z.object({
   referenceNodeId: z.string().optional(),
 }).strict()
 
-const elementStateSchema = z.object({
-  transform: transformSchema,
-  visible: z.boolean(),
-  poseId: poseSchema.optional(),
-}).strict()
-
 const cameraKeyframeSchema = z.object({
   id: z.string().min(1),
   frame: z.number().int().nonnegative(),
@@ -86,7 +80,6 @@ export const directorShotSchema = z.object({
   cameraKeyframes: z.array(cameraKeyframeSchema),
   actorTracks: z.array(actorTrackSchema),
   cameraConstraint: cameraConstraintSchema,
-  elementStates: z.record(z.string(), elementStateSchema),
   locked: z.boolean(),
   notes: z.string().optional(),
   lastCapturePath: z.string().optional(),

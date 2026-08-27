@@ -72,12 +72,6 @@ export interface DirectorElement {
   referenceNodeId?: string
 }
 
-export interface DirectorElementState {
-  transform: DirectorTransform
-  visible: boolean
-  poseId?: DirectorPoseId
-}
-
 export interface DirectorCameraKeyframe {
   id: string
   frame: number
@@ -121,7 +115,6 @@ export interface DirectorShot {
   cameraKeyframes: DirectorCameraKeyframe[]
   actorTracks: DirectorActorTrack[]
   cameraConstraint: DirectorCameraConstraint
-  elementStates: Record<string, DirectorElementState>
   locked: boolean
   notes?: string
   lastCapturePath?: string

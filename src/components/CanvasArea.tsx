@@ -123,7 +123,7 @@ function applyDirectorAtomicAction(
     return addDirectorElement(project, element)
   }
   if (actionId === 'add-shot') {
-    let shot = createDirectorShot(project.elements, project.shots.length)
+    let shot = createDirectorShot(project.shots.length)
     if (typeof params.name === 'string') shot = { ...shot, name: params.name }
     if (typeof params.durationSec === 'number' && Number.isFinite(params.durationSec) && params.durationSec > 0) shot = { ...shot, durationSec: params.durationSec }
     if (['16:9', '9:16', '4:3', '1:1'].includes(String(params.aspectRatio))) shot = { ...shot, aspectRatio: params.aspectRatio as DirectorAspectRatio }
