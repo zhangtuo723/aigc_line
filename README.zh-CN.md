@@ -219,7 +219,7 @@ Agent 还可通过 `InvokeNodeAction` 原子执行 `add-element`、`add-shot`、
 | MiniMax H3 全模态参考（加速 LoRA） | 图片 / 视频 / 音频生视频，Turbo 8 步 | — |
 | RTX Video Super Resolution | 视频放大 | 2× / 3× / 4× |
 
-工作流模板位于 resources/comfyui-workflows/。ComfyUI 服务端需要提前安装模板所使用的模型和自定义节点；加速全模态工作流还需要 `minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors` LoRA。
+工作流模板位于 resources/comfyui-workflows/。ComfyUI 服务端需要提前安装模板所使用的模型和自定义节点；加速全模态工作流还需要 `minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors` LoRA。H3 参考视频会同时使用画面和内嵌音轨；也可在已有输出的视频节点上点击“提取音频”，生成独立音频节点后放入单独音频参考轨。
 
 图片输出分辨率：
 

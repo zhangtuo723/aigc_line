@@ -5,12 +5,15 @@ import type {
   GenerateImageResult,
   GenerateVideoRequest,
   GenerateVideoResult,
+  ExtractVideoAudioRequest,
+  ExtractVideoAudioResult,
   UpscaleVideoRequest,
   UpscaleVideoResult,
 } from '../../../src/shared/ipc.types'
 import {
   generateImageWithComfyUI,
   generateVideoWithComfyUI,
+  extractVideoAudioWithComfyUI,
   listComfyWorkflows,
   upscaleVideoWithComfyUI,
 } from '../services/comfyui.service'
@@ -44,6 +47,19 @@ export function registerComfyUIHandlers(): void {
       try {
         if (isSeedanceVideoWorkflow(request.workflowId)) return await generateVideoWithSeedance(request)
         return await generateVideoWithComfyUI(request)
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        }
+      }
+    },
+  )
+  ipcMain.handle(
+    IPC_CHANNELS.comfyui.extractVideoAudio,
+    async (_event, request: ExtractVideoAudioRequest): Promise<ExtractVideoAudioResult> => {
+      try {
+        return await extractVideoAudioWithComfyUI(request)
       } catch (error) {
         return {
           success: false,

@@ -1129,6 +1129,8 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
   const agentThinkingByProject = useAppStore((state) => state.agentThinkingByProject)
   const isReferencedInChat = useAppStore((state) => state.referencedCanvasNodes.some((ref) => ref.id === id))
   const [audioImporting, setAudioImporting] = useState(false)
+  const [videoAudioExtracting, setVideoAudioExtracting] = useState(false)
+  const [videoAudioExtractionError, setVideoAudioExtractionError] = useState('')
   const [directorOpen, setDirectorOpen] = useState(false)
   const [imageEditorOpen, setImageEditorOpen] = useState(false)
   const [boardPreviewFailed, setBoardPreviewFailed] = useState(false)
@@ -1415,6 +1417,51 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
     }
   }
 
+  const extractVideoAudio = async () => {
+    if (!currentProject || data.kind !== 'video' || !data.sourcePath || videoAudioExtracting) return
+    const projectId = currentProject.id
+    const sourcePath = data.sourcePath
+    const assertContext = () => {
+      if (useAppStore.getState().currentProject?.id !== projectId) throw new Error('项目已切换，已取消写回提取的音频')
+      const sourceNode = getNodes().find((node) => node.id === id && node.data.kind === 'video')
+      if (!sourceNode || sourceNode.data.sourcePath !== sourcePath) throw new Error('源视频节点已变化，已取消写回提取的音频')
+    }
+    setVideoAudioExtracting(true)
+    setVideoAudioExtractionError('')
+    try {
+      assertContext()
+      const result = await window.electronAPI.extractVideoAudio({
+        projectId,
+        nodeId: id,
+        sourceVideoPath: sourcePath,
+      })
+      if (!result.success || !result.relativePath) throw new Error(result.error || 'ComfyUI 没有返回提取后的音频')
+      assertContext()
+      const liveNodes = getNodes()
+      const sourceNode = liveNodes.find((node) => node.id === id)!
+      const outputCount = liveNodes.filter((node) => (
+        node.data.kind === 'audio' && canvasEdges.some((edge) => edge.source === id && edge.target === node.id)
+      )).length
+      const audioNode = makeNode('audio', liveNodes.length + 1, {
+        x: sourceNode.position.x + 680,
+        y: sourceNode.position.y + 230 + outputCount * 190,
+      })
+      audioNode.data = {
+        ...audioNode.data,
+        title: `${data.title} · 提取音频 ${outputCount + 1}`,
+        sourcePath: result.relativePath,
+        preview: workspacePreview(projectId, result.relativePath),
+        readOnly: true,
+      }
+      setNodes((nodes) => [...nodes, audioNode])
+      setEdges((edges) => [...edges, makeLinkedEdge(`edge-${id}-${audioNode.id}`, id, audioNode.id)])
+    } catch (error) {
+      setVideoAudioExtractionError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setVideoAudioExtracting(false)
+    }
+  }
+
   return (
     <div className={data.kind === 'image' || data.kind === 'video' ? 'w-[620px]' : isDirector || isImageEditor ? 'w-[520px]' : 'w-[420px]'}>
       <div className="mb-1.5 flex items-center gap-1 text-[11px] text-white/48">
@@ -1427,7 +1474,9 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
           </span>
         )}
         {data.readOnly && (
-          <span className="ml-1 rounded border border-[#d4af37]/25 bg-[#d4af37]/10 px-1.5 py-0.5 text-[9px] text-[#e8c766]">{data.kind === 'video' ? '只读预演视频' : '只读构图参考'}</span>
+          <span className="ml-1 rounded border border-[#d4af37]/25 bg-[#d4af37]/10 px-1.5 py-0.5 text-[9px] text-[#e8c766]">
+            {data.kind === 'video' ? '只读预演视频' : data.kind === 'audio' ? '只读提取音频' : '只读构图参考'}
+          </span>
         )}
         <span className="ml-auto" />
         {selected && (
@@ -1441,6 +1490,19 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
           >
             <span>{isReferencedInChat ? '✓' : '+'}</span>
             <span>{isReferencedInChat ? '已添加到对话' : '添加到对话'}</span>
+          </button>
+        )}
+        {selected && data.kind === 'video' && data.sourcePath && (
+          <button
+            className="nodrag flex h-6 flex-shrink-0 items-center gap-1 rounded-md border border-[#d4af37]/25 bg-[#d4af37]/10 px-2 text-[10px] text-[#e8c766] transition hover:bg-[#d4af37]/15 disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={(event) => {
+              event.stopPropagation()
+              void extractVideoAudio()
+            }}
+            disabled={videoAudioExtracting}
+            title="从该视频中提取音轨，并在画布上创建独立音频节点"
+          >
+            <span>{videoAudioExtracting ? '提取中…' : '提取音频'}</span>
           </button>
         )}
         <NodeDeleteButton id={id} />
@@ -1566,19 +1628,24 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
                 <span className="text-[11px]">尚未上传音频</span>
               </div>
             )}
-            <button
-              onClick={() => void importAudio()}
-              disabled={audioImporting}
-              className="rounded-xl border border-[#d4af37]/25 bg-[#d4af37]/10 px-4 py-2 text-[11px] text-[#f0d98c] transition hover:bg-[#d4af37]/15 disabled:opacity-50"
-            >
-              {audioImporting ? '导入中…' : data.preview ? '替换本地音频' : '上传本地音频'}
-            </button>
+            {!data.readOnly && (
+              <button
+                onClick={() => void importAudio()}
+                disabled={audioImporting}
+                className="rounded-xl border border-[#d4af37]/25 bg-[#d4af37]/10 px-4 py-2 text-[11px] text-[#f0d98c] transition hover:bg-[#d4af37]/15 disabled:opacity-50"
+              >
+                {audioImporting ? '导入中…' : data.preview ? '替换本地音频' : '上传本地音频'}
+              </button>
+            )}
             {data.generationError && <p className="text-[10px] text-rose-300">{data.generationError}</p>}
           </div>
         ) : null}
         <Handle type="source" position={Position.Right} className="story-handle" />
       </div>
       {selected && visualMediaKind && !isUpscale && !data.readOnly && <PromptPanel id={id} kind={visualMediaKind} />}
+      {selected && data.kind === 'video' && videoAudioExtractionError && (
+        <p className="mt-2 rounded-lg border border-rose-400/20 bg-rose-400/10 px-3 py-2 text-[10px] text-rose-200">{videoAudioExtractionError}</p>
+      )}
       {selected && isUpscale && <UpscalePanel id={id} />}
       {directorOpen && isDirector && (
         <Suspense fallback={<div className="fixed inset-0 z-[200] flex items-center justify-center bg-[#090a0e] text-sm text-[#e8c766]">正在加载 3D 导演台…</div>}>

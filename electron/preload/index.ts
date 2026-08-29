@@ -10,6 +10,8 @@ import type {
   GenerateImageResult,
   GenerateVideoRequest,
   GenerateVideoResult,
+  ExtractVideoAudioRequest,
+  ExtractVideoAudioResult,
   UpscaleVideoRequest,
   UpscaleVideoResult,
   ComfyWorkflowInfo,
@@ -69,6 +71,7 @@ export interface ElectronAPI {
   ) => Promise<{ success: boolean; error?: string }>;
   generateImage: (request: GenerateImageRequest) => Promise<GenerateImageResult>;
   generateVideo: (request: GenerateVideoRequest) => Promise<GenerateVideoResult>;
+  extractVideoAudio: (request: ExtractVideoAudioRequest) => Promise<ExtractVideoAudioResult>;
   upscaleVideo: (request: UpscaleVideoRequest) => Promise<UpscaleVideoResult>;
   listComfyWorkflows: () => Promise<ComfyWorkflowInfo[]>;
   getAppSettings: () => Promise<AppSettingsView>;
@@ -125,6 +128,7 @@ const api: ElectronAPI = {
     invoke(IPC_CHANNELS.artifact.save, projectId, relPath, content),
   generateImage: (request) => invoke(IPC_CHANNELS.comfyui.generateImage, request),
   generateVideo: (request) => invoke(IPC_CHANNELS.comfyui.generateVideo, request),
+  extractVideoAudio: (request) => invoke(IPC_CHANNELS.comfyui.extractVideoAudio, request),
   upscaleVideo: (request) => invoke(IPC_CHANNELS.comfyui.upscaleVideo, request),
   listComfyWorkflows: () => invoke(IPC_CHANNELS.comfyui.listWorkflows),
   getAppSettings: () => invoke(IPC_CHANNELS.settings.get),

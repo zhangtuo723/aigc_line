@@ -250,7 +250,7 @@ export interface CanvasNodeData extends Record<string, unknown> {
   inputNodeId?: string;
   scale?: number;
   quality?: string;
-  /** Immutable media reference produced by a tool such as the 3D director stage. */
+  /** Immutable media reference produced by a tool such as the 3D director stage or audio extractor. */
   readOnly?: boolean;
   /** Serializable 3D previs project. Kept as unknown here to avoid coupling IPC media types to the editor runtime. */
   directorProject?: import('./director.types').DirectorProject;
@@ -414,6 +414,19 @@ export interface GenerateVideoRequest {
 }
 
 export interface GenerateVideoResult {
+  success: boolean;
+  relativePath?: string;
+  promptId?: string;
+  error?: string;
+}
+
+export interface ExtractVideoAudioRequest {
+  projectId: string;
+  nodeId: string;
+  sourceVideoPath: string;
+}
+
+export interface ExtractVideoAudioResult {
   success: boolean;
   relativePath?: string;
   promptId?: string;

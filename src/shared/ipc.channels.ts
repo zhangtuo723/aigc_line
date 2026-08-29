@@ -34,6 +34,7 @@ export const IPC_CHANNELS = {
     listWorkflows: 'comfyui:listWorkflows',
     generateImage: 'comfyui:generateImage',
     generateVideo: 'comfyui:generateVideo',
+    extractVideoAudio: 'comfyui:extractVideoAudio',
     upscaleVideo: 'comfyui:upscaleVideo',
   },
   settings: {

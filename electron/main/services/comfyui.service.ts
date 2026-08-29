@@ -7,6 +7,8 @@ import type {
   GenerateImageResult,
   GenerateVideoRequest,
   GenerateVideoResult,
+  ExtractVideoAudioRequest,
+  ExtractVideoAudioResult,
   ImageAspectRatio,
   UpscaleVideoRequest,
   UpscaleVideoResult,
@@ -384,11 +386,15 @@ async function waitForImage(baseUrl: string, promptId: string): Promise<ComfyIma
   throw new Error('ComfyUI 生成超时（5 分钟）')
 }
 
-async function downloadImage(baseUrl: string, image: ComfyImageOutput): Promise<Uint8Array> {
+async function downloadComfyMedia(
+  baseUrl: string,
+  media: ComfyImageOutput,
+  label: '图片' | '视频' | '音频',
+): Promise<Uint8Array> {
   const params = new URLSearchParams({
-    filename: image.filename,
-    subfolder: image.subfolder ?? '',
-    type: image.type ?? 'output',
+    filename: media.filename,
+    subfolder: media.subfolder ?? '',
+    type: media.type ?? 'output',
   })
   let response: Response
   try {
@@ -396,9 +402,9 @@ async function downloadImage(baseUrl: string, image: ComfyImageOutput): Promise<
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     })
   } catch (error) {
-    throw new Error(`下载 ComfyUI 图片失败：${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`下载 ComfyUI ${label}失败：${error instanceof Error ? error.message : String(error)}`)
   }
-  if (!response.ok) throw new Error(`下载 ComfyUI 图片失败 (${response.status})`)
+  if (!response.ok) throw new Error(`下载 ComfyUI ${label}失败 (${response.status})`)
   return new Uint8Array(await response.arrayBuffer())
 }
 
@@ -422,6 +428,26 @@ function findVideoOutput(value: unknown): ComfyMediaOutput | null {
   return null
 }
 
+function findAudioOutput(value: unknown): ComfyMediaOutput | null {
+  if (!value || typeof value !== 'object') return null
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findAudioOutput(item)
+      if (found) return found
+    }
+    return null
+  }
+  const record = value as Record<string, unknown>
+  if (typeof record.filename === 'string' && /\.(flac|mp3|opus|wav|ogg|m4a|aac)$/i.test(record.filename)) {
+    return record as unknown as ComfyMediaOutput
+  }
+  for (const child of Object.values(record)) {
+    const found = findAudioOutput(child)
+    if (found) return found
+  }
+  return null
+}
+
 async function waitForVideo(baseUrl: string, promptId: string): Promise<ComfyMediaOutput> {
   // No overall timeout: ComfyUI queues prompts, so queue wait time is
   // unpredictable. Poll until the record resolves or reports an error.
@@ -440,6 +466,25 @@ async function waitForVideo(baseUrl: string, promptId: string): Promise<ComfyMed
       if (record.status?.completed) throw new Error('ComfyUI 工作流已完成，但没有返回视频输出')
     }
     await new Promise((resolve) => setTimeout(resolve, 1_500))
+  }
+}
+
+async function waitForAudio(baseUrl: string, promptId: string): Promise<ComfyMediaOutput> {
+  while (true) {
+    const history = await fetchJson<Record<string, {
+      status?: { status_str?: string; completed?: boolean; messages?: unknown[] }
+      outputs?: Record<string, unknown>
+    }>>(`${baseUrl}/history/${encodeURIComponent(promptId)}`)
+    const record = history[promptId]
+    if (record) {
+      const audio = findAudioOutput(record.outputs)
+      if (audio) return audio
+      if (record.status?.status_str === 'error') {
+        throw new Error(`ComfyUI 提取音频失败：${JSON.stringify(record.status.messages ?? []).slice(0, 1200)}`)
+      }
+      if (record.status?.completed) throw new Error('ComfyUI 工作流已完成，但没有返回音频；源视频可能不含音轨')
+    }
+    await new Promise((resolve) => setTimeout(resolve, 800))
   }
 }
 
@@ -533,7 +578,7 @@ export async function generateImageWithComfyUI(
   }
 
   const imageOutput = await waitForImage(baseUrl, queued.prompt_id)
-  const bytes = await downloadImage(baseUrl, imageOutput)
+  const bytes = await downloadComfyMedia(baseUrl, imageOutput, '图片')
   const outputDir = path.join(project.folderPath, 'generated', 'images')
   await fs.mkdir(outputDir, { recursive: true })
   const sourceExt = path.extname(imageOutput.filename).toLowerCase()
@@ -591,7 +636,7 @@ export async function upscaleVideoWithComfyUI(
   }
 
   const output = await waitForVideo(baseUrl, queued.prompt_id)
-  const bytes = await downloadImage(baseUrl, output)
+  const bytes = await downloadComfyMedia(baseUrl, output, '视频')
   const outputDir = path.join(project.folderPath, 'generated', 'videos')
   await fs.mkdir(outputDir, { recursive: true })
   const sourceExt = path.extname(output.filename).toLowerCase()
@@ -697,12 +742,58 @@ export async function generateVideoWithComfyUI(
   }
 
   const output = await waitForVideo(baseUrl, queued.prompt_id)
-  const bytes = await downloadImage(baseUrl, output)
+  const bytes = await downloadComfyMedia(baseUrl, output, '视频')
   const outputDir = path.join(project.folderPath, 'generated', 'videos')
   await fs.mkdir(outputDir, { recursive: true })
   const sourceExt = path.extname(output.filename).toLowerCase()
   const extension = ['.mp4', '.webm', '.mov', '.mkv'].includes(sourceExt) ? sourceExt : '.mp4'
   const outputPath = path.join(outputDir, `${safeNodeId}-${Date.now()}${extension}`)
+  await fs.writeFile(outputPath, bytes)
+  return {
+    success: true,
+    relativePath: path.relative(project.folderPath, outputPath).split(path.sep).join('/'),
+    promptId: queued.prompt_id,
+  }
+}
+
+export async function extractVideoAudioWithComfyUI(
+  request: ExtractVideoAudioRequest,
+): Promise<ExtractVideoAudioResult> {
+  const project = await loadProject(request.projectId)
+  if (!project) throw new Error('项目不存在或已被删除')
+  if (!request.sourceVideoPath) throw new Error('视频节点没有可提取的媒体文件')
+
+  const settings = await getRuntimeSettings()
+  const baseUrl = normalizeBaseUrl(settings.comfyuiBaseUrl || project.comfyuiBaseUrl || 'http://127.0.0.1:8188')
+  const uploadedName = await uploadReferenceMedia(baseUrl, project.folderPath, request.sourceVideoPath)
+  const safeNodeId = request.nodeId.replace(/[^a-zA-Z0-9_-]/g, '-').slice(-48)
+  const workflow: ComfyWorkflow = {
+    '1': { class_type: 'LoadVideo', inputs: { file: uploadedName } },
+    '2': { class_type: 'GetVideoComponents', inputs: { video: ['1', 0] } },
+    '3': {
+      class_type: 'SaveAudio',
+      inputs: {
+        audio: ['2', 1],
+        filename_prefix: `aigc-canvas/extracted-audio/${safeNodeId}`,
+      },
+    },
+  }
+  const queued = await fetchJson<{ prompt_id?: string; error?: unknown }>(`${baseUrl}/prompt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: workflow, client_id: `aigc-canvas-extract-audio-${Date.now()}` }),
+  })
+  if (!queued.prompt_id) {
+    throw new Error(`ComfyUI 未接受音频提取工作流：${JSON.stringify(queued.error ?? queued).slice(0, 1000)}`)
+  }
+
+  const output = await waitForAudio(baseUrl, queued.prompt_id)
+  const bytes = await downloadComfyMedia(baseUrl, output, '音频')
+  const outputDir = path.join(project.folderPath, 'generated', 'audio')
+  await fs.mkdir(outputDir, { recursive: true })
+  const sourceExt = path.extname(output.filename).toLowerCase()
+  const extension = ['.flac', '.mp3', '.opus', '.wav', '.ogg', '.m4a', '.aac'].includes(sourceExt) ? sourceExt : '.flac'
+  const outputPath = path.join(outputDir, `${safeNodeId}-audio-${Date.now()}${extension}`)
   await fs.writeFile(outputPath, bytes)
   return {
     success: true,

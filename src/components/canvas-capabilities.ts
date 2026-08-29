@@ -95,7 +95,7 @@ registerNodeCapabilities({
     { key: 'firstFrameNodeId', type: 'string', description: '首帧图片节点 id（首尾帧工作流）' },
     { key: 'lastFrameNodeId', type: 'string', description: '尾帧图片节点 id（首尾帧工作流）' },
     { key: 'referenceImageNodeIds', type: 'string-array', description: '全模态参考图片节点 id（最多 9 个）' },
-    { key: 'referenceVideoNodeIds', type: 'string-array', description: '全模态参考视频节点 id（最多 3 个）' },
+    { key: 'referenceVideoNodeIds', type: 'string-array', description: '全模态参考视频节点 id（最多 3 个；MiniMax H3 会同时使用视频画面与其内嵌音轨）' },
     { key: 'referenceAudioNodeIds', type: 'string-array', description: '全模态参考音频节点 id（最多 3 个）' },
     { key: 'readOnly', type: 'boolean', readonly: true, description: '是否为导演台导出的只读预演视频节点（只读）' },
     ...generationStatusFields,
@@ -117,6 +117,7 @@ registerNodeCapabilities({
   fields: [
     { key: 'sourcePath', type: 'string', description: '音频文件的 workspace 相对路径' },
     { key: 'preview', type: 'string', readonly: true, description: '预览地址（只读，由 sourcePath 自动派生）' },
+    { key: 'readOnly', type: 'boolean', readonly: true, description: '是否为视频提取产生的只读音频节点（只读）' },
   ],
   actions: [],
 })

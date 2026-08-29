@@ -29,4 +29,23 @@ describe('MiniMax H3 accelerated reference workflow', () => {
     expect(workflow['126'].inputs.model).toEqual(['139', 0])
     expect(workflow['136'].class_type).toBe('MiniMaxH3ReferenceToVideo')
   })
+
+  it('wires each reference video together with its embedded soundtrack', () => {
+    const servicePath = path.join(process.cwd(), 'electron', 'main', 'services', 'comfyui.service.ts')
+    const service = readFileSync(servicePath, 'utf8')
+
+    expect(service).toContain("setInput('136', `ref_videos.ref_video_${index}`, [componentsNodeId, 0])")
+    expect(service).toContain("setInput('136', `ref_video_audios.ref_video_audio_${index}`, [componentsNodeId, 1])")
+    expect(service).toContain("setInput('136', `ref_audios.ref_audio_${index}`, [nodeId, 0])")
+  })
+
+  it('provides an explicit video-to-audio extraction workflow', () => {
+    const servicePath = path.join(process.cwd(), 'electron', 'main', 'services', 'comfyui.service.ts')
+    const service = readFileSync(servicePath, 'utf8')
+
+    expect(service).toContain('export async function extractVideoAudioWithComfyUI')
+    expect(service).toContain("class_type: 'GetVideoComponents'")
+    expect(service).toContain("class_type: 'SaveAudio'")
+    expect(service).toContain("path.join(project.folderPath, 'generated', 'audio')")
+  })
 })

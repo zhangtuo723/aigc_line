@@ -75,13 +75,13 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 
 
 - **导演台人物脚底锚点**：`DirectorElement.transform.position` 和人物路径点统一表示人物鞋底的世界坐标，TransformControls 必须绑定同一个根节点。轻量白模用 `actor-foot-anchor.ts` 的 `directorLightweightFootOffset` 按双腿、膝盖、鞋体几何和当前步态计算最低鞋底偏移，禁止使用固定经验高度；该 Three.js 几何计算必须保持在导演台懒加载边界内，不能放进会被首屏引用的 `actor-model.ts`。骨骼白模应用姿势后按精确包围盒归零，并把世界高度差除以父级世界缩放后再写入本地偏移。体型、身高、姿势或步态变化不得改变根节点与路径点的坐标语义。
 - **3D 导演台参考图搭景**：参考图来源严格等于连入导演台 target 的、有 `sourcePath` 输出的 image 节点，不扫描全画布，也不接受导演台指向图片的反向出边；编辑器直接显示连接图片的预览与名称，多图时点击缩略图选择，断开连接后立即移除。提交时保存当前工程，再向当前项目 Agent 会话发送带导演台/图片精确节点引用的可见消息；若 Agent 正忙则拒绝提交。Agent 用 GetCanvasNode 取得项目内 `sourcePath`，再用 Read 和当前多模态模型理解图片，不调用独立视觉模型；结果通过 `apply-scene-draft` 原子动作写入。共享 schema 只接受最多 40 个 `box/wall/cylinder/sphere/floor/platform/stairs/ramp/cone/capsule`、严格 Transform、十六进制颜色以及必填的 `ground/elevated` placement。基础几何使用底面锚点：`scale.y` 是完整高度，`position.y` 是底面离地高度；ground 元素在 mutation 层强制归零，避免模型按中心坐标理解导致悬浮，只有屋顶、横梁、招牌等真实离地结构使用 elevated 并保留高度。相同 `referenceNodeId` 重做时只替换其未锁定几何；存在锁定几何时明确报错，保留演员、其他参考图几何、手工道具和机位。
-- **媒体上传与资产库**：画布左侧独立工具栏提供“上传”和“资产”按钮。上传可多选本地图片、视频、音频，文件复制到当前项目 `uploads/<类型>/` 后自动创建对应节点；资产面板扫描当前项目 `generated/` 与 `uploads/` 下的可预览媒体，支持按类型筛选、刷新，并可拖到画布落点创建节点。媒体文件始终通过 `workspace://<projectId>/...` 预览。
+- **媒体上传与资产库**：画布左侧独立工具栏提供“上传”和“资产”按钮。上传可多选本地图片、视频、音频，文件复制到当前项目 `uploads/<类型>/` 后自动创建对应节点；资产面板扫描当前项目 `generated/` 与 `uploads/` 下的可预览媒体，支持按类型筛选、刷新，并可拖到画布落点创建节点。媒体文件始终通过 `workspace://<projectId>/...` 预览。已有输出的视频节点可显式“提取音频”：主进程通过 ComfyUI `LoadVideo → GetVideoComponents → SaveAudio` 把音轨保存到 `generated/audio/`，画布在源视频右侧创建只读 audio 节点和来源连线；无音轨视频必须明确报错。
 - **前端隔离与异步状态**：HTML Artifact iframe 不得同时启用脚本与同源权限，当前使用无同源权限的 sandbox；画布快照加载和图片/视频/放大结果回写必须复核发起时的项目，防止切换项目后串写。Agent 运行状态按 `projectId` 保存，切回后台运行项目时仍能显示状态和停止按钮。ComfyUI 工作流列表在渲染进程共享缓存，避免每个节点重复 IPC 查询。
 - **画布写入语义**：Canvas MCP 写工具按节点 ID/字段直接应用，采用最后写入者生效（Last Write Wins），不接收或校验全局画布版本号；仍校验节点存在性、ID 唯一性、字段能力和连线合法性。
 - **节点类型**（`CanvasNodeKind`）：
   - `image` 图片：ComfyUI 的 Krea 2 Turbo、Z-Image Turbo 当前仅文生图；Nano Banana 2 / Pro 支持最多 14 张有序参考图，Doubao-Seedream-5.0-pro / lite 支持最多 10 张有序参考图；画幅支持 16:9 / 9:16 / 1:1 / 4:3，全部模型使用 2K 输出，ComfyUI 图片工作流直接保存 VAE 解码结果且不经过 RTX 放大
   - `image-editor` 画板：可直接打开空白 Excalidraw，也可把所有连入的有效图片作为普通元素载入；`boardState` 自动保存矢量场景和连接图片变换但不保存图片 data URL；多选右键导出后创建相连的只读 image 输出节点
-  - `video` 视频：MiniMax H3 文生视频 / 首尾帧 / 全模态参考（图片 9 + 视频 3 + 音频 3，提示词用 `<Picture n>` 等引用），全模态参考可选择标准 20 步或带 Turbo 8 步 LoRA 的加速工作流；也支持火山方舟 Agent Plan Doubao Seedance 2.0 文生视频与全模态参考，提示词用“图片 n / 视频 n / 音频 n”引用素材，默认 720p 并生成同步音频
+  - `video` 视频：MiniMax H3 文生视频 / 首尾帧 / 全模态参考（图片 9 + 视频 3 + 音频 3，提示词用 `<Picture n>` 等引用），全模态参考可选择标准 20 步或带 Turbo 8 步 LoRA 的加速工作流；H3 参考视频通过 `GetVideoComponents` 同时把画面接入 `ref_videos`、内嵌音轨接入相同下标的 `ref_video_audios`，画布仍可显式提取音轨生成独立 audio 节点并放入单独音频参考轨；也支持火山方舟 Agent Plan Doubao Seedance 2.0 文生视频与全模态参考，提示词用“图片 n / 视频 n / 音频 n”引用素材，默认 720p 并生成同步音频
   - `audio` 音频：导入本地音频并预览
   - `upscale` 视频放大：RTX Video Super Resolution，连入视频节点作为输入（多输入可点选，`inputNodeId`），倍数 2x/3x/4x，质量 FAST/MEDIUM/HIGH/ULTRA，帧率经 VHS_VideoInfo 自动跟随源视频
   - `director` 3D 导演台：保存严格 v2 的可序列化 `directorProject`，包含全局稳定元素 ID/Transform/姿势、可锁定 Shot、人物路径、相机位置/目标/FOV/Roll、24fps 关键帧和注视/跟随人物约束；最近构图路径写入 `sourcePath`
