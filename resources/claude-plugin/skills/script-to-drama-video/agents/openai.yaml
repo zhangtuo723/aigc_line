@@ -1,4 +1,4 @@
 interface:
   display_name: "剧本转 AI 短剧"
-  short_description: "深化剧本并规划人物调度、片内分镜、连续性和 H3 短剧视频"
-  default_prompt: "Use $script-to-drama-video to turn my story into a production canvas with motivated shots, continuity tracking, delegated character and environment references, and official H3 prompts."
+  short_description: "资产、分镜师、检查三个子 Agent 协作，报告交接与迭代复查通过后生成短剧"
+  default_prompt: "Use $script-to-drama-video to delegate my script to asset, storyboard, and review subagents, write asset and review reports, and iterate until review passes before generating videos."

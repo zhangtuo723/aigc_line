@@ -13,20 +13,25 @@ interface ChatInputProps {
   disabled?: boolean;
 }
 
-const ACCEPTED_EXTS = ['srt', 'mp3', 'wav', 'm4a', 'txt', 'md', 'png', 'jpg', 'jpeg', 'webp'];
-const ACCEPT_STRING = ACCEPTED_EXTS.map((ext) => `.${ext}`).join(',');
-
 const ATTACHMENT_ICONS: Record<string, string> = {
   srt: '📝',
   txt: '📄',
   md: '📄',
+  pdf: '📕',
   mp3: '🎵',
   wav: '🎵',
   m4a: '🎵',
+  flac: '🎵',
+  ogg: '🎵',
+  aac: '🎵',
+  mp4: '🎞️',
+  webm: '🎞️',
+  mov: '🎞️',
   png: '🖼️',
   jpg: '🖼️',
   jpeg: '🖼️',
   webp: '🖼️',
+  gif: '🖼️',
 };
 
 const REF_ICONS: Record<string, string> = {
@@ -148,25 +153,18 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     const files = e.target.files;
     if (!files) return;
 
-    const newAttachments: Attachment[] = [];
-    let rejected = 0;
-    for (const file of Array.from(files)) {
-      const ext = file.name.toLowerCase().split('.').pop() || '';
-      if (!ACCEPTED_EXTS.includes(ext)) {
-        rejected += 1;
-        continue;
-      }
-      newAttachments.push({
-        type: ext,
+    const newAttachments = Array.from(files).flatMap((file): Attachment[] => {
+      const sourcePath = window.electronAPI.getPathForFile(file);
+      if (!sourcePath) return [];
+      const extension = file.name.includes('.')
+        ? file.name.toLowerCase().split('.').pop() || 'file'
+        : 'file';
+      return [{
+        type: extension,
         name: file.name,
-        path: window.electronAPI.getPathForFile(file),
-      });
-    }
-
-    if (rejected > 0) {
-      setHint(`${rejected} 个文件格式不支持，已跳过`);
-      window.setTimeout(() => setHint(''), 3000);
-    }
+        path: sourcePath,
+      }];
+    });
 
     setAttachments((prev) => [...prev, ...newAttachments]);
     e.target.value = '';
@@ -362,7 +360,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
           onPaste={handlePaste}
           onBlur={() => window.setTimeout(() => setSkillMenuDismissed(true), 100)}
           disabled={disabled}
-          placeholder='描述你的想法，输入 / 使用 Skill，或粘贴图片…'
+          placeholder='描述你的想法，输入 / 使用 Skill，或添加文件…'
           rows={3}
           className='w-full resize-none bg-transparent px-4 pt-3 text-sm leading-relaxed text-[#e8e6df] placeholder:text-[#5a5766] focus:outline-none disabled:opacity-50'
         />
@@ -372,7 +370,6 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
           <input
             ref={fileInputRef}
             type='file'
-            accept={ACCEPT_STRING}
             multiple
             onChange={handleFileSelect}
             className='hidden'
@@ -383,7 +380,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
             onClick={() => fileInputRef.current?.click()}
             disabled={disabled}
             className='flex h-8 w-8 items-center justify-center rounded-lg text-[#8a8794] transition hover:bg-white/5 hover:text-[#e8c766] disabled:opacity-50'
-            title='上传附件'
+            title='上传文件'
           >
             <svg className='h-4.5 w-4.5' fill='none' stroke='currentColor' strokeWidth={1.8} viewBox='0 0 24 24'>
               <path

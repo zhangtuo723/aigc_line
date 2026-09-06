@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { normalizeProjectAgent, type AgentProvider } from '../../../src/shared/agent-config';
 import fs from 'node:fs/promises';
 import { app } from 'electron';
 import log from 'electron-log/main';
@@ -39,9 +40,10 @@ async function readProjectsFile(): Promise<ProjectIndex> {
   try {
     const data = await fs.readFile(filePath, 'utf-8');
     const parsed = JSON.parse(data) as ProjectIndex;
-    return { projects: parsed.projects ?? [], lastOpenedId: parsed.lastOpenedId };
-  } catch {
-    return { projects: [] };
+    return { projects: (parsed.projects ?? []).map(p => ({ ...p, agent: normalizeProjectAgent(p.agent) })), lastOpenedId: parsed.lastOpenedId };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { projects: [] };
+    throw new Error(`项目列表读取失败：${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -53,32 +55,53 @@ async function writeProjectsFile(index: ProjectIndex): Promise<void> {
   await fs.rename(tmpPath, filePath);
 }
 
-export async function createProject(
+let projectCreateQueue: Promise<unknown> = Promise.resolve();
+export function createProject(name: string, folderPath: string, agentConfig?: unknown): Promise<Project> {
+  const operation = projectCreateQueue.catch(() => undefined).then(() => createProjectInternal(name, folderPath, agentConfig));
+  projectCreateQueue = operation;
+  return operation;
+}
+
+async function createProjectInternal(
   name: string,
   folderPath: string,
+  agentConfig?: unknown,
 ): Promise<Project> {
+  const agent = normalizeProjectAgent(agentConfig);
+  if (typeof folderPath !== 'string' || !path.isAbsolute(folderPath)) throw new Error('请选择有效的项目目录');
+  folderPath = await fs.realpath(folderPath);
+  if (!(await fs.stat(folderPath)).isDirectory()) throw new Error('项目路径必须是文件夹');
   const index = await readProjectsFile();
+  if (index.projects.some(p => path.resolve(p.folderPath).toLowerCase() === folderPath.toLowerCase())) throw new Error('该目录已有项目，请直接打开历史项目');
+  try {
+    await fs.access(path.join(folderPath, PROJECT_DIR_NAME, MANIFEST_FILE));
+    throw new Error('该目录包含已有项目，请选择一个新的目录');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
   const now = Date.now();
   const project: Project = {
     id: uuidv4(),
+    agent,
     name: name.trim() || path.basename(folderPath),
     folderPath,
     comfyuiBaseUrl: 'http://127.0.0.1:8188',
     createdAt: now,
     updatedAt: now,
   };
-  index.projects.push(project);
-  await writeProjectsFile(index);
 
   await fs.mkdir(path.join(folderPath, PROJECT_DIR_NAME), { recursive: true });
   const manifest: ProjectManifest = {
     projectId: project.id,
+    agent,
     folderPath,
     cues: [],
     scenes: [],
     runs: [],
   };
   await writeManifest(folderPath, manifest);
+  index.projects.push(project);
+  await writeProjectsFile(index);
   return project;
 }
 
@@ -116,6 +139,7 @@ export async function readManifest(folderPath: string): Promise<ProjectManifest 
     const parsed = JSON.parse(data) as ProjectManifest;
     return {
       projectId: parsed.projectId,
+      agent: normalizeProjectAgent(parsed.agent),
       folderPath: parsed.folderPath,
       audioPath: parsed.audioPath,
       srtPath: parsed.srtPath,
@@ -254,8 +278,8 @@ export async function updateChatMessage(
 }
 
 // Session persistence for Claude Agent SDK
-export async function readSessionId(folderPath: string): Promise<string | null> {
-  const filePath = path.join(folderPath, PROJECT_DIR_NAME, SESSION_FILE);
+export async function readSessionId(folderPath: string, provider: AgentProvider = 'claude-code'): Promise<string | null> {
+  const filePath = path.join(folderPath, PROJECT_DIR_NAME, provider === 'codex' ? 'codex-session.json' : SESSION_FILE);
   try {
     const data = await fs.readFile(filePath, 'utf-8');
     const parsed = JSON.parse(data) as { sessionId: string };
@@ -265,10 +289,10 @@ export async function readSessionId(folderPath: string): Promise<string | null> 
   }
 }
 
-export async function writeSessionId(folderPath: string, sessionId: string): Promise<void> {
+export async function writeSessionId(folderPath: string, sessionId: string, provider: AgentProvider = 'claude-code'): Promise<void> {
   const dir = path.join(folderPath, PROJECT_DIR_NAME);
   await fs.mkdir(dir, { recursive: true });
-  const filePath = path.join(dir, SESSION_FILE);
+  const filePath = path.join(dir, provider === 'codex' ? 'codex-session.json' : SESSION_FILE);
   const tmpPath = `${filePath}.tmp`;
   await fs.writeFile(tmpPath, JSON.stringify({ sessionId }, null, 2), 'utf-8');
   await fs.rename(tmpPath, filePath);

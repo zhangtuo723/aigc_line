@@ -1,3 +1,4 @@
+import type { ProjectAgentConfig, AgentProvider, AgentModelsResult } from '../../src/shared/agent-config';
 import { ipcRenderer, contextBridge, webUtils } from 'electron';
 import type { IpcRendererEvent } from 'electron';
 import { IPC_CHANNELS } from '../../src/shared/ipc.channels';
@@ -41,7 +42,7 @@ import type { SaveDirectorStillRequest, SaveDirectorStillResult, SaveDirectorVid
 
 export interface ElectronAPI {
   platform: NodeJS.Platform;
-  createProject: (name: string, folderPath: string) => Promise<Project>;
+  createProject: (name: string, folderPath: string, agent?: ProjectAgentConfig) => Promise<Project>;
   listProjects: () => Promise<ProjectIndex>;
   loadProject: (id: string) => Promise<Project | null>;
   deleteProject: (id: string) => Promise<void>;
@@ -56,6 +57,7 @@ export interface ElectronAPI {
   ) => Promise<SavePastedImageResult>;
   interruptAgent: (projectId: string) => Promise<void>;
   loadChatHistory: (folderPath: string) => Promise<ChatMessage[]>;
+  listAgentModels: (provider: AgentProvider) => Promise<AgentModelsResult>;
   listAgentSkills: (projectId: string) => Promise<AvailableSkill[]>;
   clearAgentContext: (projectId: string) => Promise<ClearAgentContextResult>;
   saveCanvasSnapshot: (folderPath: string, snapshot: unknown) => Promise<{ success: boolean }>;
@@ -101,8 +103,8 @@ const onPush = <T>(channel: string, callback: (payload: T) => void) => {
 
 const api: ElectronAPI = {
   platform: process.platform,
-  createProject: (name, folderPath) =>
-    invoke(IPC_CHANNELS.project.create, name, folderPath),
+  createProject: (name, folderPath, agent) =>
+    invoke(IPC_CHANNELS.project.create, name, folderPath, agent),
   listProjects: () => invoke(IPC_CHANNELS.project.list),
   loadProject: (id) => invoke(IPC_CHANNELS.project.load, id),
   deleteProject: (id) => invoke(IPC_CHANNELS.project.delete, id),
@@ -116,6 +118,7 @@ const api: ElectronAPI = {
   interruptAgent: (projectId) =>
     invoke(IPC_CHANNELS.chat.interrupt, projectId),
   loadChatHistory: (folderPath) => invoke(IPC_CHANNELS.chat.loadHistory, folderPath),
+  listAgentModels: (provider) => invoke(IPC_CHANNELS.chat.listModels, provider),
   listAgentSkills: (projectId) => invoke(IPC_CHANNELS.chat.listSkills, projectId),
   clearAgentContext: (projectId) => invoke(IPC_CHANNELS.chat.clearContext, projectId),
   saveCanvasSnapshot: (folderPath, snapshot) => invoke(IPC_CHANNELS.canvas.save, folderPath, snapshot),

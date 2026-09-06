@@ -49,5 +49,8 @@
     "owner": "electron-vite",
     "repo": "electron-vite-react",
     "releaseType": "release"
-  }
+  },
+  "asarUnpack": [
+    "node_modules/@openai/codex-*/**"
+  ]
 }

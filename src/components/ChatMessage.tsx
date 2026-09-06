@@ -36,13 +36,21 @@ const ATTACHMENT_ICONS: Record<string, string> = {
   srt: '📝',
   txt: '📄',
   md: '📄',
+  pdf: '📕',
   mp3: '🎵',
   wav: '🎵',
   m4a: '🎵',
+  flac: '🎵',
+  ogg: '🎵',
+  aac: '🎵',
+  mp4: '🎞️',
+  webm: '🎞️',
+  mov: '🎞️',
   png: '🖼️',
   jpg: '🖼️',
   jpeg: '🖼️',
   webp: '🖼️',
+  gif: '🖼️',
 };
 
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg', 'avif']);

@@ -30,10 +30,6 @@ export function SettingsPage() {
   const [workflows, setWorkflows] = useState<ComfyWorkflowInfo[]>([]);
   const [savedSettings, setSavedSettings] = useState<AppSettingsView | null>(null);
   const [comfyuiBaseUrl, setComfyuiBaseUrl] = useState('http://127.0.0.1:8188');
-  const [agentBaseUrl, setAgentBaseUrl] = useState('');
-  const [agentToken, setAgentToken] = useState('');
-  const [showToken, setShowToken] = useState(false);
-  const [clearAgentToken, setClearAgentToken] = useState(false);
   const [qwenBaseUrl, setQwenBaseUrl] = useState(DEFAULT_QWEN_BASE_URL);
   const [qwenApiKey, setQwenApiKey] = useState('');
   const [showQwenApiKey, setShowQwenApiKey] = useState(false);
@@ -67,7 +63,6 @@ export function SettingsPage() {
         const seedreamSettingsSupported = hasSeedreamSettingsSupport(settings);
         setSavedSettings(settings);
         setComfyuiBaseUrl(settings.comfyuiBaseUrl);
-        setAgentBaseUrl(settings.agentBaseUrl);
         setQwenBaseUrl(qwenSettingsSupported ? settings.qwenBaseUrl : DEFAULT_QWEN_BASE_URL);
         setQwenApiKey(qwenSettingsSupported ? settings.qwenApiKey : '');
         setGoogleAiApiKey(googleAiSettingsSupported ? settings.googleAiApiKey : '');
@@ -107,11 +102,8 @@ export function SettingsPage() {
     try {
       await window.electronAPI.saveAppSettings({
         comfyuiBaseUrl,
-        agentBaseUrl,
         qwenBaseUrl,
         defaultImageWorkflowId,
-        agentToken: agentToken.trim() || undefined,
-        clearAgentToken,
         qwenApiKey: qwenApiKey.trim() || undefined,
         clearQwenApiKey,
         googleAiApiKey: googleAiApiKey.trim() || undefined,
@@ -143,8 +135,6 @@ export function SettingsPage() {
         throw new Error('Seedream API Key 保存后校验失败，输入内容已保留，请重试。');
       }
       setSavedSettings(next);
-      setAgentToken('');
-      setClearAgentToken(false);
       setQwenApiKey(next.qwenApiKey);
       setClearQwenApiKey(false);
       setGoogleAiApiKey(next.googleAiApiKey);
@@ -218,7 +208,7 @@ export function SettingsPage() {
           </button>
           <div>
             <h1 className="font-display text-lg font-semibold tracking-[0.22em] text-[#e8c766]">系统配置</h1>
-            <p className="mt-1 text-[11px] tracking-[0.22em] text-[#777482]">生成服务与 Agent 环境</p>
+            <p className="mt-1 text-[11px] tracking-[0.22em] text-[#777482]">图片、视频与分析服务</p>
           </div>
         </div>
         <button onClick={handleSave} disabled={saving || loading} className="rounded-lg border border-[#d4af37]/50 bg-gradient-to-b from-[#e8c766] to-[#b08d2a] px-6 py-2.5 text-[13px] font-semibold tracking-widest text-[#241a05] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50">
@@ -231,7 +221,7 @@ export function SettingsPage() {
           {notice && <div className="rounded-lg border border-[#d4af37]/25 bg-[#d4af37]/[0.07] px-4 py-3 text-sm text-[#d9c178]">{notice}</div>}
 
           <div className="space-y-5">
-            <div className="grid auto-rows-fr items-stretch gap-5 lg:grid-cols-2">
+            <div className="grid auto-rows-fr items-stretch gap-5 lg:grid-cols-1">
           <SettingsCard title="ComfyUI 服务" description="本地图片工作流、视频生成与视频放大请求发送到此服务器。修改后可先测试连接。">
             <label className="text-xs tracking-wider text-[#9a97a3]">HTTP 地址</label>
             <div className="mt-2 flex gap-3">
@@ -243,31 +233,7 @@ export function SettingsPage() {
             {testResult && <p className={`mt-2.5 text-xs ${testResult.success ? 'text-emerald-400' : 'text-rose-400'}`}>{testResult.message}</p>}
           </SettingsCard>
 
-          <SettingsCard title="Agent 环境" description="用于 Agent SDK 的兼容 API 地址与认证 Token；留空 URL 时沿用进程环境变量。">
-            <div className="grid gap-5">
-              <div>
-                <label className="text-xs tracking-wider text-[#9a97a3]">ANTHROPIC_BASE_URL</label>
-                <input value={agentBaseUrl} onChange={(event) => setAgentBaseUrl(event.target.value)} className={`${fieldClass} mt-2`} placeholder="https://api.example.com" spellCheck={false} />
-              </div>
-              <div>
-                <div className="flex items-center justify-between">
-                  <label className="text-xs tracking-wider text-[#9a97a3]">ANTHROPIC_AUTH_TOKEN</label>
-                  {savedSettings?.agentTokenConfigured && !clearAgentToken && <span className="text-[11px] text-emerald-400">已安全配置</span>}
-                </div>
-                <div className="relative mt-2">
-                  <input type={showToken ? 'text' : 'password'} value={agentToken} onChange={(event) => { setAgentToken(event.target.value); setClearAgentToken(false); }} className={`${fieldClass} pr-16`} placeholder={savedSettings?.agentTokenConfigured ? '留空以保留现有 Token' : '输入 Token'} autoComplete="off" spellCheck={false} />
-                  <button type="button" onClick={() => setShowToken((value) => !value)} className="absolute inset-y-0 right-0 px-4 text-xs text-[#777482] hover:text-[#e8c766]">{showToken ? '隐藏' : '显示'}</button>
-                </div>
-                {savedSettings?.agentTokenConfigured && (
-                  <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-[#777482]">
-                    <input type="checkbox" checked={clearAgentToken} onChange={(event) => { setClearAgentToken(event.target.checked); if (event.target.checked) setAgentToken(''); }} className="accent-[#d4af37]" />
-                    清除已保存的 Token
-                  </label>
-                )}
-                <p className="mt-2 text-[11px] leading-5 text-[#5f5c68]">Token 使用操作系统安全存储加密，保存后不会在页面中回显。</p>
-              </div>
-            </div>
-          </SettingsCard>
+
 
             </div>
             <div className="grid auto-rows-fr items-stretch gap-5 xl:grid-cols-3">

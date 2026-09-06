@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest'
+import { promises as fs } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { buildSystemPromptAppend, buildUserPrompt } from '../electron/main/services/agent/prompts'
 import {
   createBuiltinPluginConfig,
@@ -28,6 +31,7 @@ import type {
   CanvasEdgeSnapshot,
   CanvasNodeSnapshot,
 } from '../src/shared/ipc.types'
+import { stageChatAttachments } from '../electron/main/services/chat-attachment.service'
 
 describe('vitest smoke', () => {
   it('runs a normal unit test', () => {
@@ -66,6 +70,54 @@ describe('canvas node references', () => {
     expect(prompt).toContain('最后写入者生效')
     expect(prompt).not.toContain('expectedRevision')
     expect(prompt).not.toContain('版本冲突')
+  })
+})
+
+describe('chat file attachments', () => {
+  it('copies an external file into the project and gives the agent a workspace path', async () => {
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'aigc-chat-attachment-'))
+    const projectPath = path.join(tempRoot, 'project')
+    const sourcePath = path.join(tempRoot, 'notes.md')
+    await fs.mkdir(projectPath, { recursive: true })
+    await fs.writeFile(sourcePath, '# reference')
+
+    try {
+      const staged = await stageChatAttachments(projectPath, [{
+        type: 'md',
+        name: 'notes.md',
+        path: sourcePath,
+      }])
+      const attachment = staged?.[0]
+
+      expect(attachment?.path).toContain(path.join('uploads', 'chat-attachments'))
+      expect(await fs.readFile(attachment!.path, 'utf8')).toBe('# reference')
+
+      const prompt = buildUserPrompt({
+        id: 'message-attachment',
+        role: 'user',
+        content: '总结附件',
+        timestamp: 1,
+        attachments: staged,
+      }, projectPath)
+      expect(prompt).toContain('name="notes.md" type="md"')
+      expect(prompt).toContain('uploads/chat-attachments')
+      expect(prompt).not.toContain(sourcePath)
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a missing file instead of exposing an inaccessible path', async () => {
+    const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'aigc-chat-attachment-'))
+    try {
+      await expect(stageChatAttachments(tempRoot, [{
+        type: 'mp4',
+        name: 'missing.mp4',
+        path: path.join(tempRoot, 'missing.mp4'),
+      }])).rejects.toThrow('复制到项目失败')
+    } finally {
+      await fs.rm(tempRoot, { recursive: true, force: true })
+    }
   })
 })
 

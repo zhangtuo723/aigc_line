@@ -15,8 +15,8 @@ import { importProjectMediaFiles, listProjectMediaAssets } from '../services/pro
 export function registerProjectHandlers(): void {
   ipcMain.handle(
     IPC_CHANNELS.project.create,
-    async (_event, name: string, folderPath: string) => {
-      return createProject(name, folderPath);
+    async (_event, name: string, folderPath: string, agent: unknown) => {
+      return createProject(name, folderPath, agent);
     },
   );
 

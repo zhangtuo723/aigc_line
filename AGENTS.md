@@ -4,9 +4,9 @@
 
 ## 项目简介
 
-AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 无限画布、Three.js 3D 导演台和 ComfyUI 生成管线整合在一个项目工作区里，用于 AI 分镜视频创作。用户在聊天里让 Agent 创建“参考图片 → 视频”节点链，在画布上连边、调参、触发生成；生成结果落盘到项目目录并回显到节点。生成片段直接由 video 节点承载，片段内生成 Shot 仍只存在于提示词时间线中；`director` 节点另有用于白模预演的可编辑 Shot/机位工程。
+AIGC CANVAS：Electron 桌面应用，把 Claude Code / Codex Agent（对话）、React Flow 无限画布、Three.js 3D 导演台和 ComfyUI 生成管线整合在一个项目工作区里，用于 AI 分镜视频创作。用户在聊天里让 Agent 创建“参考图片 → 视频”节点链，在画布上连边、调参、触发生成；生成结果落盘到项目目录并回显到节点。生成片段直接由 video 节点承载，片段内生成 Shot 仍只存在于提示词时间线中；`director` 节点另有用于白模预演的可编辑 Shot/机位工程。
 
-技术栈：Electron + Vite + React 19 + TypeScript + Tailwind CSS 4 + @xyflow/react（画布）+ Excalidraw（图片编辑台）+ Three.js / React Three Fiber（3D 导演台）+ zustand（状态）+ @anthropic-ai/claude-agent-sdk（Agent）+ zod（工具入参校验）。包管理用 pnpm。
+技术栈：Electron + Vite + React 19 + TypeScript + Tailwind CSS 4 + @xyflow/react（画布）+ Excalidraw（图片编辑台）+ Three.js / React Three Fiber（3D 导演台）+ zustand（状态）+ @anthropic-ai/claude-agent-sdk + @openai/codex-sdk（Agent）+ zod（工具入参校验）。包管理用 pnpm。
 
 ## 目录结构
 
@@ -17,7 +17,12 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 
 | `electron/main/ipc/` | IPC handler 层，只做参数转发 + 错误包装，业务逻辑在 services |
 | `electron/main/services/` | 主进程业务服务 |
 | `electron/main/services/agent/` | Agent 子系统：会话、流式输出、MCP 工具、系统提示词、画布桥接 |
-| `electron/main/services/agent/tools.ts` | Agent 的 MCP 工具定义（zod schema 在这里） |
+| `electron/main/services/agent/tools.ts` | 双 Agent 共用的 MCP 工具定义与处理器（zod schema 在这里） |
+| `electron/main/services/agent/codex-session.ts` | Codex SDK 会话：按项目排队、runStreamed 事件、恢复、AbortSignal 中断与上下文清空 |
+| `electron/main/services/agent/canvas-mcp.ts` | Codex 画布 MCP：每项目独立的 loopback HTTP 服务及随机 Bearer Token，共用工具 schema/处理器 |
+| `electron/main/services/agent/codex-runtime.ts` / `codex-client.ts` / `models.ts` | SDK 原生运行时与 ASAR 路径解析；子进程合并 NO_PROXY/no_proxy 并强制回环地址绕过代理，保留外网代理及原有排除项；没有显式代理环境变量时，通过 Electron resolveProxy 解析系统代理并传入 Codex 会话和模型发现子进程；只读模型发现；Claude/Codex 模型列表 |
+| `src/shared/agent-config.ts` | 项目 Agent 类型与模型校验、历史项目默认值 |
+| `src/components/CreateProjectDialog.tsx` | 新建项目弹窗：名称、Agent、模型与目录选择 |
 | `electron/main/services/agent/prompts.ts` | Agent 系统提示词（分镜创作规范） |
 | `electron/main/services/agent/builtin-plugin.ts` | 解析开发/打包环境中的内置 Claude Plugin 路径并生成 SDK 配置 |
 | `electron/main/services/agent/skills.ts` | 枚举当前可用 Skill：活动 SDK 会话 + 应用内置、项目级、用户级目录兜底 |
@@ -29,7 +34,8 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 
 | `electron/main/services/qwen-video-analysis.service.ts` | 通用 Qwen 视频分析：接受项目内视频路径或公开 HTTP(S) URL，顺序扫描完整画面与音轨，按自由要求给出带时间证据、事实/转写/推断边界和不确定性的报告 |
 | `electron/main/services/project.store.ts` | 项目持久化：清单、追加式 JSONL 聊天事件日志、会话 id、画布快照（存项目目录下） |
 | `electron/main/services/project-media.service.ts` | 项目媒体资产：把本地图片/视频/音频复制到 `uploads/`，保存导演台构图、预演视频与画板导出到 `generated/director-stills/`、`generated/director-videos/`、`generated/image-edits/`，保存画板节点缩略图到 `.aigc-line/board-previews/`，扫描 `generated/` 与 `uploads/` 供资产面板使用 |
-| `electron/main/services/settings.service.ts` | 应用设置：ComfyUI 地址、Agent API、token（safeStorage 加密） |
+| `electron/main/services/chat-attachment.service.ts` | 聊天通用文件附件：发送前校验普通文件并把项目外文件复制到 `uploads/chat-attachments/`，保证 Agent 只收到项目内可访问路径 |
+| `electron/main/services/settings.service.ts` | 应用设置：ComfyUI 与图片/视频/分析服务配置；Agent 使用各自本机配置 |
 | `electron/main/services/message-hub.ts` | 主进程内部事件总线（Agent 事件 → 渲染进程推送） |
 | `electron/preload/index.ts` | preload：`window.electronAPI` 的唯一出处，渲染进程只能用它访问主进程 |
 | `src/shared/` | 主进程与渲染进程共享的代码 |
@@ -53,12 +59,13 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 
 
 ## 现有功能
 
-- **项目管理**：创建/打开/删除项目，每项目一个本地目录，聊天历史、画布快照、生成产物都持久化在项目内。应用启动时可恢复上次打开的项目；普通列表刷新或删除项目时保持当前页面，不触发自动导航。
+- **项目管理**：新建项目弹窗选择名称、Claude Code / Codex、模型（动态列表/默认/自定义）及目录；项目索引与 `.aigc-line/manifest.json` 保存 `agent.provider/model`，缺失字段的历史项目默认 Claude Code。模型列表加载期间显示转圈动画与加载提示，并暂时禁用模型下拉框；完成或失败后恢复选择。模型列表使用 `chat:listModels` IPC；Claude 从 SDK `supportedModels()` 获取，Codex SDK 无模型发现方法，仅列表查询使用只读 app-server `model/list`。同目录重复创建或已有清单时拒绝覆盖；创建串行执行，目录/清单写入成功后才更新索引。创建/打开/删除项目，每项目一个本地目录，聊天历史、画布快照、生成产物都持久化在项目内。应用启动时可恢复上次打开的项目；普通列表刷新或删除项目时保持当前页面，不触发自动导航。
 - **聊天持久化**：每个项目使用 `.aigc-line/chat-events.jsonl` 追加保存 `message.created` / `message.replaced` 事件，并按项目串行写入；加载时重放为消息列表。崩溃造成的末行不完整可忽略并在下次写入前备份、修复；中间行损坏必须明确报错，不得静默显示为空。旧 `chat-history.json` 不再读取或迁移。
-- **Agent 对话**：Claude Agent SDK，流式输出，可中断；输入框键入 `/` 可搜索当前可用 Skill，并支持直接粘贴 PNG/JPEG/WebP/GIF 图片作为附件（写入项目 `uploads/images/` 后预览、发送与持久化），SDK 的 `/clear` 等控制命令不会混入 Skill 菜单；标题栏“新建上下文”会确认后清空 Claude 记忆但保留历史/画布，并持久化上下文分界线；选中任意画布节点可通过“添加到对话”作为节点引用附件，Agent 会按节点 id 读取并精确修改；通过 MCP 工具读写画布（GetCanvasOverview / GetCanvasNode / GetCanvasCapabilities / CreateCanvasNodes / UpdateCanvasNodes / ConnectCanvasNodes / InvokeNodeAction / AnalyzeVideo / PushArtifact 等）。`GetCanvasOverview` 只返回无版本号的节点计数与轻量摘要，`GetCanvasNode` 按单个 ID 返回完整节点数据及其连接摘要；整图 `get-state` 仅供主进程内部服务使用。`AnalyzeVideo` 是与画布无关的通用工具，接受项目内视频路径或公开 HTTP(S) URL 和自由分析要求，固定调用 Qwen3.5-Omni Plus 顺序扫描完整画面与音轨，区分观察、转写与推断，以时间戳和不确定性说明支撑关键结论，并把 Markdown 报告保存到 `generated/analyses/`。聊天、工具状态、Artifact 和回合结束的实时 IPC 推送均携带 `projectId`，渲染进程只接收当前项目事件；项目历史异步加载也必须在写入状态前复核当前项目，避免切换竞态串线。工具状态监听 `PreToolUse` / `PostToolUse` / `PostToolUseFailure`；回合、流或应用结束后遗留的 `running` 调用会显示为“已中断”，不会永久 loading。
-- **内置 Skill**：`aigc-canvas` 本地 Plugin 随应用打包并由 Agent SDK 加载；项目级 `.claude/skills` 仍可自动发现，应用不会向项目复制或覆盖 Skill。
+- **Agent 对话**：项目级动态路由到 Claude Agent SDK 或 `@openai/codex-sdk`。Claude 使用本机 user/project/local 配置与进程环境，设置页已移除 Agent URL/Token 配置且会话不再注入历史应用凭证。Codex 用 SDK `startThread/resumeThread/runStreamed`、按项目排队、`AbortSignal` 中断，支持本地图片和 Skill 路径指引；从 SDK 依赖解析原生运行时，打包时 `node_modules/@openai/codex-*/**` 解包，支持 `CODEX_EXECUTABLE` 显式覆盖。Codex 的工作目录不要求 Git 仓库。画布工具通过每项目独立的 `127.0.0.1` 随机端口 MCP 服务调用，随机 Token 仅传给对应 SDK 子进程，并校验 Host/Origin/请求大小/运行状态，服务随回合关闭；禁止往全局 Codex 配置或项目目录写入 MCP 凭证。Claude `session.json` 与 Codex `codex-session.json` 独立保存，不得混用恢复 ID。Codex 消息 ID 带每轮 UUID，避免 CLI `item_0` 重复覆盖历史；正文中间事件只更新界面，完成或中断后落盘，工具未完成则标记已中断；SDK `error` 重连事件展示连接状态并允许重试，只有 `turn.failed`、流异常或缺失完成事件才终结回合。流式输出，可中断；输入框键入 `/` 可搜索当前可用 Skill，并支持直接粘贴 PNG/JPEG/WebP/GIF 图片作为附件（写入项目 `uploads/images/` 后预览、发送与持久化），SDK 的 `/clear` 等控制命令不会混入 Skill 菜单；标题栏“新建上下文”会确认后清空当前 Agent 记忆但保留历史/画布，并持久化上下文分界线；选中任意画布节点可通过“添加到对话”作为节点引用附件，Agent 会按节点 id 读取并精确修改；通过 MCP 工具读写画布（GetCanvasOverview / GetCanvasNode / GetCanvasCapabilities / CreateCanvasNodes / UpdateCanvasNodes / ConnectCanvasNodes / InvokeNodeAction / AnalyzeVideo / PushArtifact 等）。`GetCanvasOverview` 只返回无版本号的节点计数与轻量摘要，`GetCanvasNode` 按单个 ID 返回完整节点数据及其连接摘要；整图 `get-state` 仅供主进程内部服务使用。`AnalyzeVideo` 是与画布无关的通用工具，接受项目内视频路径或公开 HTTP(S) URL 和自由分析要求，固定调用 Qwen3.5-Omni Plus 顺序扫描完整画面与音轨，区分观察、转写与推断，以时间戳和不确定性说明支撑关键结论，并把 Markdown 报告保存到 `generated/analyses/`。聊天、工具状态、Artifact 和回合结束的实时 IPC 推送均携带 `projectId`，渲染进程只接收当前项目事件；项目历史异步加载也必须在写入状态前复核当前项目，避免切换竞态串线。工具状态监听 `PreToolUse` / `PostToolUse` / `PostToolUseFailure`；回合、流或应用结束后遗留的 `running` 调用会显示为“已中断”，不会永久 loading。
+- **聊天文件附件**：输入框文件选择器支持任意普通文件，包括 txt/md、mp4、mp3 等。发送前，项目外文件必须复制到当前项目 `uploads/chat-attachments/`，聊天历史和 Agent prompt 只保存/暴露项目内路径；任一文件缺失、不是普通文件或复制失败时整条消息拒绝发送，不得把 Agent 无法访问的项目外路径作为回退。
+- **内置 Skill**：`aigc-canvas` 本地 Plugin 随应用打包，Claude 由 SDK plugins 加载；项目级 `.claude/skills` 仍可自动发现。Codex 扫描项目 `.agents/skills`、用户 `.agents/skills` 与 `.codex/skills`，以及同一内置 Skill 目录；系统指令列出路径，显式斜杠调用会要求读取对应 SKILL.md。应用不会向项目复制或覆盖 Skill。
   - `voiceover-to-video`：按旁白音频与 SRT 时间轴生成画面；图片提示词统一使用中文，视频提示词按一个节点内多个带时间段的子分镜描述统一风格、运镜、转场与音效；禁止生成 BGM，但允许不遮盖旁白的环境音和拟音。图片与视频生成前分别取得用户明确确认；生成视频后只核对节点状态和产物路径，逐段变速对齐后交给 `jianying-draft` 创建剪映草稿。
-  - `script-to-drama-video`：统一承接短剧创作、分镜规划、导演包编写、现有 image → video 链修改和连续性修复；先做戏剧节拍与人物调度，再按切镜理由拆成 5/10/15 秒生成片段与片段内 Shot，每个片段直接对应一个 video 节点。生成后核对节点状态和产物路径，不自动执行视频审核。详细导演方法放在 `references/directing-and-continuity.md`，人物参考、场景参考和 H3 prompt 分别强制委派给下面三个独立 Skill。
+  - `script-to-drama-video`：统一承接短剧创作、分镜规划、现有 image → video 链修改和连续性修复。主 Agent 串行调度三个真实子 Agent：资产 Agent 读取原剧本、生成/复用人物场景道具并输出 `资产报告.md`；分镜师 Agent 读取原剧本和资产报告，拆分 5/10/15 秒片段及内部 Shot、创建视频节点/引用/连线、逐片调用 H3 Skill 并输出 `分镜交接.md`；独立检查 Agent 只读实际画布，核对人物引用、分段连续性、必要补镜/描述和 prompt，输出每轮检查报告。未通过则优化后复查，直到全部待生成片段通过且获得用户生成授权才生成；阻塞不得跳过，通过后内容变更须复查。报告保存在项目 `generated/drama-reports/<本次任务标识>/`，交接规范在 `references/agent-handoffs.md`，导演方法在 `references/directing-and-continuity.md`。人物/场景/H3 专项 Skill 由对应角色调用，原参考图分阶段确认保留；生成后只核对节点状态和产物路径，不自动执行成片视频审核。
   - `character-reference-generation`：每个角色先生成唯一身份底图，再以底图为单一参考通过图生图派生不同场景/服装/妆造/状态版本；所有图片均为从左到右“头部近景、自然站立全身正面、侧面、背面”的横向四联图，三个全身角度禁止 A-pose/T-pose。3D、半写实、国漫/游戏/影视 CG 人物必须读取 `references/3d-character-prompt-template.md`，按角色档案替换模板中的年龄、性别、身高、体型、骨相和服装示例。
   - `environment-reference-generation`：为每个去重后的 `sceneId` 生成无人高机位斜俯视空间全景图，固定布局、出入口、行动路线、材质和主光方向；不生成普通平视图、垂直鸟瞰平面图、二维户型图或多视图拼贴，生成前必须取得用户明确确认。
   - `h3-prompt-writing`：MiniMax H3 官方提示词写作 Skill，负责 T2VA / I2VA / FL2VA / L2VA / Ref2VA 的最终提示词格式、引用标签、时间戳、对白和声音字段；`script-to-drama-video` 提供完整逐片段导演包、片段内 Shot 时间线及真实引用数组顺序，并在 Ref2VA 视频生成或重做时调用它，不自行复制或猜测官方格式。
@@ -86,7 +93,7 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 
   - `upscale` 视频放大：RTX Video Super Resolution，连入视频节点作为输入（多输入可点选，`inputNodeId`），倍数 2x/3x/4x，质量 FAST/MEDIUM/HIGH/ULTRA，帧率经 VHS_VideoInfo 自动跟随源视频
   - `director` 3D 导演台：保存严格 v2 的可序列化 `directorProject`，包含全局稳定元素 ID/Transform/姿势、可锁定 Shot、人物路径、相机位置/目标/FOV/Roll、24fps 关键帧和注视/跟随人物约束；最近构图路径写入 `sourcePath`
 - **图片/视频生成集成**：ComfyUI 工作流模板在 `resources/comfyui-workflows/`，`comfyui.service.ts` 注入参数 → 排队 → 轮询 history → 下载结果；默认 ComfyUI 文生图为 `krea2-turbo-t2i`，使用 `krea2_turbo_fp8_scaled.safetensors` 和 8 步 Euler/simple 采样，Krea 2 Turbo 与 Z-Image Turbo 均直接以标准 2K 尺寸生成并保存，图片工作流不包含 RTX 放大节点；旧 Flux2 Klein 文生图/图生图工作流已移除且旧默认设置自动迁移到 Krea 2 Turbo。`minimax-h3-r2v` 是标准全模态参考，`minimax-h3-r2v-turbo` 是加载 `minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors` 的 8 步加速版本，两者共用相同参考轨语义；MiniMax H3 视频使用 1024 档，16:9 / 9:16 / 4:3 / 1:1 分别为 1024×576 / 576×1024 / 1024×768 / 1024×1024。火山方舟 `seedance-2.0` 工作流使用模型 `doubao-seedance-2-0-260128`，通过 `/contents/generations/tasks` 异步提交与轮询，支持 5/10/15 秒文生视频和最多 9 图 + 3 视频 + 3 音频的项目内参考素材，默认 720p、同步音频、无水印，完成后下载到 `generated/videos/`。ComfyUI/Google 图片使用标准 2K 映射：16:9 为 2048×1152、9:16 为 1152×2048、4:3 为 2048×1536、1:1 为 2048×2048；Seedream 使用官方 2K 参考尺寸 2816×1584、1584×2816、2368×1776、2048×2048。Google Gemini 图片 API 由 `google-image.service.ts` 调用 Nano Banana 2 / Pro；火山方舟图片 API 由 `seedream-image.service.ts` 调用 Doubao-Seedream-5.0-pro / lite；两者固定生成 2K 图片并支持项目内参考图。
-- **设置页**：宽屏使用基础服务双栏、AI 云服务三栏布局，同一排的配置卡片等宽等高；可配置 ComfyUI 地址、Agent API URL/token、Google AI Studio API key 与可选代理、火山方舟 Seedream/Seedance 普通 API 或 Agent Plan Base URL/key、Qwen3.5-Omni Plus API URL/key 和默认生图模型，并提供 ComfyUI/Google AI/Qwen/方舟连接测试。方舟 Base URL 会自动移除用户误粘贴的一个或多个 `/images/generations` 后缀。Qwen/Google Key 使用 safeStorage；方舟 Key 按用户要求明文保存在本机 `settings.json`。所有配置统一使用页面顶部“保存配置”，方舟配置保存后再次读取主进程设置确认落盘，并在卡片内显示“已保存”与清除选项。
+- **设置页**：宽屏使用 ComfyUI 基础服务单栏、AI 云服务三栏布局，同一排的配置卡片等宽等高；可配置 ComfyUI 地址、Google AI Studio API key 与可选代理、火山方舟 Seedream/Seedance 普通 API 或 Agent Plan Base URL/key、Qwen3.5-Omni Plus API URL/key 和默认生图模型，并提供 ComfyUI/Google AI/Qwen/方舟连接测试。方舟 Base URL 会自动移除用户误粘贴的一个或多个 `/images/generations` 后缀。Qwen/Google Key 使用 safeStorage；方舟 Key 按用户要求明文保存在本机 `settings.json`。所有配置统一使用页面顶部“保存配置”，方舟配置保存后再次读取主进程设置确认落盘，并在卡片内显示“已保存”与清除选项。
 - **自动更新**：electron-updater。
 
 ## 核心代码在哪里
@@ -123,8 +130,8 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Agent（对话）、React Flow 
 8. **提交前验证**：`pnpm typecheck` 必须通过；`pnpm test`（vitest）不要跑挂；UI 改动大的话跑 `pnpm test:e2e`（Playwright）。
 9. **样式约定**：深色画布（`#0a0a0f` 底 + `#d4af37` 金强调色），Tailwind 原子类，跟随 CanvasArea 现有面板风格。聊天区按信息层级展示：用户/AI 正文和 Artifact 使用消息卡片，连续工具调用使用无头像的紧凑执行时间线，工具入参与结果默认折叠，避免长回合被低价值过程信息撑高。
 10. **内置 Skill 隔离**：内置 Skill 只能放在 `resources/claude-plugin/` 并通过 SDK `plugins` 加载；不要复制到项目 `.claude/skills`。新增 Skill 使用 kebab-case 目录名和包含 `name`、`description` 的 `SKILL.md`，并提升 `.claude-plugin/plugin.json` 版本。
-11. **Skill 斜杠菜单**：`chat:listSkills` 扫描内置、项目和用户 Skill；活动 Query 的 `supportedCommands()` 只补充已发现 Skill 的元数据，不得把 `/clear`、`/batch` 等控制命令加入菜单。显式 `/<skill>` 必须保持在 Agent prompt 第一行；节点引用和附件上下文追加在命令之后。
-12. **新建上下文**：通过 `chat:clearContext` 向 SDK 发送隐藏的 `/clear`，仅在 Agent 空闲时允许执行；吞掉该命令的 `(no content)`，完成后追加并持久化 `event: 'context-cleared'` 分界消息。不要自动删除聊天历史、画布或项目文件。
+11. **Skill 斜杠菜单**（Claude / Codex 按项目分别扫描目录）：`chat:listSkills` 扫描内置、项目和用户 Skill；活动 Query 的 `supportedCommands()` 只补充已发现 Skill 的元数据，不得把 `/clear`、`/batch` 等控制命令加入菜单。显式 `/<skill>` 必须保持在 Agent prompt 第一行；节点引用和附件上下文追加在命令之后。
+12. **新建上下文**：Codex 在空闲时清除其恢复 ID，下一轮用 SDK 新建 Thread，保留历史和画布；Claude 通过 `chat:clearContext` 向 SDK 发送隐藏的 `/clear`，仅在 Agent 空闲时允许执行；吞掉该命令的 `(no content)`，完成后追加并持久化 `event: 'context-cleared'` 分界消息。不要自动删除聊天历史、画布或项目文件。
 13. **旁白视频生成门**：`voiceover-to-video` 必须在实际生成图片、视频前分别询问并等待用户明确同意，重做也要重新确认；系统实际提交的图片提示词必须使用中文；每个视频提示词必须包含覆盖完整时长的一个或多个连续子分镜，默认优先可执行的单一连续 Shot，只有新增信息、关键反应或空间关系变化时才切镜；禁止 BGM，但可生成不遮盖原旁白的同步环境音和拟音。视频生成后只核对节点状态和 `sourcePath`，不自动执行质量审核。
 14. **剧本深化、导演方法、资产委派与片段层级**：`script-to-drama-video` 是唯一通用短剧分镜 Skill；`storyboard-production` 已删除。默认保留核心人物关系、事实、冲突、因果和结局方向，允许为视听表达补足动作、反应、潜台词、必要对白/旁白和声画衔接；改变核心动机、关键事件或结局必须先确认。先按 `references/directing-and-continuity.md` 建立节拍、blocking、切镜理由和连续性账本，再拆成可独立生成的 5/10/15 秒片段；每个片段直接创建一个 video 节点，片段内 Shot 使用连续时间范围写入导演包和 prompt，不创建 Canvas 节点。人物图必须调用 `character-reference-generation`：每个 `characterId` 先生成唯一身份底图，审核合格并取得 `sourcePath` 后，再由该底图直接连接所有场景/服装变体并通过单参考图图生图生成；禁止变体链式派生和不同场景独立文生图，底图重做后全部变体都要重做。场景图必须调用 `environment-reference-generation` 生成无人斜俯视空间全景，禁止在生产 Skill 内维护 prompt template。视频固定使用 `minimax-h3-r2v`，最终 Ref2VA prompt 必须调用 `h3-prompt-writing`。
 16. **设置版本与持久化校验**：Vite 可能只热更新渲染进程而 Electron 主进程仍为旧版本。设置页必须验证 `get/saveAppSettings` 返回值包含 Qwen、Google AI 与 Seedream 字段；缺失时提示完全重启，不能误报保存成功。主进程写入设置后必须重新读取并验证 URL 与 Key。Seedream 普通 API Base URL 为 `https://ark.cn-beijing.volces.com/api/v3`，Agent Plan Base URL 为 `https://ark.cn-beijing.volces.com/api/plan/v3`；设置、测试和运行时均须规范化完整生图地址，避免重复追加 `/images/generations`。Qwen / Google AI API Key 使用 safeStorage 加密并回填；Seedream API Key 按用户要求使用 `seedreamApiKey` 字段明文保存、回填和清除，保存新值时删除旧 `encryptedSeedreamApiKey`。Agent Token 仍不回显。

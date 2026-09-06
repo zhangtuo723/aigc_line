@@ -28,12 +28,13 @@ export function buildUserPrompt(userMessage: ChatMessage, folderPath: string): s
       .map((a) => {
         // Prefer workspace-relative paths (staged under uploads/)
         const rel = a.path ? path.relative(folderPath, a.path) : '';
-        const location =
-          rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? rel : a.path;
-        return `- ${a.name} (${a.type})${location ? ` at ${location}` : ''}`;
+        const location = rel && !rel.startsWith('..') && !path.isAbsolute(rel)
+          ? rel.split(path.sep).join('/')
+          : a.path;
+        return `- name=${JSON.stringify(a.name)} type=${JSON.stringify(a.type)}${location ? ` path=${JSON.stringify(location)}` : ''}`;
       })
       .join('\n');
-    contextBlocks.push(`User uploaded files (already inside the workspace, use Read/Bash to inspect them):\n${attachmentLines}`);
+    contextBlocks.push(`用户上传了以下文件。路径均位于当前项目工作区内；按用户要求使用 Read、Bash 或适合该媒体类型的工具读取，不要猜测文件内容：\n${attachmentLines}`);
   }
 
   const content = userMessage.content.trim();

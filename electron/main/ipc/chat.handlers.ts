@@ -1,11 +1,13 @@
 import { ipcMain, nativeImage } from 'electron';
+import { listAgentModels } from '../services/agent/models';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { IPC_CHANNELS } from '../../../src/shared/ipc.channels';
-import type { Attachment, ChatMessage } from '../../../src/shared/ipc.types';
+import type { ChatMessage } from '../../../src/shared/ipc.types';
 import { normalizeInterruptedToolCalls } from '../../../src/shared/tool-call-status';
 import { clearAgentContext, enqueueAgentMessage, interruptAgentTurn, listAvailableSkills } from '../services/agent';
+import { stageChatAttachments } from '../services/chat-attachment.service';
 import { messageHub } from '../services/message-hub';
 import { loadProject, readChatHistory, updateChatMessage } from '../services/project.store';
 import log from 'electron-log/main';
@@ -18,42 +20,8 @@ const PASTED_IMAGE_EXTENSIONS: Record<string, string> = {
 };
 const MAX_PASTED_IMAGE_BYTES = 20 * 1024 * 1024;
 
-/**
- * Copy uploaded attachments into the project workspace (uploads/) so the
- * agent can actually read them - its tools are scoped to the project folder.
- */
-async function stageAttachments(
-  folderPath: string,
-  attachments?: Attachment[],
-): Promise<Attachment[] | undefined> {
-  if (!attachments || attachments.length === 0) return attachments;
-  const uploadsDir = path.join(folderPath, 'uploads');
-  await fs.mkdir(uploadsDir, { recursive: true });
-  const staged: Attachment[] = [];
-  for (const att of attachments) {
-    if (!att.path) {
-      staged.push(att);
-      continue;
-    }
-    try {
-      const sourcePath = path.resolve(att.path);
-      const projectPath = path.resolve(folderPath);
-      if (sourcePath.startsWith(`${projectPath}${path.sep}`)) {
-        staged.push({ ...att, path: sourcePath });
-        continue;
-      }
-      const dest = path.join(uploadsDir, `${Date.now()}-${path.basename(att.path)}`);
-      await fs.copyFile(att.path, dest);
-      staged.push({ ...att, path: dest });
-    } catch (err) {
-      log.warn('[Chat] Failed to stage attachment:', att.path, err);
-      staged.push(att);
-    }
-  }
-  return staged;
-}
-
 export function registerChatHandlers(): void {
+  ipcMain.handle(IPC_CHANNELS.chat.listModels, (_event, provider) => listAgentModels(provider));
   ipcMain.handle(
     IPC_CHANNELS.chat.savePastedImage,
     async (_event, projectId: string, data: ArrayBuffer, mimeType: string) => {
@@ -103,6 +71,7 @@ export function registerChatHandlers(): void {
         await clearAgentContext({
           projectId,
           folderPath: project.folderPath,
+          agent: project.agent,
           allowedTools: ['Read', 'Bash', 'Glob', 'Grep', 'Edit', 'Write'],
         });
         return { success: true };
@@ -120,7 +89,7 @@ export function registerChatHandlers(): void {
     async (_event, projectId: string) => {
       const project = await loadProject(projectId);
       if (!project) return [];
-      return listAvailableSkills(project.id, project.folderPath);
+      return listAvailableSkills(project.id, project.folderPath, project.agent?.provider);
     },
   );
 
@@ -182,7 +151,7 @@ export function registerChatHandlers(): void {
         // Stage uploaded files into the workspace before the agent runs
         const stagedMessage: ChatMessage = {
           ...message,
-          attachments: await stageAttachments(project.folderPath, message.attachments),
+          attachments: await stageChatAttachments(project.folderPath, message.attachments),
         };
 
         // Queue into the project's long-lived streaming agent session.
@@ -191,6 +160,7 @@ export function registerChatHandlers(): void {
         await enqueueAgentMessage(stagedMessage, {
           projectId,
           folderPath: project.folderPath,
+          agent: project.agent,
           allowedTools: ['Read', 'Bash', 'Glob', 'Grep', 'Edit', 'Write'],
         });
       } catch (err) {
@@ -200,6 +170,7 @@ export function registerChatHandlers(): void {
           err instanceof Error ? err.message : String(err),
         );
         messageHub.notifyTurnEnd(projectId);
+        throw err;
       }
     },
   );

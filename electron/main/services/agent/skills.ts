@@ -1,4 +1,5 @@
 import { app } from 'electron';
+import type { AgentProvider } from '../../../../src/shared/agent-config';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AvailableSkill, AvailableSkillSource } from '../../../../src/shared/ipc.types';
@@ -38,6 +39,7 @@ async function scanSkillDirectory(
     const metadata = parseSkillFrontmatter(content, entry.name);
     skills.push({
       ...metadata,
+      path: path.join(root, entry.name, 'SKILL.md'),
       name: namespace ? `${namespace}:${metadata.name}` : metadata.name,
       source,
     });
@@ -60,7 +62,7 @@ async function readBuiltinPluginNamespace(pluginPath: string): Promise<string> {
   }
 }
 
-export async function scanAvailableSkills(folderPath: string): Promise<AvailableSkill[]> {
+export async function scanAvailableSkills(folderPath: string, provider: AgentProvider = 'claude-code'): Promise<AvailableSkill[]> {
   const builtinPluginPath = resolveBuiltinPluginPath({
     isPackaged: app.isPackaged,
     appPath: app.getAppPath(),
@@ -68,18 +70,19 @@ export async function scanAvailableSkills(folderPath: string): Promise<Available
   });
   const builtinNamespace = await readBuiltinPluginNamespace(builtinPluginPath);
 
-  const [userSkills, builtinSkills, projectSkills] = await Promise.all([
-    scanSkillDirectory(path.join(app.getPath('home'), '.claude', 'skills'), 'user'),
+  const [userSkills, builtinSkills, projectSkills, sharedUserSkills] = await Promise.all([
+    scanSkillDirectory(path.join(app.getPath('home'), provider === 'codex' ? '.codex' : '.claude', 'skills'), 'user'),
     scanSkillDirectory(
       path.join(builtinPluginPath, 'skills'),
       'builtin',
       builtinNamespace,
     ),
-    scanSkillDirectory(path.join(folderPath, '.claude', 'skills'), 'project'),
+    scanSkillDirectory(path.join(folderPath, provider === 'codex' ? '.agents' : '.claude', 'skills'), 'project'),
+    provider === 'codex' ? scanSkillDirectory(path.join(app.getPath('home'), '.agents', 'skills'), 'user') : Promise.resolve([]),
   ]);
 
   // Later sources take precedence for identical unqualified names.
   return [...new Map(
-    [...userSkills, ...builtinSkills, ...projectSkills].map((skill) => [skill.name, skill]),
+    [...userSkills, ...sharedUserSkills, ...builtinSkills, ...projectSkills].map((skill) => [skill.name, skill]),
   ).values()].sort((a, b) => a.name.localeCompare(b.name));
 }

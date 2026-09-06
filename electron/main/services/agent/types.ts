@@ -1,4 +1,6 @@
+import type { ProjectAgentConfig } from '../../../../src/shared/agent-config';
 export interface AgentOptions {
+  agent?: ProjectAgentConfig;
   projectId: string;
   folderPath: string;
   allowedTools?: string[];

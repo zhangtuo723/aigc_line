@@ -87,6 +87,56 @@ test.describe('AIGC CANVAS Electron UI', () => {
     await expect(page.getByText('尚未开启创作之旅')).toBeVisible()
   })
 
+  test('new project dialog selects provider, model and folder without creating on cancel', async () => {
+    await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
+    const modal = page.getByRole('dialog', { name: '新建项目' })
+    await expect(modal).toBeVisible()
+    await expect(modal.getByRole('button', { name: '创建项目', exact: true })).toBeDisabled()
+    await modal.getByLabel('Agent 类型').selectOption('codex')
+    await modal.getByLabel('模型', { exact: true }).selectOption('__custom')
+    await modal.getByLabel('自定义模型 ID').fill('custom-codex-model')
+    await modal.getByLabel('项目名称').fill('Codex UI test')
+    await page.screenshot({ path: 'test/screenshots/create-project-agent.png' })
+    await page.keyboard.press('Escape')
+    await expect(modal).toHaveCount(0)
+    expect((await page.evaluate(() => window.electronAPI.listProjects())).projects).toHaveLength(0)
+  })
+
+  test('creates a Codex project through the dialog and restores provider/model', async () => {
+    const codexWorkspace = path.join(root, 'test-results', `codex-workspace-${runId}`)
+    await fs.mkdir(codexWorkspace, { recursive: true })
+    await electronApp.evaluate(({ dialog }, folderPath) => {
+      const original = dialog.showOpenDialog
+      dialog.showOpenDialog = (async () => {
+        dialog.showOpenDialog = original
+        return { canceled: false, filePaths: [folderPath] }
+      }) as typeof dialog.showOpenDialog
+    }, codexWorkspace)
+    await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
+    const modal = page.getByRole('dialog', { name: '新建项目' })
+    await modal.getByLabel('Agent 类型').selectOption('codex')
+    await modal.getByLabel('模型', { exact: true }).selectOption('__custom')
+    await modal.getByLabel('自定义模型 ID').fill('custom-codex-model')
+    await modal.getByLabel('项目名称').fill('Codex E2E')
+    await modal.getByRole('button', { name: /浏览/ }).click()
+    await expect(modal.getByText(codexWorkspace, { exact: true })).toBeVisible()
+    expect(await modal.evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1)
+    await page.screenshot({ path: 'test/screenshots/create-project-agent.png' })
+    await modal.getByRole('button', { name: '创建项目', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Codex', exact: true })).toBeVisible()
+    const index = await page.evaluate(() => window.electronAPI.listProjects())
+    expect(index.projects[0].agent).toEqual({ provider: 'codex', model: 'custom-codex-model' })
+    const manifest = JSON.parse(await fs.readFile(path.join(codexWorkspace, '.aigc-line', 'manifest.json'), 'utf8'))
+    expect(manifest.agent).toEqual(index.projects[0].agent)
+    await page.reload()
+    await expect(page.getByRole('heading', { name: 'Codex', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: '返回' }).click()
+    const card = page.getByRole('heading', { name: 'Codex E2E', exact: true }).locator('..')
+    await expect(card).toContainText('Codex · custom-codex-model')
+    await card.hover()
+    await card.getByRole('button', { name: '删除项目' }).click()
+  })
+
   test('slash opens the available skill menu and inserts a selection', async () => {
     currentProjectId = await page.evaluate(async (folderPath) => {
       const project = await window.electronAPI.createProject('Skill E2E', folderPath)
@@ -95,7 +145,7 @@ test.describe('AIGC CANVAS Electron UI', () => {
     }, testWorkspaceDir)
     await page.reload()
 
-    const input = page.getByPlaceholder('描述你的想法，输入 / 使用 Skill，或粘贴图片…')
+    const input = page.getByPlaceholder('描述你的想法，输入 / 使用 Skill，或添加文件…')
     await expect(input).toBeVisible()
     await input.fill('/')
 
@@ -111,6 +161,12 @@ test.describe('AIGC CANVAS Electron UI', () => {
     await expect(input).toHaveValue('/aigc-canvas:script-to-drama-video ')
 
     await input.fill('')
+    const attachmentPath = path.join(testWorkspaceDir, 'reference.MP4')
+    await fs.writeFile(attachmentPath, 'test-video-file')
+    await page.locator('input[type="file"]').setInputFiles(attachmentPath)
+    await expect(page.getByText('reference.MP4')).toBeVisible()
+    await page.getByTitle('移除附件').click()
+
     await input.evaluate((element) => {
       const base64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
       const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0))
@@ -128,7 +184,7 @@ test.describe('AIGC CANVAS Electron UI', () => {
 
   test('new context requires confirmation and explains what is preserved', async () => {
     await page.getByRole('button', { name: '新建上下文' }).click()
-    const dialog = page.getByRole('dialog', { name: '新建 Claude 上下文？' })
+    const dialog = page.getByRole('dialog', { name: '新建 Agent 上下文？' })
     await expect(dialog).toBeVisible()
     await expect(dialog).toContainText('聊天历史和画布内容会继续保留')
     await dialog.getByRole('button', { name: '取消' }).click()
@@ -424,16 +480,15 @@ test.describe('AIGC CANVAS Electron UI', () => {
     await expect(page.getByText('Doubao-Seedream-5.0-lite · 文生图 / 图生图 · 2K')).toBeVisible()
 
     const comfyBox = await page.getByRole('heading', { name: 'ComfyUI 服务' }).boundingBox()
-    const agentBox = await page.getByRole('heading', { name: 'Agent 环境' }).boundingBox()
+    await expect(page.getByRole('heading', { name: 'Agent 环境' })).toHaveCount(0)
+    await expect(page.getByText('ANTHROPIC_AUTH_TOKEN')).toHaveCount(0)
     const qwenBox = await page.getByRole('heading', { name: 'Qwen 音视频审查' }).boundingBox()
     const googleBox = await page.getByRole('heading', { name: 'Google AI 图片生成' }).boundingBox()
     const seedreamBox = await page.getByRole('heading', { name: '方舟图片 / 视频生成' }).boundingBox()
     expect(comfyBox).not.toBeNull()
-    expect(agentBox).not.toBeNull()
     expect(qwenBox).not.toBeNull()
     expect(googleBox).not.toBeNull()
     expect(seedreamBox).not.toBeNull()
-    expect(agentBox!.x).toBeGreaterThan(comfyBox!.x + 300)
     expect(googleBox!.x).toBeGreaterThan(qwenBox!.x + 250)
     expect(seedreamBox!.x).toBeGreaterThan(googleBox!.x + 250)
 

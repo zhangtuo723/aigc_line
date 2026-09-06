@@ -1,3 +1,4 @@
+import { agentLabel } from '../shared/agent-config'
 import { useRef, useEffect, useState } from 'react'
 import type { ChatMessage as ChatMessageType } from '../shared/ipc.types'
 import { ChatMessageItem } from './ChatMessage'
@@ -70,7 +71,7 @@ export function ChatPanel() {
       {/* Header */}
       <div className="flex items-center gap-2 border-b border-white/[0.08] px-4 py-3">
         <span className="text-[9px] text-[#d4af37]">✦</span>
-        <h3 className="text-sm font-medium tracking-wider text-[#e8e6df]">对话记录</h3>
+        <h3 className="text-sm font-medium tracking-wider text-[#e8e6df]" title={`${agentLabel(currentProject?.agent)} · ${currentProject?.agent?.model || '默认模型'}`}>{agentLabel(currentProject?.agent)}</h3>
         <div className="ml-auto flex items-center gap-1.5 text-[10px] tabular-nums text-[#6d6a78]">
           <span>{dialogueCount} 条对话</span>
           {toolStepCount > 0 && (
@@ -88,7 +89,7 @@ export function ChatPanel() {
           }}
           disabled={!currentProject || isAgentThinking || isClearingContext}
           className="ml-1 rounded-md border border-white/10 px-2 py-1 text-[10px] text-[#8a8794] transition hover:border-[#d4af37]/40 hover:bg-[#d4af37]/[0.08] hover:text-[#e8c766] disabled:cursor-not-allowed disabled:opacity-40"
-          title={isAgentThinking ? '请等待当前回合结束' : '清空 Claude 上下文，但保留聊天历史和画布'}
+          title={isAgentThinking ? '请等待当前回合结束' : '清空 Agent 上下文，但保留聊天历史和画布'}
         >
           新建上下文
         </button>
@@ -169,9 +170,9 @@ export function ChatPanel() {
             <div className="flex items-start gap-3">
               <div className="flex h-9 w-9 flex-none items-center justify-center rounded-xl border border-[#d4af37]/30 bg-[#d4af37]/10 text-[#e8c766]">✦</div>
               <div>
-                <h4 id="clear-context-title" className="text-sm font-medium text-[#e8e6df]">新建 Claude 上下文？</h4>
+                <h4 id="clear-context-title" className="text-sm font-medium text-[#e8e6df]">新建 Agent 上下文？</h4>
                 <p className="mt-2 text-xs leading-5 text-[#8a8794]">
-                  Claude 将无法访问分界线之前的对话。聊天历史和画布内容会继续保留，不会删除任何项目文件。
+                  Agent 将无法访问分界线之前的对话。聊天历史和画布内容会继续保留，不会删除任何项目文件。
                 </p>
               </div>
             </div>

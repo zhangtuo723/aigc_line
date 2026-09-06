@@ -1,4 +1,7 @@
+import type { ProjectAgentConfig } from './agent-config';
+
 export interface Project {
+  agent?: ProjectAgentConfig;
   id: string;
   name: string;
   folderPath: string;
@@ -10,6 +13,18 @@ export interface Project {
 export interface ProjectIndex {
   projects: Project[];
   lastOpenedId?: string;
+}
+
+/** Workspace manifest; legacy production arrays are preserved for older projects. */
+export interface ProjectManifest {
+  projectId: string;
+  folderPath: string;
+  agent?: ProjectAgentConfig;
+  audioPath?: string;
+  srtPath?: string;
+  cues: unknown[];
+  scenes: unknown[];
+  runs: unknown[];
 }
 
 export interface ImportAudioResult {
@@ -158,6 +173,7 @@ export interface AvailableSkill {
   description: string;
   argumentHint?: string;
   source: AvailableSkillSource;
+  path?: string;
 }
 
 /** A stable pointer to a live canvas node. Its current data is read by the Agent. */
@@ -357,7 +373,7 @@ export interface AppSettingsView {
 
 export interface SaveAppSettingsRequest {
   comfyuiBaseUrl: string;
-  agentBaseUrl: string;
+  agentBaseUrl?: string;
   qwenBaseUrl: string;
   defaultImageWorkflowId: string;
   agentToken?: string;

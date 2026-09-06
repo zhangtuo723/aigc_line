@@ -143,7 +143,7 @@ export async function saveAppSettings(request: SaveAppSettingsRequest): Promise<
   const next: StoredSettings = {
     ...current,
     comfyuiBaseUrl: normalizeUrl(request.comfyuiBaseUrl || DEFAULT_COMFY_URL),
-    agentBaseUrl: normalizeUrl(request.agentBaseUrl),
+    agentBaseUrl: request.agentBaseUrl === undefined ? current.agentBaseUrl : normalizeUrl(request.agentBaseUrl),
     qwenBaseUrl: normalizeUrl(request.qwenBaseUrl || DEFAULT_QWEN_BASE_URL),
     googleAiProxyUrl: normalizeGoogleProxyUrl(request.googleAiProxyUrl || ''),
     seedreamBaseUrl: normalizeSeedreamBaseUrl(request.seedreamBaseUrl || DEFAULT_SEEDREAM_BASE_URL),

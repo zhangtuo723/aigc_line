@@ -14,6 +14,7 @@ export const IPC_CHANNELS = {
     loadHistory: 'chat:loadHistory',
     savePastedImage: 'chat:savePastedImage',
     listSkills: 'chat:listSkills',
+    listModels: 'chat:listModels',
     clearContext: 'chat:clearContext',
     interrupt: 'chat:interrupt',
   },

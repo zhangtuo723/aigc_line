@@ -1,3 +1,4 @@
+import type { ProjectAgentConfig } from '../shared/agent-config';
 import { create } from 'zustand';
 import type {
   Project,
@@ -38,7 +39,7 @@ interface AppState {
   removeCanvasNodeReference: (id: string) => void;
 
   loadProjects: (options?: { restoreLastOpened?: boolean }) => Promise<void>;
-  createProject: (name: string, folderPath: string) => Promise<Project>;
+  createProject: (name: string, folderPath: string, agent?: ProjectAgentConfig) => Promise<Project>;
   selectProject: (id: string) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
   sendChatMessage: (content: string, attachments?: ChatMessage['attachments']) => Promise<void>;
@@ -120,8 +121,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  createProject: async (name, folderPath) => {
-    const project = await electronAPI.createProject(name, folderPath);
+  createProject: async (name, folderPath, agent) => {
+    const project = await electronAPI.createProject(name, folderPath, agent);
     await get().loadProjects();
     await get().selectProject(project.id);
     return project;

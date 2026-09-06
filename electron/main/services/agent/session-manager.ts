@@ -7,6 +7,8 @@
  * queues them and starts a new turn when the current one finishes. This is
  * the same mechanism Claude Code uses for "type while the agent is running".
  */
+import { codexSession, interruptCodex } from './codex-session';
+import type { AgentProvider } from '../../../../src/shared/agent-config';
 import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { app } from 'electron';
 import log from 'electron-log/main';
@@ -23,7 +25,6 @@ import { buildUserPrompt, buildSystemPromptAppend } from './prompts';
 import { createPushArtifactServer } from './tools';
 import { createToolTrackingHooks, interruptActiveToolCalls } from './hooks';
 import { extractMessageText } from './stream';
-import { getRuntimeSettings } from '../settings.service';
 import { createBuiltinPluginConfig, resolveBuiltinPluginPath } from './builtin-plugin';
 import { scanAvailableSkills } from './skills';
 import { mergeDiscoveredSkills } from './skill-metadata';
@@ -58,6 +59,7 @@ interface PendingContextClear {
 interface ProjectAgentSession {
   projectId: string;
   folderPath: string;
+  model?: string;
   allowedTools: string[];
   /** Messages waiting to be fed into the streaming input generator */
   queue: SDKUserMessage[];
@@ -182,8 +184,9 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export async function listAvailableSkills(
   projectId: string,
   folderPath: string,
+  provider: AgentProvider = 'claude-code',
 ): Promise<AvailableSkill[]> {
-  const discovered = await scanAvailableSkills(folderPath);
+  const discovered = await scanAvailableSkills(folderPath, provider);
   const activeQuery = sessions.get(projectId)?.activeQuery;
   if (!activeQuery) return discovered;
 
@@ -210,14 +213,7 @@ async function pump(session: ProjectAgentSession): Promise<void> {
       const sessionId = await readSessionId(folderPath);
       log.info('[Agent] Starting streaming query, resume:', sessionId || 'none');
 
-      const runtimeSettings = await getRuntimeSettings();
-      const agentEnv: Record<string, string | undefined> = { ...process.env };
-      if (runtimeSettings.agentBaseUrl) {
-        agentEnv.ANTHROPIC_BASE_URL = runtimeSettings.agentBaseUrl;
-      }
-      if (runtimeSettings.agentToken) {
-        agentEnv.ANTHROPIC_AUTH_TOKEN = runtimeSettings.agentToken;
-      }
+      const agentEnv = { ...process.env };
 
       const activeToolCalls = new Map<string, ToolCallInfo>();
       const builtinPluginPath = resolveBuiltinPluginPath({
@@ -230,6 +226,8 @@ async function pump(session: ProjectAgentSession): Promise<void> {
         options: {
           allowedTools: [...allowedTools, ...CANVAS_MCP_TOOLS],
           cwd: folderPath,
+          model: session.model || undefined,
+          settingSources: ['user', 'project', 'local'],
           env: agentEnv,
           // App-owned skills live outside the workspace. Project-level
           // .claude/skills remain discoverable and are never modified.
@@ -300,8 +298,10 @@ async function pump(session: ProjectAgentSession): Promise<void> {
 
 /** Clear Claude's context while preserving the app's visible chat history and canvas. */
 export async function clearAgentContext(options: AgentOptions): Promise<void> {
+  if (options.agent?.provider === 'codex') return codexSession(options).clear();
   const { projectId, folderPath, allowedTools = ['Read', 'Bash', 'Glob', 'Grep'] } = options;
   const session = getOrCreateSession(projectId, folderPath, allowedTools);
+  session.model = options.agent?.model;
   if (session.pendingTurns > 0 || session.queue.length > 0 || session.pendingContextClear) {
     throw new Error('Agent 正在处理任务，请等待当前回合结束后再新建上下文');
   }
@@ -337,10 +337,13 @@ export async function enqueueAgentMessage(
 ): Promise<void> {
   const { projectId, folderPath, allowedTools = ['Read', 'Bash', 'Glob', 'Grep'] } = options;
 
+  if (options.agent?.provider === 'codex') return codexSession(options).enqueue(userMessage);
+
   // Persist the user message before queueing so history survives restarts
   await appendChatMessage(folderPath, userMessage);
 
   const session = getOrCreateSession(projectId, folderPath, allowedTools);
+  session.model = options.agent?.model;
   session.queue.push({
     type: 'user',
     parent_tool_use_id: null,
@@ -353,6 +356,7 @@ export async function enqueueAgentMessage(
 
 /** Interrupt the currently running turn of a project's session, if any. */
 export async function interruptAgentTurn(projectId: string): Promise<void> {
+  await interruptCodex(projectId);
   const session = sessions.get(projectId);
   if (!session?.activeQuery) return;
   try {

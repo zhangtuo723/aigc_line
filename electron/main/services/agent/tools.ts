@@ -27,7 +27,7 @@ const IMAGE_MIME: Record<string, string> = {
  * Create the PushArtifact MCP server. The agent calls PushArtifact with a
  * workspace file path; the file is read from disk and pushed to the canvas.
  */
-export function createPushArtifactServer(projectId: string, folderPath: string) {
+export function createCanvasTools(projectId: string, folderPath: string) {
   const positionSchema = z.object({ x: z.number(), y: z.number() });
   const nodeFields = {
     title: z.string().optional(),
@@ -59,11 +59,7 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
     }
   };
 
-  return createSdkMcpServer({
-    name: 'push-artifact-server',
-    version: '1.0.0',
-    instructions: 'Tools for reading and editing the live canvas and pushing file artifacts',
-    tools: [
+  return [
       tool(
         'GetCanvasOverview',
         'Read a compact overview of the live canvas: node/edge counts, counts by kind and generation status, plus each node id, kind, title, generation status and output availability. It omits revisions, prompts, media paths, positions and full edge data to keep context small.',
@@ -229,6 +225,13 @@ export function createPushArtifactServer(projectId: string, folderPath: string) 
           }
         },
       ),
-    ],
+  ];
+}
+
+export function createPushArtifactServer(projectId: string, folderPath: string) {
+  return createSdkMcpServer({
+    name: 'push-artifact-server',
+    version: '1.0.0',
+    tools: createCanvasTools(projectId, folderPath),
   });
 }

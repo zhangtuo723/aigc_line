@@ -26,16 +26,31 @@ Agent 通过内置 Skill 与 MCP 画布工具读取、创建和修改节点，Re
 
 在同一张无限画布上组织镜头、参考图片、生成视频与放大结果；右侧 Agent 对话会显示 Skill 和工具执行过程，并可直接读取、创建和修改画布节点。
 
+## Claude Code 与 Codex
+
+现在支持按项目选择 **Claude Code 或 Codex**。Claude Code 使用 `@anthropic-ai/claude-agent-sdk`，Codex 使用 `@openai/codex-sdk`；两者都可以通过 MCP 工具读取和修改画布，并支持流式对话、中断与会话恢复。
+
+1. 先完成所选 Agent 的本机登录或认证配置。
+2. 在首页点击“新建项目”，选择 **Agent 类型**（Claude Code / Codex）。
+3. 等待模型列表加载后选择模型，也可沿用默认模型或输入自定义模型 ID；加载期间会显示转圈提示。
+4. 填写项目名称、选择本地项目目录，然后创建项目。
+
+Agent 类型和模型随项目保存。历史项目继续使用 Claude Code；两种 Agent 的会话恢复 ID 分开存储。Codex 的思考强度沿用本机配置，目前弹窗尚未提供单独的强度选项。
+
+设置页已移除 Agent API URL / Token 输入，认证改用各自的本机配置或进程环境变量；旧版应用内保存的 Claude 凭证不再注入会话。Codex 原生运行时随 SDK 平台依赖安装，安装时需保留 `optionalDependencies`，也可通过 `CODEX_EXECUTABLE` 指定可执行文件。
+
+Codex 优先使用显式代理环境变量；未配置时，应用会解析系统代理并传给 Codex 子进程。本机画布 MCP 地址通过 `NO_PROXY` / `no_proxy` 绕过代理。修改代理后需重启应用；若仍出现 `Reconnecting…` 或请求超时，请检查代理节点和外网连接。
+
 ## 核心能力
 
 - **剧本到 AI 短剧闭环**：从剧本解析、角色/服装资产、场景图、分镜到多模态视频生成，Agent 按生产阶段持续操作同一张画布。
 - **角色与场景一致性资产**：每个角色先生成唯一横向四联身份底图，再以底图为单一参考通过图生图派生场景/服装版本；四联从左到右为头部近景、自然站立正面、侧面和背面。场景资产使用无人高机位俯视全景图。
-- **Agent 项目助手**：基于 @anthropic-ai/claude-agent-sdk，通过轻量画布概览与按 ID 单节点详情工具精确读取上下文，并可创建、修改、删除和连接节点；写入按节点字段直接应用并采用最后写入者生效，不会因无关画布变化而失败。
-- **内置 Agent Skill**：以内置本地 Claude Plugin 随应用发布；仍支持项目自己的 `.claude/skills`，应用不会创建或覆盖其中的文件。
+- **Agent 项目助手**：按项目选择 Claude Code（@anthropic-ai/claude-agent-sdk）或 Codex（@openai/codex-sdk），通过轻量画布概览与按 ID 单节点详情工具精确读取上下文，并可创建、修改、删除和连接节点；写入按节点字段直接应用并采用最后写入者生效，不会因无关画布变化而失败。
+- **内置 Agent Skill**：以内置本地 Claude Plugin 随应用发布；Claude 支持项目自己的 `.claude/skills`；Codex 支持 `.agents/skills`、用户 `.agents/skills` / `.codex/skills` 并通过路径读取同一套内置 Skill，应用不会创建或覆盖其中的文件。
 - **旁白配视频工作流**：根据旁白音频和 SRT 时间轴创建“图片 → 视频”片段链，并逐段对齐后生成剪映草稿。
 - **Skill 斜杠菜单**：在对话输入框开头输入 `/` 即可搜索 Skill，支持鼠标或方向键选择，选中后继续补充任务说明。
-- **粘贴图片附件**：在对话输入框中直接粘贴 PNG、JPEG、WebP 或 GIF 图片，预览后可随消息发送给 Agent，并随项目持久化。
-- **明确的上下文边界**：可从对话标题栏新建 Claude 上下文，旧聊天、画布状态和项目文件继续保留，并以分界线标识。
+- **聊天文件附件**：可给对话添加 txt、md、mp4、mp3 等任意普通文件；发送前文件会复制到项目工作区，再把可访问路径交给 Agent。也可直接粘贴 PNG、JPEG、WebP 或 GIF 图片并预览。
+- **明确的上下文边界**：可从对话标题栏新建当前 Agent 上下文，旧聊天、画布状态和项目文件继续保留，并以分界线标识。
 - **节点引用对话**：选中画布节点后点击“添加到对话”，即可把节点作为附件发送给 Agent，并按节点 ID 精确修改其内容和参数。
 - **React Flow 无限画布**：支持缩放、平移、框选、多选、拖拽、删除和贝塞尔连接线，画布快照按项目持久化。
 - **多种节点**：支持图片、画板、视频、音频、视频放大和 3D 导演台节点；生成片段直接由 video 节点承载，片段内生成 Shot 写入提示词；导演台另存可编辑的白模预演 Shot。
@@ -50,7 +65,7 @@ Agent 通过内置 Skill 与 MCP 画布工具读取、创建和修改节点，Re
 - **通用视频分析**：Agent 可把项目内视频路径或公开 HTTP(S) 视频地址连同自定义分析要求交给 Qwen3.5-Omni Plus；工具顺序扫描完整画面与音轨，区分观察、转写和推断，为关键结论提供时间戳与不确定性说明，并保存 Markdown 报告。
 - **RTX 视频放大**：视频放大节点支持 2× / 3× / 4× 和 FAST / MEDIUM / HIGH / ULTRA 质量档位，输出帧率自动跟随源视频。
 - **媒体预览**：图片直接展示，生成的视频可以在画布节点内播放；工作区协议支持视频 Range 流式读取。
-- **系统配置**：宽屏分组展示基础服务与 AI 云服务；可配置 ComfyUI、Agent、Google AI、火山方舟 Seedream/Seedance（含 Agent Plan）、Qwen3.5-Omni Plus 和默认生图模型。Google/Qwen 密钥使用 Electron 系统安全存储，方舟 Key 明文保存在本机设置。
+- **系统配置**：宽屏分组展示基础服务与 AI 云服务；可配置 ComfyUI、Google AI、火山方舟 Seedream/Seedance（含 Agent Plan）、Qwen3.5-Omni Plus 和默认生图模型。Google/Qwen 密钥使用 Electron 系统安全存储，方舟 Key 明文保存在本机设置。
 - **项目持久化**：聊天记录、画布布局、节点参数和生成产物均按项目保存。
 
 ## 画板节点
@@ -195,13 +210,13 @@ Agent 还可通过 `InvokeNodeAction` 原子执行 `add-element`、`add-shot`、
 
 ## 创作流程
 
-1. 新建项目并选择本地工作目录。
-2. 输入剧本、梗概、对白或创意并调用统一的 `script-to-drama-video` Skill；Agent 默认忠于核心剧情，先深化戏剧节拍和潜台词，再规划人物调度、轴线、道具状态、切镜理由与连续性账本；只有明确要求时才逐字逐场还原。
-3. Agent 调用独立人物/场景 Skill：先生成并审核每个角色唯一的头部+正侧背四联底图，再由底图图生图派生不同场景/服装版本；同时生成无人俯视全景场景图。
-4. Agent 按戏剧节拍拆分可独立生成的 5/10/15 秒视频片段；每个片段默认优先可执行的连续 Shot，只有引入新信息、关键反应或空间关系时才切镜。内部 Shot 使用连续时间范围写入导演包，画布不创建独立分镜节点。
-5. Agent 为每个片段连接所需角色图、场景图和其他参考素材，形成包含片段目的、表演、内部 Shot、运镜、对白、声音和片段间衔接的导演包，再调用官方 `h3-prompt-writing` Skill 编写 MiniMax H3 Ref2VA 最终提示词。
-6. Agent 等待生成完成并核对每个 video 节点的状态与产物路径；用户明确提出视频分析问题时，再调用通用分析工具。
-7. 图片与视频保存在项目的 `generated/images` 和 `generated/videos` 目录；需要成片时可继续生成剪映草稿。
+1. 在新建项目弹窗中选择 Claude Code / Codex、模型和本地工作目录。历史项目保持 Claude Code。
+2. 提供剧本文件（也支持梗概、对白或创意），调用 `script-to-drama-video` Skill；主 Agent 按依赖调度资产、分镜师、检查三个独立子 Agent。
+3. 资产 Agent 读取原剧本，调用人物/场景 Skill：先生成每个角色唯一的头部+正侧背四联底图和无人俯视场景图，再由底图图生图派生服装/状态版本；保留分阶段生成确认。核实画布资产后输出 `资产报告.md`，列出节点 ID、角色/场景版本、素材路径和可用状态。
+4. 分镜师 Agent 读取原剧本与资产报告，深化戏剧节拍、拆分 5/10/15 秒片段、安排内部 Shot 和连续性，创建 video 节点及资产引用连线，逐片调用 `h3-prompt-writing` 写入最终提示词，输出 `分镜交接.md`。画布不创建独立分镜节点。
+5. 检查 Agent 独立读取原剧本、报告与实际画布，检查人物/服装/场景引用、分段合理性与衔接、必要补镜和描述、H3 prompt 格式，输出每轮检查报告。未通过则退回优化、再检查；缺资产时先补资产并更新报告，全部通过后且已有用户明确生成授权才开始生成视频。
+6. 资产、交接和每轮检查报告保存在项目 `generated/drama-reports/<本次任务标识>/`；`检查报告.md` 指向最新轮次。检查通过后内容变化须复查，未解决的阻塞不能跳过生成。
+7. 主 Agent 等待生成完成并核对每个 video 节点的状态与产物路径；用户明确提出成片分析问题时，再调用通用视频分析工具。图片与视频保存在 `generated/images` 和 `generated/videos`；需要成片时可继续生成剪映草稿。
 
 ## 内置 ComfyUI 工作流
 
@@ -242,8 +257,6 @@ MiniMax H3 输出分辨率：
 首页右上角进入系统配置，可设置：
 
 - ComfyUI HTTP 地址，例如 http://127.0.0.1:8188
-- ANTHROPIC_BASE_URL
-- ANTHROPIC_AUTH_TOKEN
 - Qwen3.5-Omni Plus OpenAI 兼容 API 地址和 DASHSCOPE_API_KEY
 - Google AI Studio 的 GEMINI_API_KEY（Nano Banana 2 / Pro 共用），以及无法直连 Google 时使用的可选 HTTP/HTTPS/SOCKS 代理
 - 火山方舟 ARK_API_KEY（Seedream 图片与 Seedance 2.0 视频共用）及可配置普通 API / Agent Plan Base URL
@@ -251,7 +264,7 @@ MiniMax H3 输出分辨率：
 
 ## 快速开始
 
-环境要求：Node.js、pnpm、可访问的 ComfyUI 服务，以及 Claude Agent 凭证或兼容 Anthropic API 的 URL 与 Token。
+环境要求：Node.js、pnpm、可访问的 ComfyUI 服务，以及所选 Claude Code 或 Codex 的本机登录/配置。Codex SDK 的平台二进制随依赖安装，请保留 optionalDependencies；也可通过 `CODEX_EXECUTABLE` 指定原生 Codex 可执行文件。
 
 ~~~powershell
 pnpm install
@@ -279,7 +292,7 @@ pnpm build
 │   ├── main/
 │   │   ├── ipc/                    # 项目、聊天、画布、产物、ComfyUI、配置 IPC
 │   │   └── services/
-│   │       ├── agent/              # Claude Agent SDK、Canvas MCP 与 PushArtifact
+│   │       ├── agent/              # Claude Agent SDK / Codex SDK、Canvas MCP 与 PushArtifact
 │   │       ├── comfyui.service.ts  # 图片/视频工作流与产物下载
 │   │       ├── settings.service.ts # 全局配置与 Token 安全存储
 │   │       └── project.store.ts    # 项目、聊天和画布持久化

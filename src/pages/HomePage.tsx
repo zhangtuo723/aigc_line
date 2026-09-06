@@ -1,19 +1,16 @@
+import { useState } from 'react';
+import { CreateProjectDialog } from '../components/CreateProjectDialog';
+import { agentLabel } from '../shared/agent-config';
 import { useAppStore } from '../stores/app.store';
 
 export function HomePage() {
   const projects = useAppStore((state) => state.projects);
-  const createProject = useAppStore((state) => state.createProject);
+  const [creating, setCreating] = useState(false);
   const selectProject = useAppStore((state) => state.selectProject);
   const deleteProject = useAppStore((state) => state.deleteProject);
   const setCurrentPage = useAppStore((state) => state.setCurrentPage);
 
-  const handleCreate = async () => {
-    const folders = await window.electronAPI.showOpenDialog({ title: '选择项目文件夹' });
-    if (folders.length === 0) return;
-    const folderPath = folders[0];
-    const name = folderPath.split(/[/\\]/).pop() ?? '新项目';
-    await createProject(name, folderPath);
-  };
+  const handleCreate = () => setCreating(true);
 
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
@@ -34,6 +31,7 @@ export function HomePage() {
 
   return (
     <div className="flex h-full flex-col">
+      {creating && <CreateProjectDialog onClose={() => setCreating(false)} />}
       {/* Header */}
       <header className="relative flex items-center justify-between border-b border-white/[0.08] bg-[#0d0d14] px-8 py-4">
         <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-[#d4af37]/40 to-transparent" />
@@ -116,6 +114,7 @@ export function HomePage() {
                         </svg>
                       </button>
                     </div>
+                    <p className="mt-3 truncate text-xs text-[#d4af37]">{agentLabel(project.agent)} · {project.agent?.model || '默认模型'}</p>
                     <h3 className="mt-3 truncate text-[13px] font-medium tracking-wider text-[#e8e6df]">{project.name}</h3>
                     <p className="mt-1.5 flex items-center gap-1.5 text-xs text-[#6d6a78]">
                       <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
