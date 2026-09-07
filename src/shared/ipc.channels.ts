@@ -17,6 +17,8 @@ export const IPC_CHANNELS = {
     listModels: 'chat:listModels',
     clearContext: 'chat:clearContext',
     interrupt: 'chat:interrupt',
+    codexQueue: 'chat:codexQueue',
+    codexSendNow: 'chat:codexSendNow',
   },
   canvas: {
     save: 'canvas:save',

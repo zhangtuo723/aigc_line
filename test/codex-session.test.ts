@@ -22,12 +22,47 @@ vi.mock('@openai/codex-sdk',()=>({Codex:class {
  })()};
  }}}
 }}));
-import {codexSession} from '../electron/main/services/agent/codex-session';
+import {codexSession,getCodexQueue,sendCodexQueuedNow} from '../electron/main/services/agent/codex-session';
 let sequence=0;
 function setup(){const id=`sdk-project-${++sequence}`;return{id,session:codexSession({projectId:id,folderPath:`/workspace/${id}`,agent:{provider:'codex',model:'selected-model'}})}}
 const message={id:'user-1',role:'user' as const,content:'/aigc-canvas:demo hello',timestamp:1,attachments:[{name:'image',type:'png',path:'/workspace/image.png'}]};
 beforeEach(()=>{vi.clearAllMocks();state.options=[];state.starts=[];state.resumes=[];state.runs=[];state.events=[{type:'thread.started',thread_id:'sdk-thread'},{type:'turn.completed'}];state.hold=false});
 describe('Codex SDK sessions',()=>{
+ it('interrupts then resumes with the selected queued message first, preserving other messages',async()=>{
+ const {session,id}=setup();state.hold=true;
+ await session.enqueue(message);await vi.waitFor(()=>expect(state.runs).toHaveLength(1));
+ await session.enqueue({...message,id:'queued-a',content:'second'});
+ await session.enqueue({...message,id:'queued-b',content:'priority'});
+ expect(getCodexQueue(id).map(m=>m.id)).toEqual(['queued-a','queued-b']);
+ expect(state.push.mock.calls.some(call=>call[1].id==='queued-b' && call[1].deliveryStatus==='sent')).toBe(false);
+ state.hold=false;state.events=[{type:'turn.completed'}];
+ sendCodexQueuedNow(id,'queued-b');
+ await vi.waitFor(()=>expect(state.end).toHaveBeenCalledTimes(1));
+ expect(state.runs[0].options.signal.aborted).toBe(true);
+ expect(state.runs).toHaveLength(3);
+ expect(state.runs[1].input[0].text).toContain('priority');
+ expect(state.runs[1].input[0].text).toContain('避免重复操作');
+ expect(state.runs[2].input[0].text).toContain('second');
+ expect(state.resumes[0].id).toBe('sdk-thread');
+ expect(getCodexQueue(id)).toEqual([]);
+ expect(state.push.mock.calls.some(call=>call[1].id==='queued-b' && call[1].deliveryStatus==='sent')).toBe(true);
+ expect(state.error).not.toHaveBeenCalled();
+ expect(()=>sendCodexQueuedNow(id,'queued-b')).toThrow('已开始处理');
+ });
+ it('keeps streaming after missing tool arguments or a newer runtime item type',async()=>{
+ const {session}=setup();state.events=[
+ {type:'item.started',item:{id:'partial',type:'mcp_tool_call',tool:'GetCanvasOverview',status:'in_progress'}},
+ {type:'item.completed',item:{id:'partial',type:'mcp_tool_call',tool:'GetCanvasOverview',status:'completed',arguments:{}}},
+ {type:'item.started',item:{id:'search',type:'web_search'}},
+ {type:'item.completed',item:{id:'search',type:'web_search',query:'test'}},
+ {type:'item.completed',item:{id:'new-kind',type:'future_tool',payload:{value:1}}},
+ {type:'item.completed',item:{id:'reply',type:'agent_message',text:'继续完成'}},{type:'turn.completed'}];
+ await session.enqueue(message);await vi.waitFor(()=>expect(state.end).toHaveBeenCalled());
+ expect(state.error).not.toHaveBeenCalled();
+ expect(state.push.mock.calls.some(call=>call[1].toolCall?.toolInput==='null')).toBe(true);
+ expect(state.push.mock.calls.some(call=>call[1].toolCall?.toolInput.includes('future_tool'))).toBe(true);
+ expect(state.append).toHaveBeenCalledWith(expect.any(String),expect.objectContaining({content:'继续完成'}));
+ });
  it('uses SDK model/cwd/resume options and a project-authenticated MCP bridge',async()=>{
  const {session,id}=setup();await session.enqueue(message);await vi.waitFor(()=>expect(state.end).toHaveBeenCalled());
  expect(state.options[0].config.mcp_servers.aigc_canvas).toMatchObject({url:'http://127.0.0.1:1234/mcp',bearer_token_env_var:'AIGC_CANVAS_MCP_TOKEN',required:true});

@@ -1,3 +1,4 @@
+import { normalizeVideoDuration } from '../shared/video-duration'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import {
   addEdge,
@@ -326,7 +327,7 @@ const migrateLegacySnapshot = (snapshot: FlowSnapshot): FlowSnapshot => {
         ...video.data,
         title: video.data.title || `镜头 ${shot.index} · 视频`,
         prompt: video.data.prompt || shot.imageToVideoPrompt || shot.camera || shot.scene,
-        duration: ([5, 10, 15] as const).includes(shot.duration as 5 | 10 | 15) ? shot.duration : 5,
+        duration: normalizeVideoDuration(shot.duration),
         sourcePath: video.data.sourcePath || shot.videoSource,
         sourceHistory: video.data.sourceHistory || shot.videoSourceHistory,
       }
@@ -403,12 +404,12 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
   const { setNodes, deleteElements } = useReactFlow<StoryNode, StoryEdge>()
   const currentProject = useAppStore((state) => state.currentProject)
   const [ratioMenuOpen, setRatioMenuOpen] = useState(false)
-  const [durationMenuOpen, setDurationMenuOpen] = useState(false)
+  const [durationDraft, setDurationDraft] = useState<string | null>(null)
   const [workflowMenuOpen, setWorkflowMenuOpen] = useState(false)
   const [workflows, setWorkflows] = useState<ComfyWorkflowInfo[]>([])
   const current = nodes.find((node) => node.id === id)
   const aspectRatio = current?.data.aspectRatio ?? '16:9'
-  const currentDuration = ([5, 10, 15] as const).find((value) => value === current?.data.duration) ?? 5
+  const currentDuration = normalizeVideoDuration(current?.data.duration, current?.data.workflowId)
   const generationState = current?.data.generationStatus ?? 'idle'
   const generationError = current?.data.generationError ?? ''
   const availableWorkflows = workflows.filter((item) => kind === 'video'
@@ -882,37 +883,32 @@ function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
             <>
               <span>原生音画</span>
               <span>·</span>
-              <div className="nodrag relative">
-                <button
-                  onClick={() => setDurationMenuOpen((open) => !open)}
-                  className={`flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[10px] outline-none transition ${durationMenuOpen ? 'border-[#d4af37]/50 bg-[#d4af37]/10 text-[#f0d98c]' : 'border-white/[0.08] bg-white/[0.05] text-white/55 hover:border-[#d4af37]/35 hover:text-white'}`}
-                  title="生成时长"
-                >
-                  <span>{currentDuration}s</span>
-                  <svg viewBox="0 0 12 12" fill="currentColor" className={`h-2.5 w-2.5 transition-transform ${durationMenuOpen ? 'rotate-180' : ''}`}>
-                    <path d="m2.2 4 3.8 4 3.8-4H2.2Z" />
-                  </svg>
-                </button>
-                {durationMenuOpen && (
-                  <div className="absolute bottom-full left-0 z-[100] mb-1.5 min-w-[72px] overflow-hidden rounded-xl border border-white/[0.12] bg-[#242429] p-1 shadow-[0_12px_32px_rgba(0,0,0,0.65)]">
-                    {([5, 10, 15] as const).map((duration) => (
-                      <button
-                        key={duration}
-                        onClick={() => {
-                          setNodes((list) => list.map((node) => node.id === id
-                            ? { ...node, data: { ...node.data, duration } }
-                            : node))
-                          setDurationMenuOpen(false)
-                        }}
-                        className={`flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-[10px] transition ${currentDuration === duration ? 'bg-[#d4af37]/15 text-[#f0d98c]' : 'text-white/60 hover:bg-white/[0.08] hover:text-white'}`}
-                      >
-                        <span>{duration}s</span>
-                        {currentDuration === duration && <span className="text-[#e8c766]">✓</span>}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
+              <label className="nodrag nowheel flex items-center gap-1 rounded-lg border border-white/[0.08] bg-white/[0.05] px-2 py-1 text-[10px] text-white/70 focus-within:border-[#d4af37]/50" title={isSeedanceWorkflow ? '生成时长：4–15 秒' : '生成时长：1–15 秒'}>
+                <input
+                  aria-label="视频时长（秒）"
+                  type="number"
+                  min={isSeedanceWorkflow ? 4 : 1}
+                  max={15}
+                  step={1}
+                  value={durationDraft ?? currentDuration}
+                  onChange={(event) => {
+                    const value = event.target.value
+                    setDurationDraft(value)
+                    const duration = Number(value)
+                    if (value && Number.isInteger(duration) && duration >= (isSeedanceWorkflow ? 4 : 1) && duration <= 15) {
+                      setNodes(list => list.map(node => node.id === id ? { ...node, data: { ...node.data, duration } } : node))
+                    }
+                  }}
+                  onBlur={() => {
+                    const duration = normalizeVideoDuration(durationDraft?.trim() ? durationDraft : currentDuration, selectedWorkflow?.id)
+                    setNodes(list => list.map(node => node.id === id ? { ...node, data: { ...node.data, duration } } : node))
+                    setDurationDraft(null)
+                  }}
+                  onKeyDown={(event) => { event.stopPropagation(); if (event.key === 'Enter') event.currentTarget.blur() }}
+                  className="w-10 bg-transparent text-center outline-none"
+                />
+                <span>秒</span>
+              </label>
             </>
           )}
         </div>
@@ -1033,7 +1029,7 @@ function UpscalePanel({ id }: { id: string }) {
               </svg>
             </button>
             {scaleMenuOpen && (
-              <div className="absolute bottom-full left-0 z-[100] mb-1.5 min-w-[72px] overflow-hidden rounded-xl border border-white/[0.12] bg-[#242429] p-1 shadow-[0_12px_32px_rgba(0,0,0,0.65)]">
+              <div className="absolute bottom-full left-0 z-[100] mb-1.5 grid max-h-60 w-[180px] grid-cols-3 gap-1 overflow-y-auto rounded-xl border border-white/[0.12] bg-[#242429] p-1 shadow-[0_12px_32px_rgba(0,0,0,0.65)]">
                 {UPSCALE_SCALES.map((value) => (
                   <button
                     key={value}
@@ -1987,7 +1983,7 @@ function CanvasFlow() {
         nodeId,
         prompt: current.data.prompt ?? '',
         aspectRatio: current.data.aspectRatio ?? '16:9',
-        duration: ([5, 10, 15] as const).find((value) => value === current.data.duration) ?? 5,
+        duration: normalizeVideoDuration(current.data.duration, selectedWorkflow?.id),
         workflowId: selectedWorkflow?.id,
         referenceImagePath: isFirstLastWorkflow ? firstFrameNode?.data.sourcePath : undefined,
         lastFrameImagePath: isFirstLastWorkflow ? lastFrameNode?.data.sourcePath : undefined,
@@ -2453,7 +2449,7 @@ function CanvasFlow() {
               title: `镜头 ${shot.index} · 视频`,
               prompt: shot.imageToVideoPrompt || shot.camera || shot.scene,
               aspectRatio: '16:9',
-              duration: ([5, 10, 15] as const).includes(shot.duration as 5 | 10 | 15) ? shot.duration : 5,
+              duration: normalizeVideoDuration(shot.duration),
               sourcePath: shot.videoSource,
               sourceHistory: shot.videoSourceHistory,
               preview: shot.videoSource && currentProject

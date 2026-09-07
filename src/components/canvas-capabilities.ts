@@ -1,3 +1,4 @@
+import { VIDEO_DURATIONS } from '../shared/video-duration';
 /**
  * Capability declarations for the built-in canvas node kinds.
  *
@@ -91,7 +92,7 @@ registerNodeCapabilities({
       description: '视频生成工作流（可选值见 options）',
     },
     { key: 'sourcePath', type: 'string', description: '生成结果的 workspace 相对路径' },
-    { key: 'duration', type: 'number', numberValues: [5, 10, 15], description: '视频时长（秒），仅支持 5/10/15' },
+    { key: 'duration', type: 'number', numberValues: VIDEO_DURATIONS, description: '视频时长（整数秒），MiniMax H3 支持 1–15；Seedance 当前限制为 4–15'  },
     { key: 'firstFrameNodeId', type: 'string', description: '首帧图片节点 id（首尾帧工作流）' },
     { key: 'lastFrameNodeId', type: 'string', description: '尾帧图片节点 id（首尾帧工作流）' },
     { key: 'referenceImageNodeIds', type: 'string-array', description: '全模态参考图片节点 id（最多 9 个）' },

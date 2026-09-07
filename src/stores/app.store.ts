@@ -200,6 +200,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!currentProject) return;
 
     const message: ChatMessage = {
+      deliveryStatus: currentProject.agent?.provider === 'codex' ? 'queued' : undefined,
       id: `user-${Date.now()}`,
       role: 'user',
       content,
@@ -280,6 +281,13 @@ electronAPI?.onChatMessage?.(({ projectId, message }: ProjectChatMessagePush) =>
       },
     };
     if (!isCurrentProject) return runtimeUpdate;
+    if (message.role === 'user') {
+      const exists = state.messages.some(item => item.id === message.id);
+      return {
+        messages: exists ? state.messages.map(item => item.id === message.id ? message : item) : [...state.messages, message],
+        ...(message.deliveryStatus === 'cancelled' ? {} : runtimeUpdate),
+      };
+    }
     // System messages include: thinking indicators and tool call status
     if (message.role === 'system') {
       if (message.event === 'context-cleared') {

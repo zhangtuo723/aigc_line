@@ -6,6 +6,7 @@ import type {
   Project,
   ProjectIndex,
   ChatMessage,
+  CodexQueueResult,
   Artifact,
   GenerateImageRequest,
   GenerateImageResult,
@@ -56,6 +57,8 @@ export interface ElectronAPI {
     mimeType: string,
   ) => Promise<SavePastedImageResult>;
   interruptAgent: (projectId: string) => Promise<void>;
+  getCodexQueue: (projectId: string) => Promise<CodexQueueResult>;
+  sendCodexQueuedNow: (projectId: string, messageId: string) => Promise<void>;
   loadChatHistory: (folderPath: string) => Promise<ChatMessage[]>;
   listAgentModels: (provider: AgentProvider) => Promise<AgentModelsResult>;
   listAgentSkills: (projectId: string) => Promise<AvailableSkill[]>;
@@ -115,6 +118,8 @@ const api: ElectronAPI = {
     invoke(IPC_CHANNELS.chat.sendMessage, projectId, message),
   savePastedImage: (projectId, data, mimeType) =>
     invoke(IPC_CHANNELS.chat.savePastedImage, projectId, data, mimeType),
+  getCodexQueue: (projectId) => invoke(IPC_CHANNELS.chat.codexQueue, projectId),
+  sendCodexQueuedNow: (projectId, messageId) => invoke(IPC_CHANNELS.chat.codexSendNow, projectId, messageId),
   interruptAgent: (projectId) =>
     invoke(IPC_CHANNELS.chat.interrupt, projectId),
   loadChatHistory: (folderPath) => invoke(IPC_CHANNELS.chat.loadHistory, folderPath),

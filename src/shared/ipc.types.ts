@@ -75,6 +75,7 @@ export interface SavePastedImageResult {
 
 // Tool call tracking
 export type ToolStatus = 'running' | 'completed' | 'error' | 'interrupted';
+export interface CodexQueueResult { messages: ChatMessage[] }
 
 export interface ToolCall {
   id: string;
@@ -119,6 +120,7 @@ export interface Artifact {
 
 // Unified chat message type
 export interface ChatMessage {
+  deliveryStatus?: 'queued' | 'sent' | 'cancelled';
   id: string;
   role: MessageRole;
   content: string;

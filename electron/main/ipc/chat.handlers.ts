@@ -1,5 +1,6 @@
 import { ipcMain, nativeImage } from 'electron';
 import { listAgentModels } from '../services/agent/models';
+import { getCodexQueue, sendCodexQueuedNow, isCodexMessagePending } from '../services/agent/codex-session';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -99,6 +100,12 @@ export function registerChatHandlers(): void {
     async (_event, folderPath: string) => {
       try {
         const persistedHistory = await readChatHistory(folderPath);
+        for (const message of persistedHistory) {
+          if (message.deliveryStatus === 'queued' && !isCodexMessagePending(folderPath, message.id)) {
+            message.deliveryStatus = 'cancelled';
+            await updateChatMessage(folderPath, message.id, () => message);
+          }
+        }
         // A restarted process cannot still be executing persisted tool calls.
         const { messages: history, changed: historyChanged } =
           normalizeInterruptedToolCalls(persistedHistory);
@@ -176,6 +183,12 @@ export function registerChatHandlers(): void {
   );
 
   // Interrupt the currently running agent turn for a project
+  ipcMain.handle(IPC_CHANNELS.chat.codexQueue, (_event, projectId: string) => ({ messages: getCodexQueue(projectId) }));
+  ipcMain.handle(IPC_CHANNELS.chat.codexSendNow, async (_event, projectId: string, messageId: string) => {
+    const project = await loadProject(projectId);
+    if (project?.agent?.provider !== 'codex') throw new Error('只有 Codex 项目支持立即发送排队消息');
+    sendCodexQueuedNow(projectId, messageId);
+  });
   ipcMain.handle(
     IPC_CHANNELS.chat.interrupt,
     async (_event, projectId: string) => {

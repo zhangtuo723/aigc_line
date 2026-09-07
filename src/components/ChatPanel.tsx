@@ -19,8 +19,43 @@ export function ChatPanel() {
   const [isClearingContext, setIsClearingContext] = useState(false)
   const [clearError, setClearError] = useState('')
   const [sendError, setSendError] = useState('')
-  const toolStepCount = messages.reduce((count, message) => count + (message.toolCall ? 1 : 0), 0)
-  const dialogueCount = messages.length - toolStepCount
+  const [queueState, setQueueState] = useState<{ projectId: string; messages: ChatMessageType[] }>({ projectId: '', messages: [] })
+  const [sendingNow, setSendingNow] = useState<string | null>(null)
+  const serverQueue = queueState.projectId === currentProject?.id ? queueState.messages : []
+  const queuedMessages = currentProject?.agent?.provider === 'codex'
+    ? [...serverQueue.filter(message => !messages.some(item => item.id === message.id && item.deliveryStatus && item.deliveryStatus !== 'queued')),
+      ...messages.filter(message => message.deliveryStatus === 'queued' && !serverQueue.some(item => item.id === message.id))]
+    : []
+  const queuedIds = new Set(queuedMessages.map(message => message.id))
+  const visibleMessages = messages.filter(message => !queuedIds.has(message.id))
+  useEffect(() => {
+    if (currentProject?.agent?.provider !== 'codex') return
+    const projectId = currentProject.id
+    let active = true
+    let timer: ReturnType<typeof setTimeout>
+    const refresh = async () => {
+      try {
+        const result = await window.electronAPI.getCodexQueue(projectId)
+        if (active) setQueueState({ projectId, messages: result.messages })
+      } catch { /* Retry while this project remains open. */ }
+      if (active) timer = setTimeout(() => void refresh(), 500)
+    }
+    void refresh()
+    return () => { active = false; clearTimeout(timer) }
+  }, [currentProject?.id, currentProject?.agent?.provider])
+
+  const sendQueuedNow = async (messageId: string) => {
+    if (!currentProject || sendingNow) return
+    const projectId = currentProject.id
+    setSendingNow(messageId)
+    try {
+      await window.electronAPI.sendCodexQueuedNow(projectId, messageId)
+    } catch (error) {
+      if (useAppStore.getState().currentProject?.id === projectId) setSendError(error instanceof Error ? error.message : String(error))
+    } finally { setSendingNow(null) }
+  }
+  const toolStepCount = visibleMessages.reduce((count, message) => count + (message.toolCall ? 1 : 0), 0)
+  const dialogueCount = visibleMessages.length - toolStepCount
 
   useEffect(() => {
     const viewport = messagesViewportRef.current
@@ -108,7 +143,7 @@ export function ChatPanel() {
           <div className="m-4 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">
             {chatHistoryError}
           </div>
-        ) : messages.length === 0 ? (
+        ) : visibleMessages.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center text-[#6d6a78]">
             <div className="relative">
               <div className="absolute inset-0 -m-4 rounded-full bg-[#d4af37]/10 blur-2xl" />
@@ -121,8 +156,11 @@ export function ChatPanel() {
           </div>
         ) : (
           <div className="space-y-0.5">
-            {messages.map((message) => (
-              <ChatMessageItem key={message.id} message={message} />
+            {visibleMessages.map((message) => (
+              <div key={message.id}>
+                {message.deliveryStatus === 'cancelled' && <p className="px-3 pt-2 text-right text-[10px] text-[#8a8794]">已取消发送</p>}
+                <ChatMessageItem message={message} />
+              </div>
             ))}
             {isAgentThinking && (
               <div className="flex gap-2 py-2">
@@ -138,7 +176,7 @@ export function ChatPanel() {
                   <button
                     onClick={() => currentProject && void window.electronAPI.interruptAgent(currentProject.id)}
                     className="ml-1 rounded-md border border-white/10 px-2 py-0.5 text-[10px] text-[#8a8794] transition hover:border-rose-400/40 hover:text-rose-300"
-                    title="打断当前回合（已排队的消息仍会执行）"
+                    title={currentProject?.agent?.provider === 'codex' ? '停止当前回合并清空待发送队列' : '打断当前回合（已排队的消息仍会执行）'}
                   >
                     停止
                   </button>
@@ -151,6 +189,17 @@ export function ChatPanel() {
 
       {/* Input area */}
       <div className="border-t border-white/[0.08]">
+        {currentProject?.agent?.provider === 'codex' && queuedMessages.length > 0 && (
+          <section aria-label="待发送消息" className="mx-3 mt-2 rounded-lg border border-[#d4af37]/20 bg-[#17161f] p-2">
+            <div className="mb-1 flex items-center justify-between px-1 text-[11px] text-[#8a8794]"><span>待发送 · {queuedMessages.length}</span><span>当前回合结束后按顺序发送</span></div>
+            <ul className="max-h-36 overflow-y-auto">
+              {queuedMessages.map(message => <li key={message.id} className="flex items-center gap-2 border-t border-white/5 py-2">
+                <div className="min-w-0 flex-1 px-1"><p className="line-clamp-2 whitespace-pre-wrap break-words text-xs text-[#e8e6df]">{message.content || '附件消息'}</p>{!!message.attachments?.length && <p className="mt-1 truncate text-[10px] text-[#8a8794]">{message.attachments.map(attachment => attachment.name).join('、')}</p>}</div>
+                <button type="button" disabled={!!sendingNow} onClick={() => void sendQueuedNow(message.id)} title="中断当前回合，优先发送这条消息并继续任务" className="shrink-0 rounded-md border border-[#d4af37]/30 px-2 py-1 text-xs text-[#e8c766] hover:bg-[#d4af37]/10 disabled:opacity-40">{sendingNow === message.id ? '中断中…' : '立即发送'}</button>
+              </li>)}
+            </ul>
+          </section>
+        )}
         {sendError && (
           <div className="mx-3 mt-2 rounded-lg border border-rose-400/25 bg-rose-400/10 px-3 py-2 text-xs text-rose-300">
             {sendError}

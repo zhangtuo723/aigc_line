@@ -45,6 +45,38 @@ class CodexSession {
   private persisted = new Set<string>();
   private turnKey = '';
   private lastStreamError = '';
+  private priorityMessageId?: string;
+  private preparingMessageId?: string;
+  hasPendingMessage(folderPath: string, messageId: string): boolean {
+    return path.resolve(folderPath) === path.resolve(this.options.folderPath)
+      && (this.preparingMessageId === messageId || this.queue.some(message => message.id === messageId));
+  }
+
+  private async setDelivery(message: ChatMessage, deliveryStatus: 'sent' | 'cancelled'): Promise<void> {
+    const updated = { ...message, deliveryStatus };
+    await updateChatMessage(this.options.folderPath, message.id, () => updated);
+    messageHub.pushToFrontend(this.options.projectId, updated);
+  }
+
+  private async cancelQueue(): Promise<void> {
+    const cancelled = this.queue.splice(0);
+    for (const message of cancelled) await this.setDelivery(message, 'cancelled');
+  }
+
+  queuedMessages(): ChatMessage[] { return [...this.queue]; }
+
+  sendNow(messageId: string): void {
+    if (this.stopping) throw new Error('正在中断当前回合，请稍候');
+    const index = this.queue.findIndex(message => message.id === messageId);
+    if (index < 0) throw new Error('该消息已开始处理或已不在队列中');
+    const [message] = this.queue.splice(index, 1);
+    this.queue.unshift(message);
+    this.priorityMessageId = messageId;
+    if (this.running) {
+      this.stopping = true;
+      this.controller?.abort();
+    } else void this.pump();
+  }
 
   constructor(private options: AgentOptions) {}
 
@@ -88,10 +120,13 @@ class CodexSession {
     const toolName = item.type === 'mcp_tool_call' ? item.tool : item.type;
     const input = item.type === 'mcp_tool_call' ? item.arguments
       : item.type === 'command_execution' ? item.command
-      : item.type === 'file_change' ? item.changes : item.query;
+      : item.type === 'file_change' ? item.changes
+      : item.type === 'web_search' ? item.query : item;
     const failed = 'status' in item && item.status === 'failed';
     await this.save({ id, role: 'system', content: `${done ? '执行结束' : '正在执行'}: ${toolName}`, timestamp: Date.now(), toolCall: {
-      id, toolName, toolInput: JSON.stringify(input).slice(0, 2000),
+      // Exec can emit partial payloads and newer item types before SDK typings catch up.
+      // Missing display metadata must not abort the running agent turn.
+      id, toolName, toolInput: JSON.stringify(input ?? null).slice(0, 2000),
       status: !done ? 'running' : failed ? 'error' : 'completed',
       toolResult: done ? JSON.stringify(item).slice(0, 8000) : undefined,
       error: item.type === 'mcp_tool_call' ? item.error?.message : undefined,
@@ -140,8 +175,10 @@ class CodexSession {
     if (this.clearing) throw new Error('正在新建上下文，请稍后发送');
     this.enqueuing++;
     try {
+      message = { ...message, deliveryStatus: 'queued' };
       await appendChatMessage(this.options.folderPath, message);
       this.queue.push(message);
+      messageHub.pushToFrontend(this.options.projectId, message);
       void this.pump();
     } finally { this.enqueuing--; }
   }
@@ -170,9 +207,18 @@ class CodexSession {
       await this.connect();
       while (this.queue.length && !this.stopping) {
         const message = this.queue.shift()!;
+        this.preparingMessageId = message.id;
         this.turnKey = randomUUID();
         this.lastStreamError = '';
-        const input = await this.makeInput(message);
+        const isPriority = message.id === this.priorityMessageId;
+        const input = await this.makeInput(isPriority ? { ...message, content: `${message.content}\n\n[继续说明：上一回合已被用户中断。请结合以上新要求继续原任务，先检查已有修改和已提交的生成任务，避免重复操作。]` } : message);
+        if (this.stopping) {
+          if (this.priorityMessageId) this.queue.splice(1, 0, message);
+          break;
+        }
+        if (isPriority) this.priorityMessageId = undefined;
+        await this.setDelivery(message, 'sent');
+        this.preparingMessageId = undefined;
         const { events } = await this.thread!.runStreamed(input, { signal: this.controller.signal });
         let completed = false;
         for await (const event of events) {
@@ -184,8 +230,12 @@ class CodexSession {
       }
     } catch (error) {
       if (!this.stopping) messageHub.notifyError(this.options.projectId, `Codex：${error instanceof Error ? error.message : String(error)}`);
-      this.queue = [];
+      if (!(this.stopping && this.priorityMessageId)) {
+        this.priorityMessageId = undefined;
+        await this.cancelQueue();
+      }
     } finally {
+      this.preparingMessageId = undefined;
       try { await this.flushMessages(); await this.disconnect(); }
       catch (error) { messageHub.notifyError(this.options.projectId, `Codex 会话保存/关闭失败：${error}`); }
       this.controller = undefined;
@@ -197,8 +247,9 @@ class CodexSession {
 
   async interrupt(): Promise<void> {
     this.stopping = true;
-    this.queue = [];
+    this.priorityMessageId = undefined;
     this.controller?.abort();
+    await this.cancelQueue();
   }
 
   async clear(): Promise<void> {
@@ -223,4 +274,13 @@ export function codexSession(options: AgentOptions): CodexSession {
   return session;
 }
 export async function interruptCodex(projectId: string): Promise<void> { await sessions.get(projectId)?.interrupt(); }
+export function getCodexQueue(projectId: string): ChatMessage[] { return sessions.get(projectId)?.queuedMessages() ?? []; }
+export function isCodexMessagePending(folderPath: string, messageId: string): boolean {
+  return [...sessions.values()].some(session => session.hasPendingMessage(folderPath, messageId));
+}
+export function sendCodexQueuedNow(projectId: string, messageId: string): void {
+  const session = sessions.get(projectId);
+  if (!session) throw new Error('Codex 会话不存在');
+  session.sendNow(messageId);
+}
 app.on('before-quit', () => { for (const session of sessions.values()) session.close(); });

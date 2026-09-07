@@ -1,3 +1,4 @@
+import { normalizeVideoDuration } from '../../../src/shared/video-duration'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { app } from 'electron'
@@ -660,7 +661,7 @@ export async function generateVideoWithComfyUI(
   const baseUrl = normalizeBaseUrl(settings.comfyuiBaseUrl || project.comfyuiBaseUrl || 'http://127.0.0.1:8188')
   const template = VIDEO_WORKFLOWS.find((item) => item.id === request.workflowId) ?? VIDEO_WORKFLOWS[0]
   const workflow = await loadWorkflowFile(template.file, template.name)
-  const duration = Math.max(1, Math.min(15, Number(request.duration ?? 5)))
+  const duration = normalizeVideoDuration(request.duration)
   const dimensions = videoDimensionsFor(request.aspectRatio)
   const setInput = (nodeId: string, field: string, value: unknown) => {
     const node = workflow[nodeId]
