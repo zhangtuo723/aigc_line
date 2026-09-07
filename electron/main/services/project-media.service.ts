@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises'
+import type { Dirent } from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { ProjectMediaAsset, ProjectMediaKind } from '../../../src/shared/ipc.types'
@@ -192,7 +193,7 @@ async function collectMediaFiles(
   directory: string,
   assets: ProjectMediaAsset[],
 ): Promise<void> {
-  let entries: Awaited<ReturnType<typeof fs.readdir>>
+  let entries: Dirent<string>[]
   try {
     entries = await fs.readdir(directory, { withFileTypes: true, encoding: 'utf8' })
   } catch (error) {

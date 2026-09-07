@@ -65,6 +65,11 @@ class CodexSession {
 
   queuedMessages(): ChatMessage[] { return [...this.queue]; }
 
+  activeToolIds(folderPath: string): string[] {
+    if (!this.running || path.resolve(folderPath) !== path.resolve(this.options.folderPath)) return [];
+    return [...this.messages.values()].flatMap((message) => message.toolCall?.status === 'running' ? [message.toolCall.id] : []);
+  }
+
   sendNow(messageId: string): void {
     if (this.stopping) throw new Error('正在中断当前回合，请稍候');
     const index = this.queue.findIndex(message => message.id === messageId);
@@ -277,6 +282,9 @@ export async function interruptCodex(projectId: string): Promise<void> { await s
 export function getCodexQueue(projectId: string): ChatMessage[] { return sessions.get(projectId)?.queuedMessages() ?? []; }
 export function isCodexMessagePending(folderPath: string, messageId: string): boolean {
   return [...sessions.values()].some(session => session.hasPendingMessage(folderPath, messageId));
+}
+export function getActiveCodexToolIds(folderPath: string): string[] {
+  return [...sessions.values()].flatMap((session) => session.activeToolIds(folderPath));
 }
 export function sendCodexQueuedNow(projectId: string, messageId: string): void {
   const session = sessions.get(projectId);

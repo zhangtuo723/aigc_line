@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Excalidraw, convertToExcalidrawElements, exportToBlob } from '@excalidraw/excalidraw'
+import { CaptureUpdateAction, Excalidraw, convertToExcalidrawElements, exportToBlob, getCommonBounds } from '@excalidraw/excalidraw'
 import '@excalidraw/excalidraw/index.css'
 import type {
   BinaryFileData,
@@ -12,6 +12,8 @@ import type {
 } from '@excalidraw/excalidraw/types'
 import type { ExcalidrawElement, FileId } from '@excalidraw/excalidraw/element/types'
 import type { BoardState } from '../../shared/ipc.types'
+import { registerEditFlusher } from '../../shared/pending-edits'
+import { boardExportSize, loadBoardItems, mergeBoardSources } from './image-editor-model'
 
 export interface ImageEditorSource {
   nodeId: string
@@ -23,10 +25,10 @@ interface ImageEditorDialogProps {
   title: string
   sources: ImageEditorSource[]
   boardState?: BoardState
-  onChange: (state: BoardState) => void
+  onChange: (state: BoardState) => Promise<void>
   onPreview: (result: { pngData: ArrayBuffer; width: number; height: number }) => Promise<void>
   onClose: () => void
-  onExport: (result: { pngData: ArrayBuffer; width: number; height: number }) => Promise<void>
+  onExport: (result: { pngData: ArrayBuffer; width: number; height: number; sourceNodeIds: string[] }) => Promise<void>
 }
 
 const blobToDataUrl = (blob: Blob) => new Promise<DataURL>((resolve, reject) => {
@@ -39,6 +41,39 @@ const blobToDataUrl = (blob: Blob) => new Promise<DataURL>((resolve, reject) => 
 const SOURCE_ELEMENT_PREFIX = 'image-editor-element-'
 const SOURCE_FILE_PREFIX = 'image-editor-source-'
 const AUTO_SAVE_DELAY_MS = 600
+
+async function readSource(source: ImageEditorSource, index: number, maxSide: number, signal?: AbortSignal) {
+  const response = await fetch(source.url, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000) })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  const blob = await response.blob()
+  if (blob.size > 50 * 1024 * 1024) throw new Error('图片超过 50 MB，请先缩小素材')
+  signal?.throwIfAborted()
+  const bitmap = await createImageBitmap(blob)
+  try {
+    if (bitmap.width * bitmap.height > 64 * 1024 * 1024) throw new Error('图片超过 6400 万像素，请先缩小素材')
+    const previewScale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height))
+    let imageBlob = blob
+    if (previewScale < 1) {
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.max(1, Math.round(bitmap.width * previewScale))
+      canvas.height = Math.max(1, Math.round(bitmap.height * previewScale))
+      const context = canvas.getContext('2d')
+      if (!context) throw new Error('无法创建图片预览')
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+      imageBlob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error('图片预览编码失败')), 'image/png'))
+      canvas.width = canvas.height = 1
+    }
+    signal?.throwIfAborted()
+    const displayScale = Math.min(1, 720 / Math.max(bitmap.width, bitmap.height))
+    const fileId = `${SOURCE_FILE_PREFIX}${source.nodeId}` as FileId
+    return {
+      url: source.url,
+      file: { id: fileId, mimeType: imageBlob.type || 'image/png', dataURL: await blobToDataUrl(imageBlob), created: Date.now(), lastRetrieved: Date.now() } as BinaryFileData,
+      element: { type: 'image' as const, id: `${SOURCE_ELEMENT_PREFIX}${source.nodeId}`, x: (index % 3) * 780, y: Math.floor(index / 3) * 780,
+        width: Math.max(1, Math.round(bitmap.width * displayScale)), height: Math.max(1, Math.round(bitmap.height * displayScale)), fileId, status: 'saved' as const, scale: [1, 1] as [number, number] },
+    }
+  } finally { bitmap.close() }
+}
 
 const serializeBoardState = (
   elements: readonly ExcalidrawElement[],
@@ -77,6 +112,22 @@ export function ImageEditorDialog({ title, sources, boardState, onChange, onPrev
   const boardRootRef = useRef<HTMLElement | null>(null)
   const saveTimerRef = useRef<number | null>(null)
   const pendingStateRef = useRef<BoardState | null>(null)
+  const onChangeRef = useRef(onChange)
+  onChangeRef.current = onChange
+  const readyRef = useRef(false)
+  const aliveRef = useRef(true)
+  const loadAbortRef = useRef<AbortController | null>(null)
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const lastSavedStateKeyRef = useRef('')
+  const sourceCacheRef = useRef(new Map<string, Awaited<ReturnType<typeof readSource>>>())
+  const initialPromiseRef = useRef<Promise<ExcalidrawInitialDataState> | null>(null)
+  const lastSyncKeyRef = useRef('')
+  const sourcesRef = useRef(sources)
+  sourcesRef.current = sources
+  const [sourceErrors, setSourceErrors] = useState<Array<{ nodeId: string; title: string; message: string }>>([])
+  const [loadedCount, setLoadedCount] = useState(0)
+  const [retry, setRetry] = useState(0)
+  const [saveState, setSaveState] = useState<'saved' | 'pending' | 'saving' | 'error'>('saved')
   const [ready, setReady] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [closing, setClosing] = useState(false)
@@ -84,107 +135,100 @@ export function ImageEditorDialog({ title, sources, boardState, onChange, onPrev
   const [notice, setNotice] = useState('')
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; selectedCount: number } | null>(null)
 
-  const loadInitialData = useCallback(async (): Promise<ExcalidrawInitialDataState> => {
-    try {
-      setError('')
-      const loaded = await Promise.all(sources.map(async (source, index) => {
-        const response = await fetch(source.url)
-        if (!response.ok) throw new Error(`读取“${source.title}”失败：HTTP ${response.status}`)
-        const blob = await response.blob()
-        const bitmap = await createImageBitmap(blob)
-        const originalWidth = bitmap.width
-        const originalHeight = bitmap.height
-        bitmap.close()
-        const maxDisplaySize = 720
-        const scale = Math.min(1, maxDisplaySize / Math.max(originalWidth, originalHeight))
-        const width = Math.max(1, Math.round(originalWidth * scale))
-        const height = Math.max(1, Math.round(originalHeight * scale))
-        const fileId = `image-editor-source-${source.nodeId}` as FileId
-        const file: BinaryFileData = {
-          id: fileId,
-          mimeType: (blob.type || 'image/png') as BinaryFileData['mimeType'],
-          dataURL: await blobToDataUrl(blob),
-          created: Date.now(),
-          lastRetrieved: Date.now(),
-        }
-        return {
-          file,
-          element: {
-            type: 'image' as const,
-            id: `image-editor-element-${source.nodeId}`,
-            x: (index % 3) * 780,
-            y: Math.floor(index / 3) * 780,
-            width,
-            height,
-            fileId,
-            status: 'saved' as const,
-            scale: [1, 1] as [number, number],
-          },
-        }
-      }))
-      const files = Object.fromEntries(loaded.map(({ file }) => [file.id, file])) as BinaryFiles
-      const sourceElements = convertToExcalidrawElements(loaded.map(({ element }) => element), { regenerateIds: false })
-      const sourceElementsById = new Map(sourceElements.map((element) => [element.id, element]))
-      const restoredIds = new Set<string>()
-      const restoredElements: ExcalidrawElement[] = []
-      if (boardState?.version === 1 && Array.isArray(boardState.elements)) {
-        for (const candidate of boardState.elements) {
-          if (!candidate || typeof candidate !== 'object' || typeof (candidate as { id?: unknown }).id !== 'string') continue
-          const element = candidate as ExcalidrawElement
-          if (element.id.startsWith(SOURCE_ELEMENT_PREFIX)) {
-            const currentSource = sourceElementsById.get(element.id)
-            if (!currentSource || currentSource.type !== 'image' || element.type !== 'image') continue
-            restoredIds.add(element.id)
-            restoredElements.push({ ...element, fileId: currentSource.fileId, status: 'saved', isDeleted: false })
-            continue
-          }
-          // Images inserted directly into Excalidraw are intentionally not persisted as data URLs.
-          if (element.type === 'image') continue
-          restoredIds.add(element.id)
-          restoredElements.push(element)
-        }
+  const sourceSignature = JSON.stringify(sources.map(({ nodeId, url }) => [nodeId, url]))
+  const loadSources = async (items: ImageEditorSource[], signal: AbortSignal) => {
+    const previewSide = Math.max(512, Math.min(2048, Math.floor(Math.sqrt(32 * 1024 * 1024 / Math.max(1, items.length)))))
+    const results = await loadBoardItems(items, async (source, index) => {
+      const cached = sourceCacheRef.current.get(source.nodeId)
+      return cached?.url === source.url ? cached : readSource(source, index, previewSide, signal)
+    }, signal)
+    const loaded: Awaited<ReturnType<typeof readSource>>[] = []
+    const failures: typeof sourceErrors = []
+    const elements = results.map((result, index) => {
+      const source = items[index]
+      if (result.status === 'fulfilled') {
+        sourceCacheRef.current.set(source.nodeId, result.value)
+        loaded.push(result.value)
+        return result.value.element
       }
-      const elements = [
-        ...restoredElements,
-        ...sourceElements.filter((element) => !restoredIds.has(element.id)),
-      ]
-      setReady(true)
+      sourceCacheRef.current.delete(source.nodeId)
+      failures.push({ nodeId: source.nodeId, title: source.title, message: result.reason instanceof Error ? result.reason.message : String(result.reason) })
+      return { type: 'image' as const, id: `${SOURCE_ELEMENT_PREFIX}${source.nodeId}`, fileId: `${SOURCE_FILE_PREFIX}${source.nodeId}` as FileId,
+        x: (index % 3) * 780, y: Math.floor(index / 3) * 780, width: 720, height: 480, status: 'error' as const, scale: [1, 1] as [number, number] }
+    })
+    for (const nodeId of sourceCacheRef.current.keys()) if (!items.some((source) => source.nodeId === nodeId)) sourceCacheRef.current.delete(nodeId)
+    return { elements: convertToExcalidrawElements(elements, { regenerateIds: false }), files: Object.fromEntries(loaded.map(({ file }) => [file.id, file])) as BinaryFiles, failures, count: loaded.length }
+  }
+
+  const loadInitialData = useCallback((): Promise<ExcalidrawInitialDataState> => {
+    if (initialPromiseRef.current) return initialPromiseRef.current
+    const controller = new AbortController()
+    loadAbortRef.current = controller
+    initialPromiseRef.current = (async () => {
+      const loaded = await loadSources(sources, controller.signal)
+      const existing = boardState?.version === 1 && Array.isArray(boardState.elements)
+        ? boardState.elements.filter((element): element is ExcalidrawElement => !!element && typeof element === 'object' && typeof (element as { id?: unknown }).id === 'string')
+        : []
+      lastSyncKeyRef.current = `${sourceSignature}:0`
+      if (aliveRef.current) { setSourceErrors(loaded.failures); setLoadedCount(loaded.count); readyRef.current = true; setReady(true) }
       return {
-        elements,
-        files,
-        appState: {
-          theme: 'dark',
-          viewBackgroundColor: '#111318',
-          currentItemStrokeColor: '#ff3b30',
-          currentItemBackgroundColor: 'transparent',
-          ...(boardState?.version === 1 ? boardState.appState : {}),
-        } as ExcalidrawInitialDataState['appState'],
+        elements: mergeBoardSources(existing, loaded.elements), files: loaded.files,
+        appState: { theme: 'dark', viewBackgroundColor: '#111318', currentItemStrokeColor: '#ff3b30', currentItemBackgroundColor: 'transparent', ...(boardState?.version === 1 ? boardState.appState : {}) } as ExcalidrawInitialDataState['appState'],
         scrollToContent: !boardState,
       }
-    } catch (reason) {
-      const message = reason instanceof Error ? reason.message : String(reason)
-      setError(message)
-      throw reason
-    }
-  }, [boardState, sources])
+    })()
+    return initialPromiseRef.current
+  }, [])
 
-  const flushPendingState = useCallback(() => {
+  useEffect(() => {
+    const key = `${sourceSignature}:${retry}`
+    if (!ready || key === lastSyncKeyRef.current) return
+    const controller = new AbortController()
+    loadAbortRef.current?.abort()
+    loadAbortRef.current = controller
+    void loadSources(sourcesRef.current, controller.signal).then((loaded) => {
+      const api = apiRef.current
+      if (controller.signal.aborted || !aliveRef.current || !api) return
+      api.addFiles(Object.values(loaded.files))
+      api.updateScene({ elements: mergeBoardSources(api.getSceneElements(), loaded.elements), captureUpdate: CaptureUpdateAction.NEVER })
+      lastSyncKeyRef.current = key
+      setSourceErrors(loaded.failures)
+      setLoadedCount(loaded.count)
+    }).catch((reason) => { if (!controller.signal.aborted) setError(String(reason)) })
+    return () => controller.abort()
+  }, [ready, sourceSignature, retry])
+
+  const flushPendingState = useCallback(async () => {
     if (saveTimerRef.current !== null) {
       window.clearTimeout(saveTimerRef.current)
       saveTimerRef.current = null
     }
-    const pending = pendingStateRef.current
-    if (!pending) return
-    pendingStateRef.current = null
-    onChange(pending)
-  }, [onChange])
+    const operation = saveQueueRef.current.catch(() => undefined).then(async () => {
+      while (pendingStateRef.current) {
+        const pending = pendingStateRef.current
+        const snapshot = structuredClone(pending)
+        const key = JSON.stringify(snapshot)
+        if (key === lastSavedStateKeyRef.current) { if (pendingStateRef.current === pending) pendingStateRef.current = null; continue }
+        setSaveState('saving')
+        try { await onChangeRef.current(snapshot) }
+        catch (reason) { if (aliveRef.current) { setSaveState('error'); setError(reason instanceof Error ? reason.message : String(reason)) }; throw reason }
+        lastSavedStateKeyRef.current = key
+        if (pendingStateRef.current === pending) pendingStateRef.current = null
+      }
+      if (aliveRef.current) setSaveState('saved')
+    })
+    saveQueueRef.current = operation.catch(() => undefined)
+    return operation
+  }, [])
 
   const scheduleSave = useCallback((elements: readonly ExcalidrawElement[], appState: AppState) => {
-    const connectedFileIds = new Set(sources.map((source) => `${SOURCE_FILE_PREFIX}${source.nodeId}`))
+    if (!readyRef.current || appState.isLoading || !aliveRef.current) return
+    const connectedFileIds = new Set(sourcesRef.current.map((source) => `${SOURCE_FILE_PREFIX}${source.nodeId}`))
     pendingStateRef.current = serializeBoardState(elements, appState, connectedFileIds)
+    setSaveState('pending')
     if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current)
-    saveTimerRef.current = window.setTimeout(flushPendingState, AUTO_SAVE_DELAY_MS)
-  }, [flushPendingState, sources])
+    saveTimerRef.current = window.setTimeout(() => { void flushPendingState().catch(() => undefined) }, AUTO_SAVE_DELAY_MS)
+  }, [flushPendingState, sourceSignature])
 
   const captureCenterPreview = async () => {
     const sourceCanvas = boardRootRef.current?.querySelector<HTMLCanvasElement>('canvas.excalidraw__canvas.static')
@@ -225,11 +269,11 @@ export function ImageEditorDialog({ title, sources, boardState, onChange, onPrev
   }
 
   const closeBoard = async () => {
-    if (closing) return
-    flushPendingState()
+    if (closing || exporting || !ready) return
     setClosing(true)
     setError('')
     try {
+      await flushPendingState()
       await onPreview(await captureCenterPreview())
       onClose()
     } catch (reason) {
@@ -238,13 +282,22 @@ export function ImageEditorDialog({ title, sources, boardState, onChange, onPrev
     }
   }
 
-  useEffect(() => () => {
-    if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current)
-  }, [])
+  useEffect(() => {
+    aliveRef.current = true
+    const unregister = registerEditFlusher(flushPendingState, 10)
+    return () => {
+      unregister()
+      aliveRef.current = false
+      // React StrictMode replays effects with the same pending initial-data
+      // promise. Only abort once the component has really left the tree.
+      queueMicrotask(() => { if (!aliveRef.current) loadAbortRef.current?.abort() })
+      if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current)
+    }
+  }, [flushPendingState])
 
   const exportSelection = async () => {
     const api = apiRef.current
-    if (!api || exporting) return
+    if (!api || exporting || closing || !readyRef.current) return
     const selectedIds = api.getAppState().selectedElementIds
     const elements = api.getSceneElements().filter((element) => selectedIds[element.id])
     if (elements.length === 0) {
@@ -257,6 +310,22 @@ export function ImageEditorDialog({ title, sources, boardState, onChange, onPrev
     setNotice('')
     setContextMenu(null)
     try {
+      const [x1, y1, x2, y2] = getCommonBounds(elements)
+      const output = boardExportSize(x2 - x1, y2 - y1)
+      const selectedFileIds = new Set(elements.flatMap((element) => element.type === 'image' && element.fileId ? [element.fileId] : []))
+      const selectedSources = sourcesRef.current.filter((source) => selectedFileIds.has(`${SOURCE_FILE_PREFIX}${source.nodeId}` as FileId))
+      const sourceVersions = selectedSources.map(({ nodeId, url }) => `${nodeId}:${url}`).join('|')
+      const files: BinaryFiles = { ...api.getFiles() }
+      const originals = await loadBoardItems(selectedSources, (source, index) => {
+        const image = elements.find((element) => element.type === 'image' && element.fileId === `${SOURCE_FILE_PREFIX}${source.nodeId}`)
+        const side = Math.min(8192, Math.max(1, Math.ceil(Math.max(image?.width ?? 720, image?.height ?? 480) * output.scale)))
+        return readSource(source, index, side)
+      })
+      for (const result of originals) {
+        if (result.status === 'rejected') throw new Error(`所选图片读取失败：${result.reason instanceof Error ? result.reason.message : String(result.reason)}`)
+        files[result.value.file.id] = result.value.file
+      }
+      if (!aliveRef.current || sourceVersions !== sourcesRef.current.filter((source) => selectedSources.some((item) => item.nodeId === source.nodeId)).map(({ nodeId, url }) => `${nodeId}:${url}`).join('|')) throw new Error('连接素材已变更，请重新选择后导出')
       const png = await exportToBlob({
         elements,
         appState: {
@@ -265,16 +334,18 @@ export function ImageEditorDialog({ title, sources, boardState, onChange, onPrev
           exportWithDarkMode: false,
           viewBackgroundColor: '#ffffff',
         },
-        files: api.getFiles(),
+        files,
         mimeType: 'image/png',
         exportPadding: 0,
+        getDimensions: () => ({ width: output.width, height: output.height, scale: output.scale }),
       })
       const bitmap = await createImageBitmap(png)
       const width = bitmap.width
       const height = bitmap.height
       bitmap.close()
-      await onExport({ pngData: await png.arrayBuffer(), width, height })
-      setNotice(`已导出 ${elements.length} 个素材，并在外部画布创建图片节点`)
+      if (!aliveRef.current) return
+      await onExport({ pngData: await png.arrayBuffer(), width, height, sourceNodeIds: selectedSources.map((source) => source.nodeId) })
+      setNotice(`已导出 ${elements.length} 个素材 · ${width}×${height}${output.scale < 1 ? '（已按像素预算缩放）' : ''}`)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -288,14 +359,18 @@ export function ImageEditorDialog({ title, sources, boardState, onChange, onPrev
         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#d4af37]/15 text-[#e8c766]">✎</div>
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold">{title}</p>
-          <p className="truncate text-[10px] text-white/35">{sources.length > 0 ? `Excalidraw 自由画板 · 已载入 ${sources.length} 张连接素材` : 'Excalidraw 自由画板 · 无连接素材'}</p>
+          <p className="truncate text-xs text-white/55">Excalidraw 自由画板 · {ready ? sources.length ? `已载入 ${loadedCount}/${sources.length} 张连接素材` : '无连接素材' : '正在恢复画板…'} · {saveState === 'saved' ? '已保存' : saveState === 'saving' ? '正在保存…' : saveState === 'error' ? '保存失败' : '等待保存…'}</p>
         </div>
         <div className="ml-auto flex items-center gap-3">
-          {notice && <span className="max-w-[34rem] truncate text-[10px] text-emerald-300" title={notice}>{notice}</span>}
-          {error && <span className="max-w-[34rem] truncate text-[10px] text-rose-300" title={error}>{error}</span>}
-          <button disabled={closing} onClick={() => void closeBoard()} className="rounded-lg px-3 py-2 text-[11px] text-white/55 hover:bg-white/[0.06] hover:text-white disabled:opacity-45">{closing ? '正在保存预览…' : '关闭并返回画布'}</button>
+          {notice && <span className="max-w-[34rem] truncate text-[12px] text-emerald-300" title={notice}>{notice}</span>}
+          {error && <span className="max-w-[34rem] truncate text-[12px] text-rose-300" title={error}>{error}</span>}
+          {saveState === 'error' && <button onClick={() => void flushPendingState().then(() => setError('')).catch(() => undefined)} className="rounded border border-rose-300/40 px-3 py-2 text-xs text-rose-200">重试保存</button>}
+          <button disabled={closing || exporting || !ready} onClick={() => void closeBoard()} className="rounded-lg px-3 py-2 text-xs text-white/70 hover:bg-white/[0.06] hover:text-white disabled:opacity-45">{closing ? '正在保存预览…' : '关闭并返回画布'}</button>
         </div>
       </header>
+      {sourceErrors.length > 0 && <div className="max-h-28 shrink-0 overflow-y-auto border-b border-amber-300/20 bg-amber-300/5 px-4 py-2 text-xs text-amber-100" role="status">
+        {sourceErrors.map((failure) => <div key={failure.nodeId} className="flex items-center gap-3 py-1"><span className="min-w-0 flex-1 truncate" title={failure.message}>{failure.title}：未载入（保留原位置） · {failure.message}</span><button onClick={() => setRetry((value) => value + 1)} className="shrink-0 rounded border border-amber-200/30 px-2 py-1">重试</button></div>)}
+      </div>}
 
       <main
         ref={boardRootRef}
@@ -319,6 +394,7 @@ export function ImageEditorDialog({ title, sources, boardState, onChange, onPrev
           langCode="zh-CN"
           autoFocus
           handleKeyboardGlobally
+          viewModeEnabled={closing || exporting}
           UIOptions={{
             tools: {
               image: false,
@@ -345,12 +421,12 @@ export function ImageEditorDialog({ title, sources, boardState, onChange, onPrev
               className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-[11px] text-white/80 hover:bg-[#d4af37]/12 hover:text-[#f0d98c] disabled:opacity-35"
             >
               <span>{exporting ? '正在导出…' : '导出所选素材'}</span>
-              <span className="ml-5 text-[9px] text-white/35">{contextMenu.selectedCount} 项</span>
+              <span className="ml-5 text-[12px] text-white/55">{contextMenu.selectedCount} 项</span>
             </button>
           </div>
         )}
       </main>
-      <footer className="flex h-8 flex-shrink-0 items-center justify-between border-t border-white/10 bg-[#111217] px-4 text-[9px] text-white/30">
+      <footer className="flex h-8 flex-shrink-0 items-center justify-between border-t border-white/10 bg-[#111217] px-4 text-[12px] text-white/30">
         <span>直接绘制，或编辑连接图片；框选或 Shift 多选后右键即可导出，可重复输出多个结果。</span>
         <span>{exporting ? '正在写入外部画布…' : '图片、图形、箭头、文字和自由画笔均可参与导出'}</span>
       </footer>

@@ -536,3 +536,19 @@ export type MessageHubEvent =
 
 /** MessageHub event handler */
 export type MessageHubHandler = (event: MessageHubEvent) => void | Promise<void>;
+export interface CloseReadyResult { requestId: string; success: boolean; error?: string }
+
+export interface GenerationTaskSummary {
+  id: string;
+  projectId: string;
+  nodeId: string;
+  provider: 'comfyui' | 'seedance' | 'google' | 'seedream';
+  operation: 'image' | 'video' | 'upscale' | 'extract-audio';
+  status: 'submitting' | 'running' | 'succeeded' | 'failed' | 'unknown';
+  taskId?: string;
+  relativePath?: string;
+  sourceVideoPath?: string;
+  error?: string;
+  acknowledged?: boolean;
+  updatedAt: number;
+}

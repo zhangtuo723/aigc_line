@@ -7,7 +7,7 @@ export function TitleBar() {
         isMac ? 'pl-[78px]' : 'pl-3'
       }`}
     >
-      <img src="/logo.svg" alt="" className="h-4 w-4" />
+      <img src={`${import.meta.env.BASE_URL}logo.svg`} alt="" className="h-4 w-4" />
       <span className="font-display text-[11px] font-semibold tracking-[0.32em] text-[#e8c766]/90">
         AIGC CANVAS
       </span>

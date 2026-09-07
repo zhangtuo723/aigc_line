@@ -1,5 +1,5 @@
 import { normalizeVideoDuration } from '../shared/video-duration'
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
+import { createContext, lazy, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent } from 'react'
 import {
   addEdge,
   Background,
@@ -13,10 +13,10 @@ import {
   ReactFlow,
   ReactFlowProvider,
   SelectionMode,
-  useEdges,
   useEdgesState,
-  useNodes,
+  useEdges,
   useNodesState,
+  useNodes,
   useReactFlow,
   type Connection,
   type Edge,
@@ -37,6 +37,7 @@ import type {
   ProjectMediaAsset,
   ProjectMediaKind,
   StoryboardShot,
+  GenerationTaskSummary,
 } from '../shared/ipc.types'
 import {
   getCapabilityField,
@@ -48,10 +49,16 @@ import {
   validateNodeFieldValue,
 } from '../shared/node-capabilities'
 import { buildCanvasNodeDetail, buildCanvasOverview } from '../shared/canvas-read-model'
-import { connectedDirectorImageNodeIds } from '../shared/director-references'
+import { CanvasReferenceIndex } from '../shared/canvas-reference-index'
+import { projectSnapshotWriter } from '../shared/snapshot-persistence'
+import { registerEditFlusher } from '../shared/pending-edits'
+import { EditHistory } from '../shared/edit-history'
+import { vacantNodePosition } from '../shared/canvas-placement'
+import { ProjectAssetPreview } from './ProjectAssetPreview'
 import { orderImageReferences } from '../shared/image-references'
-import type { DirectorActorModelId, DirectorAspectRatio, DirectorBodyType, DirectorElementKind, DirectorPoseId, DirectorProject, DirectorShot, DirectorVec3 } from '../shared/director.types'
-import { directorProjectSchema, directorSceneDraftSchema } from '../shared/director-schema'
+import type { DirectorActorModelId, DirectorAspectRatio, DirectorBodyType, DirectorPoseId, DirectorProject, DirectorShot, DirectorVec3 } from '../shared/director.types'
+import { directorElementKindSchema, directorProjectSchema, directorSceneDraftSchema } from '../shared/director-schema'
+import { DIRECTOR_PRIMITIVE_KINDS } from '../shared/director-element-catalog'
 import {
   addDirectorElement,
   applyDirectorSceneDraft,
@@ -82,6 +89,21 @@ type StoryNodeData = CanvasNodeData
 
 type StoryNode = Node<StoryNodeData, 'storyNode'>
 type StoryEdge = Edge<Record<string, never>, 'default'>
+const ReferenceIndexContext = createContext<CanvasReferenceIndex<StoryNode> | null>(null)
+const PersistNodeContext = createContext<(nodeId: string, patch: Partial<StoryNodeData>) => Promise<void>>(async () => { throw new Error('画布尚未准备好') })
+const RecoverTasksContext = createContext<() => Promise<void>>(async () => {})
+const runtimeNodeFields = new Set(['sourcePath', 'sourceHistory', 'preview', 'generationStatus', 'generationError', 'boardPreviewPath', 'boardPreviewUpdatedAt'])
+const editDataKeys = new WeakMap<StoryNodeData, string>()
+function canvasEditKey(value: FlowSnapshot): string {
+  return value.nodes.map((node) => {
+    let key = editDataKeys.get(node.data)
+    if (key === undefined) {
+      key = JSON.stringify(Object.fromEntries(Object.entries(node.data).filter(([field]) => !runtimeNodeFields.has(field))))
+      editDataKeys.set(node.data, key)
+    }
+    return `${node.id}:${node.position.x}:${node.position.y}:${key}`
+  }).join('|') + JSON.stringify(value.edges.map((edge) => [edge.id, edge.source, edge.target, edge.sourceHandle, edge.targetHandle])) + JSON.stringify(value.dismissedArtifacts ?? {})
+}
 
 interface FlowSnapshot {
   type: 'react-flow'
@@ -109,10 +131,10 @@ function applyDirectorAtomicAction(
   params: Record<string, unknown>,
 ): DirectorProject {
   if (actionId === 'add-element') {
-    const kind = requireDirectorParam(params, 'kind')
-    const kinds: DirectorElementKind[] = ['actor', 'crowd', 'box', 'sphere', 'cylinder', 'wall', 'floor', 'platform', 'stairs', 'ramp', 'cone', 'capsule']
-    if (typeof kind !== 'string' || !kinds.includes(kind as DirectorElementKind)) throw new Error('kind 无效')
-    let element = createDirectorElement(kind as DirectorElementKind, project.elements.length)
+    const parsedKind = directorElementKindSchema.safeParse(requireDirectorParam(params, 'kind'))
+    if (!parsedKind.success) throw new Error('kind 无效')
+    const kind = parsedKind.data
+    let element = createDirectorElement(kind, project.elements.length)
     if (typeof params.name === 'string') element = { ...element, name: params.name }
     if (isDirectorVec3(params.position)) element = { ...element, transform: { ...element.transform, position: params.position } }
     if (kind === 'actor' || kind === 'crowd') {
@@ -193,7 +215,6 @@ function applyDirectorAtomicAction(
   throw new Error(`未知导演台动作：${actionId}`)
 }
 
-const SAVE_DEBOUNCE_MS = 700
 const DEFAULT_VIEWPORT: Viewport = { x: 80, y: 70, zoom: 0.86 }
 const PROJECT_ASSET_DRAG_TYPE = 'application/x-aigc-project-media'
 const KIND_LABELS: Record<StoryNodeKind, string> = {
@@ -1116,13 +1137,18 @@ function NodeDeleteButton({ id }: { id: string }) {
 }
 
 function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
-  const canvasNodes = useNodes<StoryNode>()
-  const canvasEdges = useEdges<StoryEdge>()
-  const { getNodes, setNodes, setEdges } = useReactFlow<StoryNode, StoryEdge>()
+  const references = useContext(ReferenceIndexContext)!
+  const referenceId = data.kind === 'director' || data.kind === 'image-editor' ? id : ''
+  const subscribeReferences = useCallback((listener: () => void) => references.subscribe(referenceId, listener), [references, referenceId])
+  const readReferences = useCallback(() => references.get(referenceId), [references, referenceId])
+  const imageEditorInputs = useSyncExternalStore(subscribeReferences, readReferences)
+  const persistNode = useContext(PersistNodeContext)
+  const recoverTasks = useContext(RecoverTasksContext)
+  const { getNodes, getEdges, setNodes, setEdges } = useReactFlow<StoryNode, StoryEdge>()
   const currentProject = useAppStore((state) => state.currentProject)
   const addCanvasNodeReference = useAppStore((state) => state.addCanvasNodeReference)
   const sendScopedAgentMessage = useAppStore((state) => state.sendScopedAgentMessage)
-  const agentThinkingByProject = useAppStore((state) => state.agentThinkingByProject)
+  const directorAgentBusy = useAppStore((state) => data.kind === 'director' && !!state.currentProject && state.agentThinkingByProject[state.currentProject.id] === true)
   const isReferencedInChat = useAppStore((state) => state.referencedCanvasNodes.some((ref) => ref.id === id))
   const [audioImporting, setAudioImporting] = useState(false)
   const [videoAudioExtracting, setVideoAudioExtracting] = useState(false)
@@ -1143,22 +1169,15 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
     () => isDirector ? normalizeDirectorProject(data.directorProject, data.title) : undefined,
     [data.directorProject, data.title, isDirector],
   )
-  const directorAgentBusy = currentProject ? agentThinkingByProject[currentProject.id] === true : false
   const directorReferenceImages = useMemo(() => {
-    const incomingIds = new Set(connectedDirectorImageNodeIds(id, canvasNodes, canvasEdges))
-    return canvasNodes
-      .filter((node) => incomingIds.has(node.id) && node.data.kind === 'image' && typeof node.data.sourcePath === 'string')
+    return imageEditorInputs
       .map((node) => ({
         nodeId: node.id,
         title: node.data.title,
         sourcePath: node.data.sourcePath!,
         preview: node.data.preview ?? (currentProject ? workspacePreview(currentProject.id, node.data.sourcePath!) : undefined),
       }))
-  }, [canvasEdges, canvasNodes, currentProject, id])
-  const imageEditorInputs = useMemo(() => {
-    const incomingIds = new Set(canvasEdges.filter((edge) => edge.target === id).map((edge) => edge.source))
-    return canvasNodes.filter((node) => incomingIds.has(node.id) && node.data.kind === 'image' && typeof node.data.sourcePath === 'string')
-  }, [canvasEdges, canvasNodes, id])
+  }, [imageEditorInputs, currentProject])
   const selectedImageEditorInput = isImageEditor ? imageEditorInputs[0] : undefined
   const imageEditorSources = useMemo(() => currentProject ? imageEditorInputs.map((node) => ({
     nodeId: node.id,
@@ -1175,7 +1194,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
     : undefined
   useEffect(() => setBoardPreviewFailed(false), [boardPreview])
 
-  const exportImageEditorSelection = async ({ pngData, width, height }: { pngData: ArrayBuffer; width: number; height: number }) => {
+  const exportImageEditorSelection = async ({ pngData, width, height, sourceNodeIds = [] }: { pngData: ArrayBuffer; width: number; height: number; sourceNodeIds?: string[] }) => {
     if (!currentProject) throw new Error('当前项目不可用')
     const projectId = currentProject.id
     const inputNodeId = selectedImageEditorInput?.id
@@ -1186,6 +1205,10 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
       if (inputNodeId) {
         const input = getNodes().find((node) => node.id === inputNodeId && node.data.kind === 'image')
         if (!input) throw new Error('输入图片节点已不存在，已取消写回')
+      }
+      for (const sourceId of sourceNodeIds) {
+        if (!getNodes().some((node) => node.id === sourceId && node.data.kind === 'image' && node.data.sourcePath)
+          || !getEdges().some((edge) => edge.source === sourceId && edge.target === id)) throw new Error('导出所用图片或连线已变化，请重新导出')
       }
     }
     assertContext()
@@ -1199,7 +1222,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
     const liveNodes = getNodes()
     const editorNode = liveNodes.find((node) => node.id === id)
     if (!editorNode) throw new Error('画板节点已不存在，已取消创建输出节点')
-    const outputCount = canvasEdges.filter((edge) => edge.source === id).length
+    const outputCount = getEdges().filter((edge) => edge.source === id).length
     const imageNode = makeNode('image', liveNodes.length + 1, {
       x: editorNode.position.x + 600 + outputCount * 680,
       y: editorNode.position.y,
@@ -1218,9 +1241,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
   }
 
   const updateBoardState = (boardState: NonNullable<StoryNodeData['boardState']>) => {
-    setNodes((nodes) => nodes.map((node) => node.id === id && node.data.kind === 'image-editor'
-      ? { ...node, data: { ...node.data, boardState } }
-      : node))
+    return persistNode(id, { boardState })
   }
 
   const saveBoardPreview = async ({ pngData, width, height }: { pngData: ArrayBuffer; width: number; height: number }) => {
@@ -1242,9 +1263,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
   }
 
   const updateDirectorProject = (directorProject: DirectorProject) => {
-    setNodes((nodes) => nodes.map((node) => node.id === id
-      ? { ...node, data: { ...node.data, directorProject } }
-      : node))
+    return persistNode(id, { directorProject })
   }
 
   const captureDirectorStill = async (
@@ -1312,7 +1331,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
     if (!liveReference || liveReference.data.sourcePath !== reference.sourcePath) throw new Error('参考图片节点已变化，请重新选择')
     const extra = instruction.trim() ? `\n补充要求：${instruction.trim()}` : ''
     await sendScopedAgentMessage(
-      `请使用你的多模态能力读取所引用图片节点的 sourcePath，并分析图片内容；然后为所引用的 3D 导演台生成一个可编辑的简易白模空间。先调用 GetCanvasCapabilities 获取 director 的 apply-scene-draft 参数约束，再调用 InvokeNodeAction 将草案应用到导演台。只使用 box、wall、cylinder、sphere、floor、platform、stairs、ramp、cone、capsule，最多 40 个体块；优先用 floor/platform/stairs/ramp 表达地面、高台、楼梯和斜坡。每个体块必须正确声明 ground/elevated，地面、道路、建筑主体、围墙和家具必须 ground，只有屋顶、横梁、招牌等真实离地结构才使用 elevated。注意 position 是底面锚点而不是中心点，scale.y 才是完整高度。保留演员、手工元素、其他参考图生成的元素和全部机位。完成后用 GetCanvasNode 核对导演台工程，并确认全部 ground 元素的 position.y 都为 0。${extra}`,
+      `请使用你的多模态能力读取所引用图片节点的 sourcePath，并分析图片内容；然后为所引用的 3D 导演台生成一个可编辑的简易白模空间。先调用 GetCanvasCapabilities 获取 director 的 apply-scene-draft 参数约束，再调用 InvokeNodeAction 将草案应用到导演台。只使用 ${DIRECTOR_PRIMITIVE_KINDS.join('、')}，最多 40 个素材；优先用专用类型表达地面、高台、楼梯、斜坡、门窗、桌椅、沙发、床、柜子和栏杆。每个素材必须正确声明 ground/elevated，地面、道路、建筑主体、围墙和落地家具必须 ground，窗框、屋顶、横梁、招牌等真实离地结构使用 elevated。注意 position 是底面锚点，scale 是完整宽/高/深（米），门窗框保留真实开口，不要在开口处叠加实心墙体。保留演员、手工元素、其他参考图生成的元素和全部机位。完成后用 GetCanvasNode 核对导演台工程，并确认全部 ground 元素的 position.y 都为 0。${extra}`,
       [
         { id, title: data.title, kind: 'director' },
         { id: reference.nodeId, title: reference.title, kind: 'image' },
@@ -1433,24 +1452,7 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
       })
       if (!result.success || !result.relativePath) throw new Error(result.error || 'ComfyUI 没有返回提取后的音频')
       assertContext()
-      const liveNodes = getNodes()
-      const sourceNode = liveNodes.find((node) => node.id === id)!
-      const outputCount = liveNodes.filter((node) => (
-        node.data.kind === 'audio' && canvasEdges.some((edge) => edge.source === id && edge.target === node.id)
-      )).length
-      const audioNode = makeNode('audio', liveNodes.length + 1, {
-        x: sourceNode.position.x + 680,
-        y: sourceNode.position.y + 230 + outputCount * 190,
-      })
-      audioNode.data = {
-        ...audioNode.data,
-        title: `${data.title} · 提取音频 ${outputCount + 1}`,
-        sourcePath: result.relativePath,
-        preview: workspacePreview(projectId, result.relativePath),
-        readOnly: true,
-      }
-      setNodes((nodes) => [...nodes, audioNode])
-      setEdges((edges) => [...edges, makeLinkedEdge(`edge-${id}-${audioNode.id}`, id, audioNode.id)])
+      await recoverTasks()
     } catch (error) {
       setVideoAudioExtractionError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -1738,12 +1740,15 @@ const makeLinkedEdge = (
 })
 
 function CanvasFlow() {
+  const referenceIndex = useContext(ReferenceIndexContext)!
   const currentProject = useAppStore((state) => state.currentProject)
   const artifacts = useAppStore((state) => state.artifacts)
   const folderPath = currentProject?.folderPath
   const [nodes, setNodes, onNodesChange] = useNodesState<StoryNode>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<StoryEdge>([])
   const [dismissedArtifacts, setDismissedArtifacts] = useState<Record<string, number>>({})
+  const dismissedArtifactsRef = useRef(dismissedArtifacts)
+  useLayoutEffect(() => { dismissedArtifactsRef.current = dismissedArtifacts }, [dismissedArtifacts])
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('select')
   const [assetPanelOpen, setAssetPanelOpen] = useState(false)
   const [assetFilter, setAssetFilter] = useState<'all' | ProjectMediaKind>('all')
@@ -1751,15 +1756,47 @@ function CanvasFlow() {
   const [assetsLoading, setAssetsLoading] = useState(false)
   const [assetError, setAssetError] = useState('')
   const [uploadingMedia, setUploadingMedia] = useState(false)
-  const { screenToFlowPosition, setViewport, getViewport, fitView } = useReactFlow<StoryNode, StoryEdge>()
+  const [loadError, setLoadError] = useState('')
+  const [loaded, setLoaded] = useState(false)
+  const [loadAttempt, setLoadAttempt] = useState(0)
+  const [generationTasks, setGenerationTasks] = useState<GenerationTaskSummary[]>([])
+  const [tasksOpen, setTasksOpen] = useState(false)
+  const [dismissTaskId, setDismissTaskId] = useState('')
+  const [historyState, setHistoryState] = useState({ undo: false, redo: false })
+  const historyRef = useRef(new EditHistory<FlowSnapshot>())
+  const canvasContainerRef = useRef<HTMLDivElement>(null)
+  const { screenToFlowPosition, setViewport, getViewport, fitView, setCenter } = useReactFlow<StoryNode, StoryEdge>()
   const loadedFolderRef = useRef<string | null>(null)
   const readyToSaveRef = useRef(false)
-  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const loadGenerationRef = useRef(0)
+  const writer = useMemo(() => projectSnapshotWriter<FlowSnapshot>(folderPath ?? ''), [folderPath])
+  const saveState = useSyncExternalStore(writer.subscribe, writer.getState)
   const nodesRef = useRef<StoryNode[]>([])
   const edgesRef = useRef<StoryEdge[]>([])
   const projectIdRef = useRef<string | null>(currentProject?.id ?? null)
   const revisionRef = useRef(0)
   projectIdRef.current = currentProject?.id ?? null
+  useEffect(() => () => { projectIdRef.current = null }, [])
+
+  const snapshot = useCallback((snapshotNodes = nodesRef.current): FlowSnapshot => ({
+    type: 'react-flow', version: 4, nodes: snapshotNodes, edges: edgesRef.current,
+    viewport: getViewport(), dismissedArtifacts: dismissedArtifactsRef.current,
+  }), [getViewport])
+  const persistNode = useCallback(async (nodeId: string, patch: Partial<StoryNodeData>) => {
+    if (!readyToSaveRef.current || loadedFolderRef.current !== folderPath) throw new Error('画布未成功加载，暂时不能保存')
+    if (!nodesRef.current.some((node) => node.id === nodeId)) throw new Error('源节点已不存在')
+    const next = nodesRef.current.map((node) => node.id === nodeId ? { ...node, data: { ...node.data, ...patch } } : node)
+    nodesRef.current = next
+    setNodes(next)
+    writer.schedule(snapshot(next))
+    await writer.flush()
+  }, [folderPath, setNodes, snapshot, writer])
+
+  useLayoutEffect(() => { referenceIndex.update(nodes, edges) }, [referenceIndex, nodes, edges])
+  useEffect(() => {
+    const unregister = registerEditFlusher(writer.flush)
+    return () => { unregister(); void writer.flush().catch(() => {}) }
+  }, [writer])
 
   const loadProjectAssets = useCallback(async () => {
     if (!currentProject) return
@@ -1839,11 +1876,11 @@ function CanvasFlow() {
     }
   }, [appendProjectAssets, screenToFlowPosition])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (nodesRef.current !== nodes) revisionRef.current += 1
     nodesRef.current = nodes
   }, [nodes])
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (edgesRef.current !== edges) revisionRef.current += 1
     edgesRef.current = edges
   }, [edges])
@@ -1857,28 +1894,93 @@ function CanvasFlow() {
       : node))
   }
 
-  const applyGenerationResult = (nodeId: string, projectId: string, relativePath: string) => {
+  const applyGenerationResult = async (nodeId: string, projectId: string, relativePath: string) => {
     if (projectIdRef.current !== projectId) return
-    const preview = `workspace://${projectId}/${relativePath
-      .split('/')
-      .map(encodeURIComponent)
-      .join('/')}`
-    setNodes((list) => list.map((node) => node.id === nodeId
-      ? {
-          ...node,
-          data: {
-            ...node.data,
-            preview,
-            sourcePath: relativePath,
-            sourceHistory: node.data.sourcePath
-              ? [...(node.data.sourceHistory ?? []), node.data.sourcePath]
-              : node.data.sourceHistory ?? [],
-            generationStatus: 'idle',
-            generationError: '',
-          },
-        }
-      : node))
+    const node = nodesRef.current.find((item) => item.id === nodeId)
+    if (!node) return
+    await persistNode(nodeId, {
+      preview: workspacePreview(projectId, relativePath), sourcePath: relativePath,
+      sourceHistory: node.data.sourcePath && node.data.sourcePath !== relativePath
+        ? [...(node.data.sourceHistory ?? []), node.data.sourcePath] : node.data.sourceHistory ?? [],
+      generationStatus: 'idle', generationError: '',
+    })
   }
+
+  const recoveringTasksRef = useRef<Promise<void> | null>(null)
+  const recoverTasks = useCallback((): Promise<void> => {
+    if (recoveringTasksRef.current) return recoveringTasksRef.current
+    if (!currentProject || !readyToSaveRef.current) return Promise.resolve()
+    const projectId = currentProject.id
+    const generation = loadGenerationRef.current
+    const operation = (async () => {
+      const tasks = await window.electronAPI.listGenerationTasks(projectId)
+      if (projectIdRef.current !== projectId || !readyToSaveRef.current || loadGenerationRef.current !== generation) return
+      setGenerationTasks((previous) => JSON.stringify(previous) === JSON.stringify(tasks) ? previous : tasks)
+      let nextNodes = nodesRef.current
+      let nextEdges = edgesRef.current
+      const completed: GenerationTaskSummary[] = []
+      for (const task of tasks) {
+        if (task.acknowledged) continue
+        const node = nextNodes.find((item) => item.id === task.nodeId)
+        if (!node) continue
+        if (task.status === 'succeeded' && task.relativePath && task.taskId) {
+          if (task.operation === 'extract-audio') {
+            if (node.data.kind !== 'video' || node.data.sourcePath !== task.sourceVideoPath) continue
+            const stableId = `audio-${task.id}`
+            const conflict = nextNodes.find((item) => item.id === stableId)
+            if (conflict && (conflict.data.kind !== 'audio' || conflict.data.sourcePath !== task.relativePath)) continue
+            const exists = !!conflict || nextNodes.some((item) => item.data.kind === 'audio' && item.data.sourcePath === task.relativePath
+              && nextEdges.some((edge) => edge.source === node.id && edge.target === item.id))
+            if (!exists) {
+              const audioNode = makeNode('audio', nextNodes.length + 1, { x: node.position.x + 680, y: node.position.y + 230 })
+              audioNode.id = `audio-${task.id}`
+              audioNode.data = { ...audioNode.data, title: `${node.data.title} · 提取音频`, sourcePath: task.relativePath, preview: workspacePreview(projectId, task.relativePath), readOnly: true }
+              nextNodes = [...nextNodes, audioNode]
+              nextEdges = [...nextEdges, makeLinkedEdge(`edge-${node.id}-${audioNode.id}`, node.id, audioNode.id)]
+            }
+          } else {
+            if (node.data.kind !== task.operation) continue
+            const relativePath = task.relativePath
+            if (node.data.sourcePath !== relativePath || node.data.generationStatus !== 'idle' || node.data.generationError) {
+              nextNodes = nextNodes.map((item) => item.id === node.id ? { ...item, data: { ...item.data,
+                sourcePath: relativePath, preview: workspacePreview(projectId, relativePath), generationStatus: 'idle', generationError: '',
+                sourceHistory: item.data.sourcePath && item.data.sourcePath !== relativePath ? [...(item.data.sourceHistory ?? []), item.data.sourcePath] : item.data.sourceHistory ?? [],
+              } } : item)
+            }
+          }
+          completed.push(task)
+        } else if (task.operation !== 'extract-audio' && node.data.kind === task.operation) {
+          const status = task.status === 'unknown' || task.status === 'failed' ? 'error' : 'generating'
+          const error = task.error ?? ''
+          if (node.data.generationStatus !== status || node.data.generationError !== error) nextNodes = nextNodes.map((item) => item.id === node.id ? { ...item, data: { ...item.data, generationStatus: status, generationError: error } } : item)
+        }
+      }
+      if (nextNodes !== nodesRef.current || nextEdges !== edgesRef.current) {
+        nodesRef.current = nextNodes; edgesRef.current = nextEdges
+        setNodes(nextNodes); setEdges(nextEdges)
+        writer.schedule(snapshot(nextNodes))
+      }
+      if (completed.length) {
+        await writer.flush()
+        if (projectIdRef.current !== projectId || loadGenerationRef.current !== generation) return
+        for (const task of completed) await window.electronAPI.acknowledgeGenerationTask(projectId, task.nodeId, task.taskId!)
+      }
+    })().finally(() => { if (recoveringTasksRef.current === operation) recoveringTasksRef.current = null })
+    recoveringTasksRef.current = operation
+    return operation
+  }, [currentProject, setEdges, setNodes, snapshot, writer])
+
+  useEffect(() => {
+    if (!loaded) return
+    let active = true
+    let timer: ReturnType<typeof setTimeout>
+    const refresh = async () => {
+      try { await recoverTasks() } catch (error) { if (active) setAssetError(error instanceof Error ? error.message : '任务恢复失败') }
+      if (active) timer = setTimeout(() => void refresh(), 1500)
+    }
+    void refresh()
+    return () => { active = false; clearTimeout(timer) }
+  }, [loaded, recoverTasks])
 
   const generateImageNode = async (nodeId: string) => {
     const project = useAppStore.getState().currentProject
@@ -1919,7 +2021,8 @@ function CanvasFlow() {
       if (!result.success || !result.relativePath) {
         throw new Error(result.error || '图片生成服务没有返回图片')
       }
-      applyGenerationResult(nodeId, project.id, result.relativePath)
+      await applyGenerationResult(nodeId, project.id, result.relativePath)
+      await recoverTasks()
     } catch (error) {
       if (projectIdRef.current !== project.id) return
       patchNodeData(nodeId, {
@@ -1994,7 +2097,8 @@ function CanvasFlow() {
       if (!result.success || !result.relativePath) {
         throw new Error(result.error || '视频生成服务没有返回视频')
       }
-      applyGenerationResult(nodeId, project.id, result.relativePath)
+      await applyGenerationResult(nodeId, project.id, result.relativePath)
+      await recoverTasks()
     } catch (error) {
       if (projectIdRef.current !== project.id) return
       patchNodeData(nodeId, {
@@ -2034,7 +2138,8 @@ function CanvasFlow() {
       if (!result.success || !result.relativePath) {
         throw new Error(result.error || 'ComfyUI 没有返回放大后的视频')
       }
-      applyGenerationResult(nodeId, project.id, result.relativePath)
+      await applyGenerationResult(nodeId, project.id, result.relativePath)
+      await recoverTasks()
     } catch (error) {
       if (projectIdRef.current !== project.id) return
       patchNodeData(nodeId, {
@@ -2342,9 +2447,15 @@ function CanvasFlow() {
   }, [currentProject, getViewport, setEdges, setNodes])
 
   useEffect(() => {
-    if (!folderPath || loadedFolderRef.current === folderPath) return
+    if (!folderPath) return
+    const generation = ++loadGenerationRef.current
     loadedFolderRef.current = folderPath
     readyToSaveRef.current = false
+    setLoaded(false)
+    setLoadError('')
+    setGenerationTasks([])
+    historyRef.current = new EditHistory<FlowSnapshot>()
+    setHistoryState({ undo: false, redo: false })
     nodesRef.current = []
     edgesRef.current = []
     revisionRef.current = 0
@@ -2356,9 +2467,9 @@ function CanvasFlow() {
     setAssetError('')
 
     const requestedFolderPath = folderPath
-    void window.electronAPI.loadCanvasSnapshot(requestedFolderPath)
+    void writer.flush().then(() => window.electronAPI.loadCanvasSnapshot(requestedFolderPath))
       .then((snapshot: unknown) => {
-        if (loadedFolderRef.current !== requestedFolderPath) return
+        if (loadGenerationRef.current !== generation) return
         if (isFlowSnapshot(snapshot)) {
           const migrated = migrateLegacySnapshot(snapshot)
           const restoredNodes = migrated.nodes.map<StoryNode>((node) => {
@@ -2373,37 +2484,48 @@ function CanvasFlow() {
           setEdges(restoredEdges)
           setDismissedArtifacts(migrated.dismissedArtifacts ?? {})
           void setViewport(migrated.viewport ?? DEFAULT_VIEWPORT)
-        } else {
+        } else if (snapshot === null) {
           void setViewport(DEFAULT_VIEWPORT)
-        }
+        } else throw new Error('画布文件格式不正确，已停止自动保存以保护原文件')
+        readyToSaveRef.current = true
+        setLoaded(true)
       })
       .catch((error: unknown) => {
-        if (loadedFolderRef.current === requestedFolderPath) {
-          console.error('Failed to load canvas snapshot:', error)
+        if (loadGenerationRef.current === generation) {
+          setLoadError(error instanceof Error ? error.message : String(error))
         }
       })
-      .finally(() => {
-        if (loadedFolderRef.current === requestedFolderPath) readyToSaveRef.current = true
-      })
-  }, [folderPath, setEdges, setNodes, setViewport])
+    return () => { loadGenerationRef.current += 1; readyToSaveRef.current = false }
+  }, [folderPath, loadAttempt, setEdges, setNodes, setViewport, writer])
 
-  useEffect(() => {
-    if (!folderPath || !readyToSaveRef.current) return
-    clearTimeout(saveTimeoutRef.current)
-    saveTimeoutRef.current = setTimeout(() => {
-      const snapshot: FlowSnapshot = {
-        type: 'react-flow',
-        version: 4,
-        nodes,
-        edges,
-        viewport: getViewport(),
-        dismissedArtifacts,
-      }
-      window.electronAPI.saveCanvasSnapshot(folderPath, snapshot)
-        .catch((error: unknown) => console.error('Failed to save canvas snapshot:', error))
-    }, SAVE_DEBOUNCE_MS)
-    return () => clearTimeout(saveTimeoutRef.current)
-  }, [dismissedArtifacts, edges, folderPath, getViewport, nodes])
+  useLayoutEffect(() => {
+    if (!folderPath || !readyToSaveRef.current || loadedFolderRef.current !== folderPath) return
+    writer.schedule(snapshot(nodes))
+  }, [dismissedArtifacts, edges, folderPath, nodes, snapshot, writer])
+
+  useLayoutEffect(() => {
+    if (!loaded || !readyToSaveRef.current || nodes.some((node) => node.dragging)) return
+    const value = snapshot(nodes)
+    const focused = document.activeElement
+    const group = focused?.matches('input,textarea,[contenteditable="true"]') ? focused : undefined
+    historyRef.current.observe(value, canvasEditKey(value), group)
+    setHistoryState({ undo: historyRef.current.canUndo, redo: historyRef.current.canRedo })
+  }, [nodes, edges, dismissedArtifacts, loaded, snapshot])
+
+  const restoreEdit = useCallback((direction: 'undo' | 'redo') => {
+    if (document.querySelector('[data-canvas-node-editor-dialog]')) return
+    const value = historyRef.current[direction]()
+    if (!value) return
+    const live = new Map(nodesRef.current.map((node) => [node.id, node]))
+    const restored = value.nodes.map((node): StoryNode => {
+      const current = live.get(node.id)
+      const runtime = current ? Object.fromEntries(Object.entries(current.data).filter(([key]) => runtimeNodeFields.has(key))) : { generationStatus: node.data.generationStatus === 'generating' ? 'idle' : node.data.generationStatus }
+      return { ...node, dragging: false, data: { ...node.data, ...runtime } }
+    })
+    nodesRef.current = restored; edgesRef.current = value.edges
+    setNodes(restored); setEdges(value.edges); setDismissedArtifacts(value.dismissedArtifacts ?? {})
+    setHistoryState({ undo: historyRef.current.canUndo, redo: historyRef.current.canRedo })
+  }, [setNodes, setEdges])
 
   useEffect(() => {
     if (!readyToSaveRef.current || artifacts.length === 0) return
@@ -2555,23 +2677,41 @@ function CanvasFlow() {
   }, [setEdges])
 
   const addNode = useCallback((kind: StoryNodeKind) => {
-    const center = screenToFlowPosition({ x: window.innerWidth * 0.38, y: window.innerHeight * 0.48 })
-    setNodes((current) => [...current, makeNode(kind, current.length + 1, center)])
-  }, [screenToFlowPosition, setNodes])
+    if (!readyToSaveRef.current) return
+    const rect = canvasContainerRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const center = screenToFlowPosition({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 })
+    const width = kind === 'image' || kind === 'video' ? 620 : kind === 'director' || kind === 'image-editor' ? 520 : 420
+    const position = vacantNodePosition(nodesRef.current, center, width)
+    const node = { ...makeNode(kind, nodesRef.current.length + 1, position), selected: true }
+    nodesRef.current = [...nodesRef.current.map((item) => item.selected ? { ...item, selected: false } : item), node]
+    setNodes(nodesRef.current)
+    void setCenter(position.x + width / 2, position.y + 220, { zoom: Math.min(getViewport().zoom, Math.max(0.2, (rect.width - 100) / width)), duration: 200 })
+  }, [getViewport, screenToFlowPosition, setCenter, setNodes])
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null
       if (target?.matches('input, textarea, select, [contenteditable="true"]')) return
+      if (document.querySelector('[data-canvas-node-editor-dialog]')) return
+      if ((event.ctrlKey || event.metaKey) && ['z', 'y'].includes(event.key.toLowerCase())) {
+        event.preventDefault()
+        restoreEdit(event.shiftKey || event.key.toLowerCase() === 'y' ? 'redo' : 'undo')
+        return
+      }
       if (event.key.toLowerCase() === 'v') setInteractionMode('select')
       if (event.key.toLowerCase() === 'h') setInteractionMode('pan')
     }
     window.addEventListener('keydown', handleShortcut)
-    return () => window.removeEventListener('keydown', handleShortcut)
-  }, [])
+    const endGroup = () => historyRef.current.endGroup()
+    window.addEventListener('focusout', endGroup)
+    return () => { window.removeEventListener('keydown', handleShortcut); window.removeEventListener('focusout', endGroup) }
+  }, [restoreEdit])
 
   const toolbar = useMemo(() => (
-    <div className="pointer-events-auto flex items-center gap-1.5 rounded-2xl border border-white/10 bg-[#19191e]/95 p-1.5 shadow-[0_12px_35px_rgba(0,0,0,0.5)] backdrop-blur-xl">
+    <div className="pointer-events-auto mx-12 flex max-w-[calc(100%_-_6rem)] shrink-0 items-center gap-1.5 overflow-x-auto whitespace-nowrap rounded-2xl border border-white/10 bg-[#19191e]/95 p-1.5 shadow-[0_12px_35px_rgba(0,0,0,0.5)] backdrop-blur-xl [&>button]:shrink-0">
+      <button disabled={!historyState.undo} onClick={() => restoreEdit('undo')} title="撤销 (Ctrl+Z)" aria-label="撤销画布修改" className="h-9 w-9 rounded-lg text-lg text-white/65 hover:bg-white/10 disabled:opacity-25">↶</button>
+      <button disabled={!historyState.redo} onClick={() => restoreEdit('redo')} title="重做 (Ctrl+Shift+Z)" aria-label="重做画布修改" className="h-9 w-9 rounded-lg text-lg text-white/65 hover:bg-white/10 disabled:opacity-25">↷</button>
       <button
         onClick={() => setInteractionMode('select')}
         className={`flex h-9 w-9 items-center justify-center rounded-xl transition ${interactionMode === 'select' ? 'bg-[#e8e6df] text-[#17171b]' : 'text-white/50 hover:bg-white/[0.08] hover:text-white'}`}
@@ -2607,14 +2747,16 @@ function CanvasFlow() {
         适应画布
       </button>
     </div>
-  ), [addNode, fitView, interactionMode])
+  ), [addNode, fitView, interactionMode, historyState, restoreEdit])
 
   const visibleProjectAssets = assetFilter === 'all'
     ? projectAssets
     : projectAssets.filter((asset) => asset.kind === assetFilter)
 
   return (
-    <div className="relative h-full w-full bg-[#0a0a0f]">
+    <PersistNodeContext.Provider value={persistNode}>
+    <RecoverTasksContext.Provider value={recoverTasks}>
+    <div ref={canvasContainerRef} className="relative h-full w-full bg-[#0a0a0f]">
       <ReactFlow<StoryNode, StoryEdge>
         className={interactionMode === 'select' ? 'canvas-select-mode' : 'canvas-pan-mode'}
         nodes={nodes}
@@ -2623,6 +2765,7 @@ function CanvasFlow() {
         onNodesChange={handleNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
+        onMoveEnd={() => { if (readyToSaveRef.current) writer.schedule(snapshot()) }}
         onDragOver={handleAssetDragOver}
         onDrop={handleAssetDrop}
         selectionOnDrag={interactionMode === 'select'}
@@ -2649,6 +2792,20 @@ function CanvasFlow() {
           maskColor="rgba(5,5,8,0.72)"
         />
       </ReactFlow>
+      {loaded && <div role="status" className="absolute right-3 top-3 z-20 max-w-[75%] rounded-lg border border-white/10 bg-[#17171c]/95 px-3 py-2 text-xs text-white/65">
+        {saveState === 'saved' ? '已保存' : saveState === 'saving' ? '保存中…' : saveState === 'pending' ? '等待保存…' : <span className="text-rose-300">保存失败：{writer.error} <button className="underline" onClick={() => void writer.flush().catch(() => {})}>重试保存</button></span>}
+        <button onClick={() => setTasksOpen((value) => !value)} aria-expanded={tasksOpen} className="ml-3 border-l border-white/15 pl-3 text-[#e8c766]">生成任务 {generationTasks.filter((task) => !task.acknowledged).length || ''}</button>
+      </div>}
+      {tasksOpen && <aside aria-label="生成任务" className="absolute right-3 top-14 z-30 max-h-[65%] w-[360px] max-w-[calc(100%_-_1.5rem)] space-y-3 overflow-auto rounded-xl border border-white/15 bg-[#17171c] p-4 text-xs shadow-xl">
+        <div className="flex items-center justify-between"><h3 className="text-sm">生成任务与恢复</h3><button onClick={() => void recoverTasks().catch((error) => setAssetError(String(error)))}>刷新</button><button onClick={() => setTasksOpen(false)} aria-label="关闭生成任务">×</button></div>
+        {generationTasks.length === 0 && <p className="text-white/50">暂无生成任务</p>}
+        {generationTasks.map((task) => <div key={task.id} className="space-y-2 rounded-lg border border-white/10 p-3">
+          <div className="flex justify-between gap-2"><span className="truncate">{nodes.find((node) => node.id === task.nodeId)?.data.title ?? '源节点已删除'}</span><span className="shrink-0 text-[#e8c766]">{{ submitting: '正在提交', running: '正在生成 / 恢复', succeeded: '已完成', failed: '失败', unknown: '提交结果待核实' }[task.status]}</span></div>
+          {task.taskId && <p className="break-all font-mono text-white/45">{task.taskId}</p>}
+          {task.error && <p className="break-words text-rose-200">{task.error}</p>}
+          {task.status === 'unknown' && (dismissTaskId !== task.id ? <button onClick={() => setDismissTaskId(task.id)} className="text-[#e8c766] underline">已核实服务端结果，解除重试限制</button> : <div className="space-y-2"><p>只有确认服务端没有继续执行，或已取回结果后再解除。之后点击生成将提交新任务。</p><button onClick={async () => { if (!currentProject) return; try { await window.electronAPI.dismissGenerationTask(currentProject.id, task.nodeId, task.taskId ?? task.id); setDismissTaskId(''); await recoverTasks() } catch (error) { setAssetError(String(error)) } }} className="rounded border border-[#d4af37]/40 px-2 py-1">确认已核实</button><button onClick={() => setDismissTaskId('')} className="ml-3">取消</button></div>)}
+        </div>)}
+      </aside>}
       <div className="pointer-events-auto absolute left-4 top-1/2 z-20 flex -translate-y-1/2 flex-col gap-2 rounded-2xl border border-white/10 bg-[#19191e]/95 p-2 shadow-[0_12px_35px_rgba(0,0,0,0.5)] backdrop-blur-xl">
         <button
           onClick={() => void uploadProjectMedia()}
@@ -2679,7 +2836,7 @@ function CanvasFlow() {
       </div>
 
       {assetPanelOpen && (
-        <aside className="pointer-events-auto absolute left-20 top-1/2 z-20 flex max-h-[72vh] w-[390px] -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-white/12 bg-[#151519]/98 shadow-[0_20px_60px_rgba(0,0,0,0.65)] backdrop-blur-xl">
+        <aside className="pointer-events-auto absolute left-20 top-1/2 z-20 flex max-h-[72vh] w-[390px] max-w-[calc(100%_-_6rem)] -translate-y-1/2 flex-col overflow-hidden rounded-2xl border border-white/12 bg-[#151519]/98 shadow-[0_20px_60px_rgba(0,0,0,0.65)] backdrop-blur-xl">
           <div className="flex items-center gap-2 border-b border-white/8 px-4 py-3">
             <div>
               <h3 className="text-[12px] font-medium tracking-[0.16em] text-[#e8e6df]">项目资产</h3>
@@ -2755,13 +2912,7 @@ function CanvasFlow() {
                       title="拖拽到画布创建节点"
                     >
                       <div className="flex h-24 items-center justify-center overflow-hidden bg-black/35">
-                        {asset.kind === 'image' ? (
-                          <img src={preview} alt={asset.name} draggable={false} loading="lazy" className="h-full w-full object-contain" />
-                        ) : asset.kind === 'video' ? (
-                          <video src={preview} muted preload="metadata" draggable={false} className="h-full w-full object-contain" />
-                        ) : (
-                          <div className="flex h-12 w-12 items-center justify-center rounded-full border border-[#d4af37]/20 bg-[#d4af37]/[0.08] text-xl text-[#e8c766]">♪</div>
-                        )}
+                        <ProjectAssetPreview url={`${preview}?v=${asset.modifiedAt}`} kind={asset.kind} name={asset.name} />
                       </div>
                       <div className="p-2.5">
                         <p className="truncate text-[10px] text-white/70">{asset.name}</p>
@@ -2797,14 +2948,25 @@ function CanvasFlow() {
         </div>
       )}
       <div className="pointer-events-none absolute inset-x-0 bottom-5 flex justify-center">{toolbar}</div>
+      {!loaded && <div className="absolute inset-0 z-40 flex items-center justify-center bg-[#0a0a0f]/95 p-8">
+        <div role={loadError ? 'alert' : 'status'} className="max-w-lg space-y-4 text-center text-sm text-white/70">
+          <p>{loadError ? `画布加载失败：${loadError}` : '正在读取画布…'}</p>
+          {loadError && <><p className="text-xs">原文件已保留，修复文件或恢复备份后可重新加载。</p><button onClick={() => setLoadAttempt((value) => value + 1)} className="rounded-lg border border-[#d4af37]/50 px-4 py-2 text-[#e8c766]">重新加载</button></>}
+        </div>
+      </div>}
     </div>
+    </RecoverTasksContext.Provider>
+    </PersistNodeContext.Provider>
   )
 }
 
 export function CanvasArea() {
+  const [references] = useState(() => new CanvasReferenceIndex<StoryNode>())
   return (
+    <ReferenceIndexContext.Provider value={references}>
     <ReactFlowProvider>
       <CanvasFlow />
     </ReactFlowProvider>
+    </ReferenceIndexContext.Provider>
   )
 }

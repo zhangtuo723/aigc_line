@@ -1,3 +1,5 @@
+import { readBoundedMedia, downloadMediaToFile } from './media-io'
+import { runGenerationTask, retryGenerationRead, TerminalGenerationError } from './generation-task.service'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { GenerateVideoRequest, GenerateVideoResult } from '../../../src/shared/ipc.types'
@@ -95,7 +97,7 @@ async function readProjectReference(
   if (!mediaType || mediaType.kind !== expectedKind) {
     throw new Error(`Seedance 不支持该${REFERENCE_LIMITS[expectedKind].label}参考素材格式`)
   }
-  const bytes = await fs.readFile(filePath)
+  const bytes = await readBoundedMedia(filePath, REFERENCE_LIMITS[expectedKind].bytes, 'Seedance 参考素材')
   if (bytes.byteLength > REFERENCE_LIMITS[expectedKind].bytes) {
     throw new Error(`Seedance 单个${REFERENCE_LIMITS[expectedKind].label}参考素材不能超过 ${REFERENCE_LIMITS[expectedKind].bytes / 1024 / 1024} MB`)
   }
@@ -143,6 +145,7 @@ async function fetchSeedanceJson(url: string, apiKey: string, init?: RequestInit
   }
   if (!response.ok) {
     const detail = payload.error?.message || responseText.slice(0, 500)
+    if ([400, 404, 410, 422].includes(response.status)) throw new TerminalGenerationError(`Seedance API 请求失败（HTTP ${response.status}）：${detail}`)
     throw new Error(`Seedance API 请求失败（HTTP ${response.status}）：${detail}`)
   }
   return payload
@@ -151,13 +154,13 @@ async function fetchSeedanceJson(url: string, apiKey: string, init?: RequestInit
 async function waitForSeedanceTask(baseUrl: string, apiKey: string, taskId: string): Promise<string> {
   const deadline = Date.now() + GENERATION_TIMEOUT_MS
   while (Date.now() < deadline) {
-    const task = await fetchSeedanceJson(`${baseUrl}/contents/generations/tasks/${encodeURIComponent(taskId)}`, apiKey)
+    const task = await retryGenerationRead(() => fetchSeedanceJson(`${baseUrl}/contents/generations/tasks/${encodeURIComponent(taskId)}`, apiKey))
     if (task.status === 'succeeded') {
-      if (!task.content?.video_url) throw new Error('Seedance 任务成功但未返回视频地址')
+      if (!task.content?.video_url) throw new TerminalGenerationError('Seedance 任务成功但未返回视频地址')
       return task.content.video_url
     }
     if (task.status === 'failed' || task.status === 'cancelled' || task.status === 'expired') {
-      throw new Error(`Seedance 视频生成失败：${task.error?.message || task.status}`)
+      throw new TerminalGenerationError(`Seedance 视频生成失败：${task.error?.message || task.status}`)
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS))
   }
@@ -173,33 +176,40 @@ export async function generateVideoWithSeedance(request: GenerateVideoRequest): 
 
   const settings = await getRuntimeSettings()
   if (!settings.seedreamApiKey) throw new Error('请先在设置页配置方舟 Agent Plan API Key')
-  const references = await buildReferenceContent(project.folderPath, request)
-  const body = buildSeedanceVideoRequest(request, selected.model, references)
-  const submitted = await fetchSeedanceJson(
-    `${settings.seedreamBaseUrl}/contents/generations/tasks`,
-    settings.seedreamApiKey,
-    {
-      method: 'POST',
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(2 * 60_000),
+  return runGenerationTask({ project, provider: 'seedance', operation: 'video', request }, {
+    submit: async (markSubmitting) => {
+      const references = await buildReferenceContent(project.folderPath, request)
+      const body = buildSeedanceVideoRequest(request, selected.model, references)
+      markSubmitting()
+      const submitted = await fetchSeedanceJson(
+        `${settings.seedreamBaseUrl}/contents/generations/tasks`,
+        settings.seedreamApiKey,
+        {
+          method: 'POST',
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(2 * 60_000),
+        },
+      )
+      if (!submitted.id) throw new Error('Seedance 未返回视频生成任务 ID')
+      return submitted.id
     },
-  )
-  if (!submitted.id) throw new Error('Seedance 未返回视频生成任务 ID')
+    complete: async (taskId) => {
 
-  const videoUrl = await waitForSeedanceTask(settings.seedreamBaseUrl, settings.seedreamApiKey, submitted.id)
-  const download = await fetch(videoUrl, { signal: AbortSignal.timeout(2 * 60_000) })
-  if (!download.ok) throw new Error(`Seedance 生成结果下载失败（HTTP ${download.status}）`)
-  const bytes = Buffer.from(await download.arrayBuffer())
-  if (!bytes.length) throw new Error('Seedance 生成结果为空')
+      const videoUrl = await waitForSeedanceTask(settings.seedreamBaseUrl, settings.seedreamApiKey, taskId)
 
-  const safeNodeId = request.nodeId.replace(/[^a-zA-Z0-9_-]/g, '-').slice(-48)
-  const outputDir = path.join(project.folderPath, 'generated', 'videos')
-  await fs.mkdir(outputDir, { recursive: true })
-  const outputPath = path.join(outputDir, `${safeNodeId}-seedance-${Date.now()}.mp4`)
-  await fs.writeFile(outputPath, bytes)
-  return {
-    success: true,
-    relativePath: path.relative(project.folderPath, outputPath).split(path.sep).join('/'),
-    promptId: submitted.id,
-  }
+      const safeNodeId = request.nodeId.replace(/[^a-zA-Z0-9_-]/g, '-').slice(-48)
+      const outputDir = path.join(project.folderPath, 'generated', 'videos')
+      await fs.mkdir(outputDir, { recursive: true })
+      const outputPath = path.join(outputDir, `${safeNodeId}-seedance-${Date.now()}.mp4`)
+      await retryGenerationRead(async () => {
+        const download = await fetch(videoUrl, { signal: AbortSignal.timeout(5 * 60_000) })
+        await downloadMediaToFile(download, outputPath, 2 * 1024 * 1024 * 1024)
+      })
+      return {
+        success: true,
+        relativePath: path.relative(project.folderPath, outputPath).split(path.sep).join('/'),
+        promptId: taskId,
+      }
+    },
+  })
 }

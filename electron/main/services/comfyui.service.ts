@@ -1,5 +1,9 @@
 import { normalizeVideoDuration } from '../../../src/shared/video-duration'
 import fs from 'node:fs/promises'
+import { openAsBlob } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { runGenerationTask, retryGenerationRead, TerminalGenerationError } from './generation-task.service'
+import { assertMediaFileSize, downloadMediaToFile } from './media-io'
 import path from 'node:path'
 import { app } from 'electron'
 import type {
@@ -140,7 +144,7 @@ export const listComfyWorkflows = async (): Promise<ComfyWorkflowInfo[]> => {
 }
 
 const REQUEST_TIMEOUT_MS = 20_000
-const GENERATION_TIMEOUT_MS = 5 * 60_000
+
 
 const normalizeBaseUrl = (value: string): string => value.trim().replace(/\/+$/, '')
 
@@ -179,6 +183,9 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   }
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 600)
+    if (init?.method === 'POST' && response.status >= 400 && response.status < 500 && ![408, 429].includes(response.status)) {
+      throw new TerminalGenerationError(`ComfyUI 拒绝提交 (${response.status})${detail ? `：${detail}` : ''}`)
+    }
     throw new Error(`ComfyUI 请求失败 (${response.status})${detail ? `：${detail}` : ''}`)
   }
   return response.json() as Promise<T>
@@ -362,36 +369,55 @@ function buildFluxWorkflow(
   }
 }
 
+function missingComfyPromptGuard(baseUrl: string, promptId: string): () => Promise<void> {
+  const started = Date.now()
+  let misses = 0
+  return async () => {
+    if (Date.now() - started < 10_000) return
+    const queue = await retryGenerationRead(() => fetchJson<{ queue_running?: unknown[][]; queue_pending?: unknown[][] }>(baseUrl + '/queue'))
+    if (!Array.isArray(queue.queue_running) || !Array.isArray(queue.queue_pending)) throw new Error('ComfyUI 队列响应无效，稍后恢复查询')
+    const present = [...queue.queue_running, ...queue.queue_pending].some(item => item[1] === promptId)
+    misses = present ? 0 : misses + 1
+    if (misses >= 3) {
+      // Queue/history are separate reads; recheck history before declaring a task lost.
+      const history = await retryGenerationRead(() => fetchJson<Record<string, unknown>>(baseUrl + '/history/' + encodeURIComponent(promptId)))
+      if (!history[promptId]) throw new TerminalGenerationError('ComfyUI 任务已从队列和历史中移除，可能已取消或服务已重启')
+    }
+  }
+}
+
 async function waitForImage(baseUrl: string, promptId: string): Promise<ComfyImageOutput> {
-  const startedAt = Date.now()
-  while (Date.now() - startedAt < GENERATION_TIMEOUT_MS) {
-    const history = await fetchJson<Record<string, {
+  const checkMissing = missingComfyPromptGuard(baseUrl, promptId)
+  while (true) {
+    const history = await retryGenerationRead(() => fetchJson<Record<string, {
       status?: { status_str?: string; completed?: boolean; messages?: unknown[] }
       outputs?: Record<string, { images?: ComfyImageOutput[] }>
-    }>>(`${baseUrl}/history/${encodeURIComponent(promptId)}`)
+    }>>(`${baseUrl}/history/${encodeURIComponent(promptId)}`))
     const record = history[promptId]
+    if (!record) await checkMissing()
     if (record) {
       for (const output of Object.values(record.outputs ?? {})) {
         const image = output.images?.[0]
         if (image) return image
       }
       if (record.status?.status_str === 'error') {
-        throw new Error(`ComfyUI 生成失败：${JSON.stringify(record.status.messages ?? []).slice(0, 800)}`)
+        throw new TerminalGenerationError(`ComfyUI 生成失败：${JSON.stringify(record.status.messages ?? []).slice(0, 800)}`)
       }
       if (record.status?.completed) {
-        throw new Error('ComfyUI 工作流已完成，但没有返回图片输出')
+        throw new TerminalGenerationError('ComfyUI 工作流已完成，但没有返回图片输出')
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 800))
   }
-  throw new Error('ComfyUI 生成超时（5 分钟）')
+
 }
 
 async function downloadComfyMedia(
   baseUrl: string,
   media: ComfyImageOutput,
   label: '图片' | '视频' | '音频',
-): Promise<Uint8Array> {
+  outputPath: string,
+): Promise<void> {
   const params = new URLSearchParams({
     filename: media.filename,
     subfolder: media.subfolder ?? '',
@@ -406,7 +432,7 @@ async function downloadComfyMedia(
     throw new Error(`下载 ComfyUI ${label}失败：${error instanceof Error ? error.message : String(error)}`)
   }
   if (!response.ok) throw new Error(`下载 ComfyUI ${label}失败 (${response.status})`)
-  return new Uint8Array(await response.arrayBuffer())
+  return downloadMediaToFile(response, outputPath, label === '图片' ? 100 * 1024 * 1024 : 2 * 1024 * 1024 * 1024)
 }
 
 function findVideoOutput(value: unknown): ComfyMediaOutput | null {
@@ -452,38 +478,42 @@ function findAudioOutput(value: unknown): ComfyMediaOutput | null {
 async function waitForVideo(baseUrl: string, promptId: string): Promise<ComfyMediaOutput> {
   // No overall timeout: ComfyUI queues prompts, so queue wait time is
   // unpredictable. Poll until the record resolves or reports an error.
+  const checkMissing = missingComfyPromptGuard(baseUrl, promptId)
   while (true) {
-    const history = await fetchJson<Record<string, {
+    const history = await retryGenerationRead(() => fetchJson<Record<string, {
       status?: { status_str?: string; completed?: boolean; messages?: unknown[] }
       outputs?: Record<string, unknown>
-    }>>(`${baseUrl}/history/${encodeURIComponent(promptId)}`)
+    }>>(`${baseUrl}/history/${encodeURIComponent(promptId)}`))
     const record = history[promptId]
+    if (!record) await checkMissing()
     if (record) {
       const video = findVideoOutput(record.outputs)
       if (video) return video
       if (record.status?.status_str === 'error') {
-        throw new Error(`ComfyUI 视频生成失败：${JSON.stringify(record.status.messages ?? []).slice(0, 1200)}`)
+        throw new TerminalGenerationError(`ComfyUI 视频生成失败：${JSON.stringify(record.status.messages ?? []).slice(0, 1200)}`)
       }
-      if (record.status?.completed) throw new Error('ComfyUI 工作流已完成，但没有返回视频输出')
+      if (record.status?.completed) throw new TerminalGenerationError('ComfyUI 工作流已完成，但没有返回视频输出')
     }
     await new Promise((resolve) => setTimeout(resolve, 1_500))
   }
 }
 
 async function waitForAudio(baseUrl: string, promptId: string): Promise<ComfyMediaOutput> {
+  const checkMissing = missingComfyPromptGuard(baseUrl, promptId)
   while (true) {
-    const history = await fetchJson<Record<string, {
+    const history = await retryGenerationRead(() => fetchJson<Record<string, {
       status?: { status_str?: string; completed?: boolean; messages?: unknown[] }
       outputs?: Record<string, unknown>
-    }>>(`${baseUrl}/history/${encodeURIComponent(promptId)}`)
+    }>>(`${baseUrl}/history/${encodeURIComponent(promptId)}`))
     const record = history[promptId]
+    if (!record) await checkMissing()
     if (record) {
       const audio = findAudioOutput(record.outputs)
       if (audio) return audio
       if (record.status?.status_str === 'error') {
-        throw new Error(`ComfyUI 提取音频失败：${JSON.stringify(record.status.messages ?? []).slice(0, 1200)}`)
+        throw new TerminalGenerationError(`ComfyUI 提取音频失败：${JSON.stringify(record.status.messages ?? []).slice(0, 1200)}`)
       }
-      if (record.status?.completed) throw new Error('ComfyUI 工作流已完成，但没有返回音频；源视频可能不含音轨')
+      if (record.status?.completed) throw new TerminalGenerationError('ComfyUI 工作流已完成，但没有返回音频；源视频可能不含音轨')
     }
     await new Promise((resolve) => setTimeout(resolve, 800))
   }
@@ -494,15 +524,16 @@ async function uploadReferenceMedia(
   projectRoot: string,
   relativePath: string,
 ): Promise<string> {
-  const root = path.resolve(projectRoot)
-  const absolutePath = path.resolve(root, relativePath)
+  const root = await fs.realpath(path.resolve(projectRoot))
+  const absolutePath = await fs.realpath(path.resolve(root, relativePath))
   if (absolutePath !== root && !absolutePath.startsWith(root + path.sep)) {
     throw new Error('参考媒体路径超出项目目录')
   }
-  const bytes = await fs.readFile(absolutePath)
+  await assertMediaFileSize(absolutePath, 2 * 1024 * 1024 * 1024, 'ComfyUI 参考素材')
+  const blob = await openAsBlob(absolutePath)
   const form = new FormData()
-  form.append('image', new Blob([bytes]), path.basename(absolutePath))
-  form.append('overwrite', 'true')
+  form.append('image', blob, `${randomUUID()}-${path.basename(absolutePath)}`)
+  form.append('overwrite', 'false')
   let response: Response
   try {
     response = await fetch(`${baseUrl}/upload/image`, {
@@ -562,37 +593,45 @@ export async function generateImageWithComfyUI(
   const settings = await getRuntimeSettings()
   const baseUrl = normalizeBaseUrl(settings.comfyuiBaseUrl || project.comfyuiBaseUrl || 'http://127.0.0.1:8188')
   const safeNodeId = request.nodeId.replace(/[^a-zA-Z0-9_-]/g, '-').slice(-48)
-  const filenamePrefix = `aigc-canvas/${safeNodeId}`
-  const template = WORKFLOW_TEMPLATES.find((item) => item.id === (request.workflowId || settings.defaultImageWorkflowId))
-    ?? WORKFLOW_TEMPLATES[0]
-  const workflow = template
-    ? await buildTemplateWorkflow(template, request, baseUrl, project.folderPath, filenamePrefix)
-    : (() => { throw new Error('没有可用的 ComfyUI 工作流模板') })()
+  return runGenerationTask({ project, provider: 'comfyui', operation: 'image', request }, {
+    submit: async (markSubmitting) => {
+      const filenamePrefix = `aigc-canvas/${safeNodeId}`
+      const template = WORKFLOW_TEMPLATES.find((item) => item.id === (request.workflowId || settings.defaultImageWorkflowId))
+        ?? WORKFLOW_TEMPLATES[0]
+      const workflow = template
+        ? await buildTemplateWorkflow(template, request, baseUrl, project.folderPath, filenamePrefix)
+        : (() => { throw new Error('没有可用的 ComfyUI 工作流模板') })()
 
-  const queued = await fetchJson<{ prompt_id?: string; error?: unknown }>(`${baseUrl}/prompt`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: workflow, client_id: `aigc-canvas-${Date.now()}` }),
+      markSubmitting()
+      const queued = await fetchJson<{ prompt_id?: string; error?: unknown }>(`${baseUrl}/prompt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: workflow, client_id: `aigc-canvas-${Date.now()}` }),
+      })
+      if (!queued.prompt_id) {
+        throw new TerminalGenerationError(`ComfyUI 未接受工作流：${JSON.stringify(queued.error ?? queued).slice(0, 800)}`)
+      }
+
+      return queued.prompt_id
+    },
+    complete: async (taskId) => {
+      const queued = { prompt_id: taskId }
+      const imageOutput = await waitForImage(baseUrl, queued.prompt_id)
+      const outputDir = path.join(project.folderPath, 'generated', 'images')
+      await fs.mkdir(outputDir, { recursive: true })
+      const sourceExt = path.extname(imageOutput.filename).toLowerCase()
+      const extension = ['.png', '.jpg', '.jpeg', '.webp'].includes(sourceExt) ? sourceExt : '.png'
+      const outputName = `${safeNodeId}-${Date.now()}${extension}`
+      const outputPath = path.join(outputDir, outputName)
+      await retryGenerationRead(() => downloadComfyMedia(baseUrl, imageOutput, '图片', outputPath))
+
+      return {
+        success: true,
+        relativePath: path.relative(project.folderPath, outputPath).split(path.sep).join('/'),
+        promptId: queued.prompt_id,
+      }
+    },
   })
-  if (!queued.prompt_id) {
-    throw new Error(`ComfyUI 未接受工作流：${JSON.stringify(queued.error ?? queued).slice(0, 800)}`)
-  }
-
-  const imageOutput = await waitForImage(baseUrl, queued.prompt_id)
-  const bytes = await downloadComfyMedia(baseUrl, imageOutput, '图片')
-  const outputDir = path.join(project.folderPath, 'generated', 'images')
-  await fs.mkdir(outputDir, { recursive: true })
-  const sourceExt = path.extname(imageOutput.filename).toLowerCase()
-  const extension = ['.png', '.jpg', '.jpeg', '.webp'].includes(sourceExt) ? sourceExt : '.png'
-  const outputName = `${safeNodeId}-${Date.now()}${extension}`
-  const outputPath = path.join(outputDir, outputName)
-  await fs.writeFile(outputPath, bytes)
-
-  return {
-    success: true,
-    relativePath: path.relative(project.folderPath, outputPath).split(path.sep).join('/'),
-    promptId: queued.prompt_id,
-  }
 }
 
 const UPSCALE_SCALES = [2, 3, 4] as const
@@ -607,49 +646,58 @@ export async function upscaleVideoWithComfyUI(
 
   const settings = await getRuntimeSettings()
   const baseUrl = normalizeBaseUrl(settings.comfyuiBaseUrl || project.comfyuiBaseUrl || 'http://127.0.0.1:8188')
-  const workflow = await loadWorkflowFile('video-upscale.json', 'RTX 视频放大')
-  const uploadedName = await uploadReferenceMedia(baseUrl, project.folderPath, request.sourceVideoPath)
-
-  const scale = (UPSCALE_SCALES as readonly number[]).includes(Number(request.scale))
-    ? Number(request.scale)
-    : 2
-  const quality = (UPSCALE_QUALITIES as readonly string[]).includes(String(request.quality))
-    ? String(request.quality)
-    : 'ULTRA'
-  const setInput = (nodeId: string, field: string, value: unknown) => {
-    const node = workflow[nodeId]
-    if (!node) throw new Error(`视频放大工作流缺少节点 ${nodeId}`)
-    node.inputs[field] = value
-  }
-  setInput('2', 'video', uploadedName)
-  setInput('3', 'resize_type.scale', scale)
-  setInput('3', 'quality', quality)
   const safeNodeId = request.nodeId.replace(/[^a-zA-Z0-9_-]/g, '-').slice(-48)
-  setInput('1', 'filename_prefix', `aigc-canvas/upscale/${safeNodeId}`)
+  return runGenerationTask({ project, provider: 'comfyui', operation: 'upscale', request }, {
+    submit: async (markSubmitting) => {
+      const workflow = await loadWorkflowFile('video-upscale.json', 'RTX 视频放大')
+      const uploadedName = await uploadReferenceMedia(baseUrl, project.folderPath, request.sourceVideoPath)
 
-  const queued = await fetchJson<{ prompt_id?: string; error?: unknown }>(`${baseUrl}/prompt`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: workflow, client_id: `aigc-canvas-upscale-${Date.now()}` }),
+      const scale = (UPSCALE_SCALES as readonly number[]).includes(Number(request.scale))
+        ? Number(request.scale)
+        : 2
+      const quality = (UPSCALE_QUALITIES as readonly string[]).includes(String(request.quality))
+        ? String(request.quality)
+        : 'ULTRA'
+      const setInput = (nodeId: string, field: string, value: unknown) => {
+        const node = workflow[nodeId]
+        if (!node) throw new Error(`视频放大工作流缺少节点 ${nodeId}`)
+        node.inputs[field] = value
+      }
+      setInput('2', 'video', uploadedName)
+      setInput('3', 'resize_type.scale', scale)
+      setInput('3', 'quality', quality)
+      setInput('1', 'filename_prefix', `aigc-canvas/upscale/${safeNodeId}`)
+
+      markSubmitting()
+      const queued = await fetchJson<{ prompt_id?: string; error?: unknown }>(`${baseUrl}/prompt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: workflow, client_id: `aigc-canvas-upscale-${Date.now()}` }),
+      })
+      if (!queued.prompt_id) {
+        throw new TerminalGenerationError(`ComfyUI 未接受视频放大工作流：${JSON.stringify(queued.error ?? queued).slice(0, 1000)}`)
+      }
+
+      return queued.prompt_id
+    },
+    complete: async (taskId) => {
+      const queued = { prompt_id: taskId }
+      const output = await waitForVideo(baseUrl, queued.prompt_id)
+      const outputDir = path.join(project.folderPath, 'generated', 'videos')
+      await fs.mkdir(outputDir, { recursive: true })
+      const sourceExt = path.extname(output.filename).toLowerCase()
+      const extension = ['.mp4', '.webm', '.mov', '.mkv'].includes(sourceExt) ? sourceExt : '.mp4'
+      const outputPath = path.join(outputDir, `${safeNodeId}-upscale-${Date.now()}${extension}`)
+      await retryGenerationRead(() => downloadComfyMedia(baseUrl, output, '视频', outputPath))
+      return {
+        success: true,
+        relativePath: path.relative(project.folderPath, outputPath).split(path.sep).join('/'),
+        promptId: queued.prompt_id,
+      }
+    },
   })
-  if (!queued.prompt_id) {
-    throw new Error(`ComfyUI 未接受视频放大工作流：${JSON.stringify(queued.error ?? queued).slice(0, 1000)}`)
-  }
-
-  const output = await waitForVideo(baseUrl, queued.prompt_id)
-  const bytes = await downloadComfyMedia(baseUrl, output, '视频')
-  const outputDir = path.join(project.folderPath, 'generated', 'videos')
-  await fs.mkdir(outputDir, { recursive: true })
-  const sourceExt = path.extname(output.filename).toLowerCase()
-  const extension = ['.mp4', '.webm', '.mov', '.mkv'].includes(sourceExt) ? sourceExt : '.mp4'
-  const outputPath = path.join(outputDir, `${safeNodeId}-upscale-${Date.now()}${extension}`)
-  await fs.writeFile(outputPath, bytes)
-  return {
-    success: true,
-    relativePath: path.relative(project.folderPath, outputPath).split(path.sep).join('/'),
-    promptId: queued.prompt_id,
-  }
 }
+
 export async function generateVideoWithComfyUI(
   request: GenerateVideoRequest,
 ): Promise<GenerateVideoResult> {
@@ -659,102 +707,110 @@ export async function generateVideoWithComfyUI(
 
   const settings = await getRuntimeSettings()
   const baseUrl = normalizeBaseUrl(settings.comfyuiBaseUrl || project.comfyuiBaseUrl || 'http://127.0.0.1:8188')
-  const template = VIDEO_WORKFLOWS.find((item) => item.id === request.workflowId) ?? VIDEO_WORKFLOWS[0]
-  const workflow = await loadWorkflowFile(template.file, template.name)
-  const duration = normalizeVideoDuration(request.duration)
-  const dimensions = videoDimensionsFor(request.aspectRatio)
-  const setInput = (nodeId: string, field: string, value: unknown) => {
-    const node = workflow[nodeId]
-    if (!node) throw new Error(`${template.name} 工作流缺少节点 ${nodeId}`)
-    node.inputs[field] = value
-  }
-
-  const imagePaths = (request.referenceImagePaths ?? []).filter(Boolean)
-  const videoPaths = (request.referenceVideoPaths ?? []).filter(Boolean)
-  const audioPaths = (request.referenceAudioPaths ?? []).filter(Boolean)
-
-  if (template.mode === 'first-last') {
-    setInput('105:104', 'prompt', request.prompt.trim())
-    setInput('105:104', 'width', dimensions.width)
-    setInput('105:104', 'height', dimensions.height)
-    setInput('105:111', 'value', duration)
-    setInput('105:15', 'noise_seed', Math.floor(Math.random() * 1_000_000_000_000_000))
-
-    const frameInputs = [
-      ['first_frame', request.referenceImagePath],
-      ['last_frame', request.lastFrameImagePath],
-    ] as const
-    for (const [index, [field, relativePath]] of frameInputs.entries()) {
-      if (!relativePath) continue
-      const nodeId = String(900001 + index)
-      const uploadedName = await uploadReferenceMedia(baseUrl, project.folderPath, relativePath)
-      workflow[nodeId] = { class_type: 'LoadImage', inputs: { image: uploadedName } }
-      setInput('105:104', field, [nodeId, 0])
-    }
-  } else {
-    if (imagePaths.length > 9) throw new Error('MiniMax H3 全模态参考最多连接 9 张图片')
-    if (videoPaths.length > 3) throw new Error('MiniMax H3 全模态参考最多连接 3 个视频')
-    if (audioPaths.length > 3) throw new Error('MiniMax H3 全模态参考最多连接 3 段独立音频')
-    if (imagePaths.length + videoPaths.length + audioPaths.length === 0) {
-      throw new Error('全模态参考工作流至少需要连接一个图片、视频或音频节点')
-    }
-    setInput('138', 'value', request.prompt.trim())
-    setInput('136', 'width', dimensions.width)
-    setInput('136', 'height', dimensions.height)
-    setInput('136', 'ref_image_size', 'match')
-    setInput('132', 'value', duration)
-    setInput('129', 'noise_seed', Math.floor(Math.random() * 1_000_000_000_000_000))
-
-    for (const [index, relativePath] of imagePaths.entries()) {
-      const nodeId = String(910001 + index)
-      const uploadedName = await uploadReferenceMedia(baseUrl, project.folderPath, relativePath)
-      workflow[nodeId] = { class_type: 'LoadImage', inputs: { image: uploadedName } }
-      setInput('136', `ref_images.ref_image_${index}`, [nodeId, 0])
-    }
-    for (const [index, relativePath] of videoPaths.entries()) {
-      const loadNodeId = String(920001 + index * 2)
-      const componentsNodeId = String(920002 + index * 2)
-      const uploadedName = await uploadReferenceMedia(baseUrl, project.folderPath, relativePath)
-      workflow[loadNodeId] = { class_type: 'LoadVideo', inputs: { file: uploadedName } }
-      workflow[componentsNodeId] = { class_type: 'GetVideoComponents', inputs: { video: [loadNodeId, 0] } }
-      setInput('136', `ref_videos.ref_video_${index}`, [componentsNodeId, 0])
-      setInput('136', `ref_video_audios.ref_video_audio_${index}`, [componentsNodeId, 1])
-    }
-    for (const [index, relativePath] of audioPaths.entries()) {
-      const nodeId = String(930001 + index)
-      const uploadedName = await uploadReferenceMedia(baseUrl, project.folderPath, relativePath)
-      workflow[nodeId] = { class_type: 'LoadAudio', inputs: { audio: uploadedName } }
-      setInput('136', `ref_audios.ref_audio_${index}`, [nodeId, 0])
-    }
-  }
-
   const safeNodeId = request.nodeId.replace(/[^a-zA-Z0-9_-]/g, '-').slice(-48)
-  setInput('92', 'filename_prefix', `aigc-canvas/video/${safeNodeId}`)
-  setInput('92', 'format', 'mp4')
-  setInput('92', 'codec', 'h264')
+  return runGenerationTask({ project, provider: 'comfyui', operation: 'video', request }, {
+    submit: async (markSubmitting) => {
+      const template = VIDEO_WORKFLOWS.find((item) => item.id === request.workflowId) ?? VIDEO_WORKFLOWS[0]
+      const workflow = await loadWorkflowFile(template.file, template.name)
+      const duration = normalizeVideoDuration(request.duration)
+      const dimensions = videoDimensionsFor(request.aspectRatio)
+      const setInput = (nodeId: string, field: string, value: unknown) => {
+        const node = workflow[nodeId]
+        if (!node) throw new Error(`${template.name} 工作流缺少节点 ${nodeId}`)
+        node.inputs[field] = value
+      }
 
-  const queued = await fetchJson<{ prompt_id?: string; error?: unknown }>(`${baseUrl}/prompt`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: workflow, client_id: `aigc-canvas-video-${Date.now()}` }),
+      const imagePaths = (request.referenceImagePaths ?? []).filter(Boolean)
+      const videoPaths = (request.referenceVideoPaths ?? []).filter(Boolean)
+      const audioPaths = (request.referenceAudioPaths ?? []).filter(Boolean)
+
+      if (template.mode === 'first-last') {
+        setInput('105:104', 'prompt', request.prompt.trim())
+        setInput('105:104', 'width', dimensions.width)
+        setInput('105:104', 'height', dimensions.height)
+        setInput('105:111', 'value', duration)
+        setInput('105:15', 'noise_seed', Math.floor(Math.random() * 1_000_000_000_000_000))
+
+        const frameInputs = [
+          ['first_frame', request.referenceImagePath],
+          ['last_frame', request.lastFrameImagePath],
+        ] as const
+        for (const [index, [field, relativePath]] of frameInputs.entries()) {
+          if (!relativePath) continue
+          const nodeId = String(900001 + index)
+          const uploadedName = await uploadReferenceMedia(baseUrl, project.folderPath, relativePath)
+          workflow[nodeId] = { class_type: 'LoadImage', inputs: { image: uploadedName } }
+          setInput('105:104', field, [nodeId, 0])
+        }
+      } else {
+        if (imagePaths.length > 9) throw new Error('MiniMax H3 全模态参考最多连接 9 张图片')
+        if (videoPaths.length > 3) throw new Error('MiniMax H3 全模态参考最多连接 3 个视频')
+        if (audioPaths.length > 3) throw new Error('MiniMax H3 全模态参考最多连接 3 段独立音频')
+        if (imagePaths.length + videoPaths.length + audioPaths.length === 0) {
+          throw new Error('全模态参考工作流至少需要连接一个图片、视频或音频节点')
+        }
+        setInput('138', 'value', request.prompt.trim())
+        setInput('136', 'width', dimensions.width)
+        setInput('136', 'height', dimensions.height)
+        setInput('136', 'ref_image_size', 'match')
+        setInput('132', 'value', duration)
+        setInput('129', 'noise_seed', Math.floor(Math.random() * 1_000_000_000_000_000))
+
+        for (const [index, relativePath] of imagePaths.entries()) {
+          const nodeId = String(910001 + index)
+          const uploadedName = await uploadReferenceMedia(baseUrl, project.folderPath, relativePath)
+          workflow[nodeId] = { class_type: 'LoadImage', inputs: { image: uploadedName } }
+          setInput('136', `ref_images.ref_image_${index}`, [nodeId, 0])
+        }
+        for (const [index, relativePath] of videoPaths.entries()) {
+          const loadNodeId = String(920001 + index * 2)
+          const componentsNodeId = String(920002 + index * 2)
+          const uploadedName = await uploadReferenceMedia(baseUrl, project.folderPath, relativePath)
+          workflow[loadNodeId] = { class_type: 'LoadVideo', inputs: { file: uploadedName } }
+          workflow[componentsNodeId] = { class_type: 'GetVideoComponents', inputs: { video: [loadNodeId, 0] } }
+          setInput('136', `ref_videos.ref_video_${index}`, [componentsNodeId, 0])
+          setInput('136', `ref_video_audios.ref_video_audio_${index}`, [componentsNodeId, 1])
+        }
+        for (const [index, relativePath] of audioPaths.entries()) {
+          const nodeId = String(930001 + index)
+          const uploadedName = await uploadReferenceMedia(baseUrl, project.folderPath, relativePath)
+          workflow[nodeId] = { class_type: 'LoadAudio', inputs: { audio: uploadedName } }
+          setInput('136', `ref_audios.ref_audio_${index}`, [nodeId, 0])
+        }
+      }
+
+      setInput('92', 'filename_prefix', `aigc-canvas/video/${safeNodeId}`)
+      setInput('92', 'format', 'mp4')
+      setInput('92', 'codec', 'h264')
+
+      markSubmitting()
+      const queued = await fetchJson<{ prompt_id?: string; error?: unknown }>(`${baseUrl}/prompt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: workflow, client_id: `aigc-canvas-video-${Date.now()}` }),
+      })
+      if (!queued.prompt_id) {
+        throw new TerminalGenerationError(`ComfyUI 未接受视频工作流：${JSON.stringify(queued.error ?? queued).slice(0, 1000)}`)
+      }
+
+      return queued.prompt_id
+    },
+    complete: async (taskId) => {
+      const queued = { prompt_id: taskId }
+      const output = await waitForVideo(baseUrl, queued.prompt_id)
+      const outputDir = path.join(project.folderPath, 'generated', 'videos')
+      await fs.mkdir(outputDir, { recursive: true })
+      const sourceExt = path.extname(output.filename).toLowerCase()
+      const extension = ['.mp4', '.webm', '.mov', '.mkv'].includes(sourceExt) ? sourceExt : '.mp4'
+      const outputPath = path.join(outputDir, `${safeNodeId}-${Date.now()}${extension}`)
+      await retryGenerationRead(() => downloadComfyMedia(baseUrl, output, '视频', outputPath))
+      return {
+        success: true,
+        relativePath: path.relative(project.folderPath, outputPath).split(path.sep).join('/'),
+        promptId: queued.prompt_id,
+      }
+    },
   })
-  if (!queued.prompt_id) {
-    throw new Error(`ComfyUI 未接受视频工作流：${JSON.stringify(queued.error ?? queued).slice(0, 1000)}`)
-  }
-
-  const output = await waitForVideo(baseUrl, queued.prompt_id)
-  const bytes = await downloadComfyMedia(baseUrl, output, '视频')
-  const outputDir = path.join(project.folderPath, 'generated', 'videos')
-  await fs.mkdir(outputDir, { recursive: true })
-  const sourceExt = path.extname(output.filename).toLowerCase()
-  const extension = ['.mp4', '.webm', '.mov', '.mkv'].includes(sourceExt) ? sourceExt : '.mp4'
-  const outputPath = path.join(outputDir, `${safeNodeId}-${Date.now()}${extension}`)
-  await fs.writeFile(outputPath, bytes)
-  return {
-    success: true,
-    relativePath: path.relative(project.folderPath, outputPath).split(path.sep).join('/'),
-    promptId: queued.prompt_id,
-  }
 }
 
 export async function extractVideoAudioWithComfyUI(
@@ -766,39 +822,47 @@ export async function extractVideoAudioWithComfyUI(
 
   const settings = await getRuntimeSettings()
   const baseUrl = normalizeBaseUrl(settings.comfyuiBaseUrl || project.comfyuiBaseUrl || 'http://127.0.0.1:8188')
-  const uploadedName = await uploadReferenceMedia(baseUrl, project.folderPath, request.sourceVideoPath)
   const safeNodeId = request.nodeId.replace(/[^a-zA-Z0-9_-]/g, '-').slice(-48)
-  const workflow: ComfyWorkflow = {
-    '1': { class_type: 'LoadVideo', inputs: { file: uploadedName } },
-    '2': { class_type: 'GetVideoComponents', inputs: { video: ['1', 0] } },
-    '3': {
-      class_type: 'SaveAudio',
-      inputs: {
-        audio: ['2', 1],
-        filename_prefix: `aigc-canvas/extracted-audio/${safeNodeId}`,
-      },
-    },
-  }
-  const queued = await fetchJson<{ prompt_id?: string; error?: unknown }>(`${baseUrl}/prompt`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: workflow, client_id: `aigc-canvas-extract-audio-${Date.now()}` }),
-  })
-  if (!queued.prompt_id) {
-    throw new Error(`ComfyUI 未接受音频提取工作流：${JSON.stringify(queued.error ?? queued).slice(0, 1000)}`)
-  }
+  return runGenerationTask({ project, provider: 'comfyui', operation: 'extract-audio', request }, {
+    submit: async (markSubmitting) => {
+      const uploadedName = await uploadReferenceMedia(baseUrl, project.folderPath, request.sourceVideoPath)
+      const workflow: ComfyWorkflow = {
+        '1': { class_type: 'LoadVideo', inputs: { file: uploadedName } },
+        '2': { class_type: 'GetVideoComponents', inputs: { video: ['1', 0] } },
+        '3': {
+          class_type: 'SaveAudio',
+          inputs: {
+            audio: ['2', 1],
+            filename_prefix: `aigc-canvas/extracted-audio/${safeNodeId}`,
+          },
+        },
+      }
+      markSubmitting()
+      const queued = await fetchJson<{ prompt_id?: string; error?: unknown }>(`${baseUrl}/prompt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: workflow, client_id: `aigc-canvas-extract-audio-${Date.now()}` }),
+      })
+      if (!queued.prompt_id) {
+        throw new TerminalGenerationError(`ComfyUI 未接受音频提取工作流：${JSON.stringify(queued.error ?? queued).slice(0, 1000)}`)
+      }
 
-  const output = await waitForAudio(baseUrl, queued.prompt_id)
-  const bytes = await downloadComfyMedia(baseUrl, output, '音频')
-  const outputDir = path.join(project.folderPath, 'generated', 'audio')
-  await fs.mkdir(outputDir, { recursive: true })
-  const sourceExt = path.extname(output.filename).toLowerCase()
-  const extension = ['.flac', '.mp3', '.opus', '.wav', '.ogg', '.m4a', '.aac'].includes(sourceExt) ? sourceExt : '.flac'
-  const outputPath = path.join(outputDir, `${safeNodeId}-audio-${Date.now()}${extension}`)
-  await fs.writeFile(outputPath, bytes)
-  return {
-    success: true,
-    relativePath: path.relative(project.folderPath, outputPath).split(path.sep).join('/'),
-    promptId: queued.prompt_id,
-  }
+      return queued.prompt_id
+    },
+    complete: async (taskId) => {
+      const queued = { prompt_id: taskId }
+      const output = await waitForAudio(baseUrl, queued.prompt_id)
+      const outputDir = path.join(project.folderPath, 'generated', 'audio')
+      await fs.mkdir(outputDir, { recursive: true })
+      const sourceExt = path.extname(output.filename).toLowerCase()
+      const extension = ['.flac', '.mp3', '.opus', '.wav', '.ogg', '.m4a', '.aac'].includes(sourceExt) ? sourceExt : '.flac'
+      const outputPath = path.join(outputDir, `${safeNodeId}-audio-${Date.now()}${extension}`)
+      await retryGenerationRead(() => downloadComfyMedia(baseUrl, output, '音频', outputPath))
+      return {
+        success: true,
+        relativePath: path.relative(project.folderPath, outputPath).split(path.sep).join('/'),
+        promptId: queued.prompt_id,
+      }
+    },
+  })
 }

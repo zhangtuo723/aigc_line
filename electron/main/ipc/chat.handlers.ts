@@ -1,15 +1,15 @@
 import { ipcMain, nativeImage } from 'electron';
 import { listAgentModels } from '../services/agent/models';
-import { getCodexQueue, sendCodexQueuedNow, isCodexMessagePending } from '../services/agent/codex-session';
+import { getCodexQueue, sendCodexQueuedNow, isCodexMessagePending, getActiveCodexToolIds } from '../services/agent/codex-session';
+import { getActiveClaudeToolIds } from '../services/agent/session-manager';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { IPC_CHANNELS } from '../../../src/shared/ipc.channels';
 import type { ChatMessage } from '../../../src/shared/ipc.types';
-import { normalizeInterruptedToolCalls } from '../../../src/shared/tool-call-status';
+import { normalizeInactiveChatTools } from '../../../src/shared/chat-history-tools';
 import { clearAgentContext, enqueueAgentMessage, interruptAgentTurn, listAvailableSkills } from '../services/agent';
 import { stageChatAttachments } from '../services/chat-attachment.service';
-import { messageHub } from '../services/message-hub';
 import { loadProject, readChatHistory, updateChatMessage } from '../services/project.store';
 import log from 'electron-log/main';
 
@@ -20,6 +20,7 @@ const PASTED_IMAGE_EXTENSIONS: Record<string, string> = {
   'image/gif': 'gif',
 };
 const MAX_PASTED_IMAGE_BYTES = 20 * 1024 * 1024;
+const activeToolIds = (folderPath: string) => new Set([...getActiveClaudeToolIds(folderPath), ...getActiveCodexToolIds(folderPath)]);
 
 export function registerChatHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.chat.listModels, (_event, provider) => listAgentModels(provider));
@@ -100,15 +101,20 @@ export function registerChatHandlers(): void {
     async (_event, folderPath: string) => {
       try {
         const persistedHistory = await readChatHistory(folderPath);
+        const persistedById = new Map(persistedHistory.map((message) => [message.id, message]));
         for (const message of persistedHistory) {
           if (message.deliveryStatus === 'queued' && !isCodexMessagePending(folderPath, message.id)) {
-            message.deliveryStatus = 'cancelled';
-            await updateChatMessage(folderPath, message.id, () => message);
+            await updateChatMessage(folderPath, message.id, (current) => {
+              const next = current.deliveryStatus === 'queued' && !isCodexMessagePending(folderPath, current.id)
+                ? { ...current, deliveryStatus: 'cancelled' as const } : current;
+              Object.assign(message, next);
+              return next;
+            });
           }
         }
-        // A restarted process cannot still be executing persisted tool calls.
+        // Keep actual calls from this process running when a user reopens a project.
         const { messages: history, changed: historyChanged } =
-          normalizeInterruptedToolCalls(persistedHistory);
+          normalizeInactiveChatTools(persistedHistory, activeToolIds(folderPath));
         // Artifacts with a source file may have been edited on disk (or via
         // artifact:save) since they were pushed - refresh content from the file
         for (const message of history) {
@@ -125,9 +131,13 @@ export function registerChatHandlers(): void {
         }
         if (historyChanged) {
           for (const message of history) {
-            const previous = persistedHistory.find((item) => item.id === message.id);
+            const previous = persistedById.get(message.id);
             if (previous?.toolCall?.status === 'running' && message.toolCall?.status === 'interrupted') {
-              await updateChatMessage(folderPath, message.id, () => message);
+              await updateChatMessage(folderPath, message.id, (current) => {
+                const normalized = normalizeInactiveChatTools([current], activeToolIds(folderPath)).messages[0];
+                Object.assign(message, normalized);
+                return normalized;
+              });
             }
           }
         }
@@ -146,13 +156,7 @@ export function registerChatHandlers(): void {
         // Get project info
         const project = await loadProject(projectId);
         if (!project) {
-          messageHub.pushToFrontend(projectId, {
-            id: `error-${Date.now()}`,
-            role: 'assistant',
-            content: '项目不存在，请先创建或选择一个项目。',
-            timestamp: Date.now(),
-          });
-          return;
+          throw new Error('项目不存在，请先创建或选择一个项目。');
         }
 
         // Stage uploaded files into the workspace before the agent runs
@@ -172,11 +176,8 @@ export function registerChatHandlers(): void {
         });
       } catch (err) {
         log.error('[Chat] handle message failed:', err);
-        messageHub.notifyError(
-          projectId,
-          err instanceof Error ? err.message : String(err),
-        );
-        messageHub.notifyTurnEnd(projectId);
+        // This is an enqueue failure, not the end of any already running turn.
+        // The rejected IPC displays a retryable error beside the retained draft.
         throw err;
       }
     },

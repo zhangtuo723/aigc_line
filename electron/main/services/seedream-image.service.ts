@@ -1,3 +1,5 @@
+import { runLocalGeneration, TerminalGenerationError } from './generation-task.service'
+import { readBoundedMedia, downloadMediaToFile } from './media-io'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { GenerateImageRequest, GenerateImageResult } from '../../../src/shared/ipc.types'
@@ -67,7 +69,7 @@ async function resolveReferenceImage(projectRoot: string, relativePath: string):
   return { path: filePath, mimeType }
 }
 
-export async function generateImageWithSeedream(request: GenerateImageRequest): Promise<GenerateImageResult> {
+async function generateImageWithSeedreamInternal(request: GenerateImageRequest, markSubmitting: () => void): Promise<GenerateImageResult> {
   const project = await loadProject(request.projectId)
   if (!project) throw new Error('项目不存在或已被删除')
   const selected = SEEDREAM_IMAGE_MODELS.find((item) => item.id === request.workflowId)
@@ -83,12 +85,13 @@ export async function generateImageWithSeedream(request: GenerateImageRequest): 
   const referenceImages: string[] = []
   for (const referencePath of referencePaths) {
     const reference = await resolveReferenceImage(project.folderPath, referencePath)
-    const bytes = await fs.readFile(reference.path)
+    const bytes = await readBoundedMedia(reference.path, 10 * 1024 * 1024, 'Seedream 参考图片')
     if (bytes.byteLength > 10 * 1024 * 1024) throw new Error('Seedream 参考图片不能超过 10 MB')
     referenceImages.push(`data:${reference.mimeType};base64,${bytes.toString('base64')}`)
   }
   const body = buildSeedreamImageRequest(request, selected.model, referenceImages)
 
+  markSubmitting()
   const response = await fetch(`${settings.seedreamBaseUrl}/images/generations`, {
     method: 'POST',
     headers: {
@@ -106,29 +109,33 @@ export async function generateImageWithSeedream(request: GenerateImageRequest): 
     throw new Error(`Seedream 图片生成返回了无效响应（HTTP ${response.status}）`)
   }
   if (!response.ok) {
-    throw new Error(`Seedream 图片生成失败（HTTP ${response.status}）：${payload.error?.message || responseText.slice(0, 500)}`)
+    throw new TerminalGenerationError(`Seedream 图片生成失败（HTTP ${response.status}）：${payload.error?.message || responseText.slice(0, 500)}`)
   }
 
   const result = payload.data?.[0]
-  let bytes: Buffer
-  if (result?.b64_json) {
-    bytes = Buffer.from(result.b64_json, 'base64')
-  } else if (result?.url) {
-    const download = await fetch(result.url, { signal: AbortSignal.timeout(60_000) })
-    if (!download.ok) throw new Error(`Seedream 生成结果下载失败（HTTP ${download.status}）`)
-    bytes = Buffer.from(await download.arrayBuffer())
-  } else {
-    throw new Error('Seedream 图片生成未返回图片')
-  }
-  if (!bytes.length) throw new Error('Seedream 图片生成返回了空图片')
-
   const safeNodeId = request.nodeId.replace(/[^a-zA-Z0-9_-]/g, '-').slice(-48)
   const outputDir = path.join(project.folderPath, 'generated', 'images')
   await fs.mkdir(outputDir, { recursive: true })
   const outputPath = path.join(outputDir, `${safeNodeId}-${Date.now()}.jpg`)
-  await fs.writeFile(outputPath, bytes)
+  if (result?.b64_json) {
+    if (result.b64_json.length > 140 * 1024 * 1024) throw new Error('Seedream 图片生成结果超过大小上限')
+    const bytes = Buffer.from(result.b64_json, 'base64')
+    if (!bytes.length) throw new Error('Seedream 图片生成返回了空图片')
+    await fs.writeFile(outputPath, bytes, { flag: 'wx' })
+  } else if (result?.url) {
+    const download = await fetch(result.url, { signal: AbortSignal.timeout(2 * 60_000) })
+    await downloadMediaToFile(download, outputPath, 100 * 1024 * 1024)
+  } else {
+    throw new Error('Seedream 图片生成未返回图片')
+  }
   return {
     success: true,
     relativePath: path.relative(project.folderPath, outputPath).split(path.sep).join('/'),
   }
+}
+
+export async function generateImageWithSeedream(request: GenerateImageRequest): Promise<GenerateImageResult> {
+  const project = await loadProject(request.projectId)
+  if (!project) throw new Error('项目不存在或已被删除')
+  return runLocalGeneration({ project, provider: 'seedream', request }, markSubmitting => generateImageWithSeedreamInternal(request, markSubmitting))
 }

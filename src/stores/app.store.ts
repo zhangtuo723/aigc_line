@@ -1,5 +1,7 @@
 import type { ProjectAgentConfig } from '../shared/agent-config';
 import { create } from 'zustand';
+import { mergeChatHistory, mergeChatReferences, upsertChatMessage } from '../shared/chat-state';
+import { beginEditBarrier, flushPendingEdits } from '../shared/pending-edits';
 import type {
   Project,
   ProjectIndex,
@@ -49,6 +51,8 @@ interface AppState {
 
 const electronAPI = window.electronAPI;
 let projectSelectionSequence = 0;
+let chatHistorySequence = 0;
+const agentRuntimeSequence = new Map<string, number>();
 
 // Artifacts are keyed by their source file: re-pushing the same path updates
 // the existing entry in place (keeping its id, so canvas elements stay linked
@@ -74,9 +78,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   referencedCanvasNodes: [],
 
   setProjects: (projects) => set({ projects }),
-  setCurrentProject: (currentProject) => set({ currentProject }),
+  setCurrentProject: (currentProject) => {
+    projectSelectionSequence += 1;
+    chatHistorySequence += 1;
+    set({ currentProject });
+  },
   setMessages: (messages) => set({ messages }),
-  addMessage: (message) => set((state) => ({ messages: [...state.messages, message] })),
+  addMessage: (message) => set((state) => ({ messages: upsertChatMessage(state.messages, message) })),
   setCurrentPage: (currentPage) => set({ currentPage }),
   setArtifacts: (artifacts) => set({ artifacts }),
   addArtifact: (artifact) => set((state) => ({ artifacts: upsertArtifact(state.artifacts, artifact) })),
@@ -129,7 +137,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   selectProject: async (id) => {
+    const release = beginEditBarrier();
+    try {
     const selectionSequence = ++projectSelectionSequence;
+    chatHistorySequence += 1;
+    await flushPendingEdits();
+    if (selectionSequence !== projectSelectionSequence) return;
     const project = await electronAPI.loadProject(id);
     if (!project || selectionSequence !== projectSelectionSequence) return;
     set({
@@ -153,8 +166,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       .filter((m) => m.artifact)
       .reduce<Artifact[]>((list, m) => upsertArtifact(list, m.artifact!), []);
     if (restoredArtifacts.length > 0) {
-      set({ artifacts: restoredArtifacts });
+      set((state) => ({ artifacts: state.artifacts.reduce(upsertArtifact, restoredArtifacts) }));
     }
+    } finally { release(); }
   },
 
   deleteProject: async (id) => {
@@ -181,15 +195,19 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { currentProject } = get();
     if (!currentProject) return;
     const projectId = currentProject.id;
+    const requestSequence = ++chatHistorySequence;
+    const selectionSequence = projectSelectionSequence;
+    const beforeLoad = new Map(get().messages.map((message) => [message.id, message]));
+    const isCurrent = () => get().currentProject?.id === projectId
+      && chatHistorySequence === requestSequence && projectSelectionSequence === selectionSequence;
     try {
       const history = await electronAPI.loadChatHistory(currentProject.folderPath);
-      if (get().currentProject?.id !== projectId) return;
-      set({ messages: history, chatHistoryError: null });
+      if (!isCurrent()) return;
+      set((state) => ({ messages: mergeChatHistory(history, state.messages, beforeLoad), chatHistoryError: null }));
     } catch (err) {
       console.error('Failed to load chat history:', err);
-      if (get().currentProject?.id !== projectId) return;
+      if (!isCurrent()) return;
       set({
-        messages: [],
         chatHistoryError: err instanceof Error ? err.message : String(err),
       });
     }
@@ -197,11 +215,14 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   sendChatMessage: async (content, attachments) => {
     const { currentProject, referencedArtifacts, referencedCanvasNodes } = get();
-    if (!currentProject) return;
+    if (!currentProject) throw new Error('当前项目不可用');
+    const selectionSequence = projectSelectionSequence;
+    const wasThinking = !!get().agentThinkingByProject[currentProject.id];
+    const runtimeSequence = agentRuntimeSequence.get(currentProject.id);
 
     const message: ChatMessage = {
       deliveryStatus: currentProject.agent?.provider === 'codex' ? 'queued' : undefined,
-      id: `user-${Date.now()}`,
+      id: `user-${crypto.randomUUID()}`,
       role: 'user',
       content,
       timestamp: Date.now(),
@@ -224,15 +245,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       await electronAPI.sendChatMessage(currentProject.id, message);
     } catch (err) {
       set((state) => ({
-        agentThinkingByProject: {
+        ...(agentRuntimeSequence.get(currentProject.id) === runtimeSequence ? { agentThinkingByProject: {
           ...state.agentThinkingByProject,
-          [currentProject.id]: false,
-        },
-        ...(state.currentProject?.id === currentProject.id
+          [currentProject.id]: wasThinking,
+        } } : {}),
+        ...(state.currentProject?.id === currentProject.id && projectSelectionSequence === selectionSequence
           ? {
               messages: state.messages.filter((item) => item.id !== message.id),
-              referencedArtifacts,
-              referencedCanvasNodes,
+              referencedArtifacts: mergeChatReferences(state.referencedArtifacts, referencedArtifacts),
+              referencedCanvasNodes: mergeChatReferences(state.referencedCanvasNodes, referencedCanvasNodes),
             }
           : {}),
       }));
@@ -244,8 +265,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { currentProject, agentThinkingByProject } = get();
     if (!currentProject) throw new Error('当前项目不可用');
     if (agentThinkingByProject[currentProject.id]) throw new Error('Agent 正在处理其他任务，请等待当前回合结束');
+    const selectionSequence = projectSelectionSequence;
+    const runtimeSequence = agentRuntimeSequence.get(currentProject.id);
     const message: ChatMessage = {
-      id: `user-${Date.now()}`,
+      id: `user-${crypto.randomUUID()}`,
       role: 'user',
       content,
       timestamp: Date.now(),
@@ -259,8 +282,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       await electronAPI.sendChatMessage(currentProject.id, message);
     } catch (error) {
       set((state) => ({
-        agentThinkingByProject: { ...state.agentThinkingByProject, [currentProject.id]: false },
-        ...(state.currentProject?.id === currentProject.id
+        ...(agentRuntimeSequence.get(currentProject.id) === runtimeSequence
+          ? { agentThinkingByProject: { ...state.agentThinkingByProject, [currentProject.id]: false } } : {}),
+        ...(state.currentProject?.id === currentProject.id && projectSelectionSequence === selectionSequence
           ? { messages: state.messages.filter((item) => item.id !== message.id) }
           : {}),
       }));
@@ -271,70 +295,30 @@ export const useAppStore = create<AppState>((set, get) => ({
 
 // Subscribe to push events once
 electronAPI?.onChatMessage?.(({ projectId, message }: ProjectChatMessagePush) => {
+  agentRuntimeSequence.set(projectId, (agentRuntimeSequence.get(projectId) ?? 0) + 1);
   useAppStore.setState((state) => {
     const isCurrentProject = state.currentProject?.id === projectId;
     const thinking = message.role === 'system' && message.event === 'context-cleared' ? false : true;
-    const runtimeUpdate = {
+    const cancelled = message.role === 'user' && message.deliveryStatus === 'cancelled';
+    const runtimeUpdate = cancelled || state.agentThinkingByProject[projectId] === thinking ? {} : {
       agentThinkingByProject: {
         ...state.agentThinkingByProject,
         [projectId]: thinking,
       },
     };
-    if (!isCurrentProject) return runtimeUpdate;
-    if (message.role === 'user') {
-      const exists = state.messages.some(item => item.id === message.id);
-      return {
-        messages: exists ? state.messages.map(item => item.id === message.id ? message : item) : [...state.messages, message],
-        ...(message.deliveryStatus === 'cancelled' ? {} : runtimeUpdate),
-      };
-    }
-    // System messages include: thinking indicators and tool call status
-    if (message.role === 'system') {
-      if (message.event === 'context-cleared') {
-        return {
-          messages: [...state.messages, message],
-          ...runtimeUpdate,
-        };
-      }
-      if (message.toolCall) {
-        // Tool call message - update or add
-        const existingIndex = state.messages.findIndex(
-          (m) => m.toolCall && m.toolCall.id === message.toolCall!.id
-        );
-        if (existingIndex >= 0) {
-          const updatedMessages = [...state.messages];
-          updatedMessages[existingIndex] = message;
-          return { messages: updatedMessages, ...runtimeUpdate };
-        }
-        return { messages: [...state.messages, message], ...runtimeUpdate };
-      }
-      // Thinking indicator message - add to messages list
-      return {
-        messages: [...state.messages, message],
-        ...runtimeUpdate,
-      };
-    }
-    // For assistant messages, append them; thinking state is cleared only by the
-    // turn-end signal from the main process, since a turn may continue with tool calls
-    if (message.role === 'assistant') {
-      const nextMessages = [...state.messages, message];
-      // If this assistant message contains an artifact, also add to artifacts
-      if (message.artifact) {
-        return {
-          messages: nextMessages,
-          artifacts: upsertArtifact(state.artifacts, message.artifact),
-          ...runtimeUpdate,
-        };
-      }
-      return { messages: nextMessages, ...runtimeUpdate };
-    }
-    return state;
+    if (!isCurrentProject) return Object.keys(runtimeUpdate).length ? runtimeUpdate : state;
+    return {
+      messages: upsertChatMessage(state.messages, message),
+      ...(message.artifact ? { artifacts: upsertArtifact(state.artifacts, message.artifact) } : {}),
+      ...runtimeUpdate,
+    };
   });
 });
 
 // Turn-end signal from the main process - clears the thinking indicator
 electronAPI?.onTurnEnd?.(({ projectId }: ProjectTurnEndPush) => {
-  useAppStore.setState((state) => ({
+  agentRuntimeSequence.set(projectId, (agentRuntimeSequence.get(projectId) ?? 0) + 1);
+  useAppStore.setState((state) => state.agentThinkingByProject[projectId] === false ? state : ({
     agentThinkingByProject: {
       ...state.agentThinkingByProject,
       [projectId]: false,

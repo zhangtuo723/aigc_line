@@ -36,7 +36,7 @@ export function HomePage() {
       <header className="relative flex items-center justify-between border-b border-white/[0.08] bg-[#0d0d14] px-8 py-4">
         <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-[#d4af37]/40 to-transparent" />
         <div className="flex items-center gap-3.5">
-          <img src="/logo.svg" alt="AIGC CANVAS" className="h-10 w-10 rounded-xl shadow-[0_0_24px_rgba(212,175,55,0.25)]" />
+          <img src={`${import.meta.env.BASE_URL}logo.svg`} alt="AIGC CANVAS" className="h-10 w-10 rounded-xl shadow-[0_0_24px_rgba(212,175,55,0.25)]" />
           <div className="leading-tight">
             <h1 className="font-display text-lg font-semibold tracking-[0.24em] text-[#e8c766]">AIGC CANVAS</h1>
             <p className="mt-1 text-[11px] tracking-[0.35em] text-[#8a8794]">AI 分镜视频创作画布</p>
@@ -64,7 +64,7 @@ export function HomePage() {
             <div className="flex h-[calc(100vh-260px)] flex-col items-center justify-center">
               <div className="relative">
                 <div className="absolute inset-0 -m-8 rounded-full bg-[#d4af37]/10 blur-3xl" />
-                <img src="/logo.svg" alt="" className="relative h-24 w-24 rounded-3xl shadow-[0_0_40px_rgba(212,175,55,0.2)]" />
+                <img src={`${import.meta.env.BASE_URL}logo.svg`} alt="" className="relative h-24 w-24 rounded-3xl shadow-[0_0_40px_rgba(212,175,55,0.2)]" />
               </div>
               <p className="mt-8 font-display text-xl tracking-[0.3em] text-[#e8e6df]">尚未开启创作之旅</p>
               <div className="mt-5 flex items-center gap-3">

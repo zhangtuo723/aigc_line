@@ -4,6 +4,8 @@ import type { IpcRendererEvent } from 'electron';
 import { IPC_CHANNELS } from '../../src/shared/ipc.channels';
 import type {
   Project,
+  CloseReadyResult,
+  GenerationTaskSummary,
   ProjectIndex,
   ChatMessage,
   CodexQueueResult,
@@ -42,6 +44,9 @@ import type {
 import type { SaveDirectorStillRequest, SaveDirectorStillResult, SaveDirectorVideoRequest, SaveDirectorVideoResult } from '../../src/shared/director.types';
 
 export interface ElectronAPI {
+  onBeforeClose: (callback: (requestId: string) => void) => () => void;
+  onCloseCancelled: (callback: () => void) => () => void;
+  confirmClose: (result: CloseReadyResult) => void;
   platform: NodeJS.Platform;
   createProject: (name: string, folderPath: string, agent?: ProjectAgentConfig) => Promise<Project>;
   listProjects: () => Promise<ProjectIndex>;
@@ -79,6 +84,9 @@ export interface ElectronAPI {
   extractVideoAudio: (request: ExtractVideoAudioRequest) => Promise<ExtractVideoAudioResult>;
   upscaleVideo: (request: UpscaleVideoRequest) => Promise<UpscaleVideoResult>;
   listComfyWorkflows: () => Promise<ComfyWorkflowInfo[]>;
+  listGenerationTasks: (projectId: string) => Promise<GenerationTaskSummary[]>;
+  acknowledgeGenerationTask: (projectId: string, nodeId: string, taskId: string) => Promise<void>;
+  dismissGenerationTask: (projectId: string, nodeId: string, taskId: string) => Promise<void>;
   getAppSettings: () => Promise<AppSettingsView>;
   saveAppSettings: (request: SaveAppSettingsRequest) => Promise<AppSettingsView>;
   testComfyUIConnection: (baseUrl: string) => Promise<ConnectionTestResult>;
@@ -105,6 +113,9 @@ const onPush = <T>(channel: string, callback: (payload: T) => void) => {
 };
 
 const api: ElectronAPI = {
+  onBeforeClose: (callback) => onPush(IPC_CHANNELS.push.beforeClose, callback),
+  onCloseCancelled: (callback) => onPush(IPC_CHANNELS.push.closeCancelled, callback),
+  confirmClose: (result) => ipcRenderer.send(IPC_CHANNELS.app.closeReady, result),
   platform: process.platform,
   createProject: (name, folderPath, agent) =>
     invoke(IPC_CHANNELS.project.create, name, folderPath, agent),
@@ -139,6 +150,9 @@ const api: ElectronAPI = {
   extractVideoAudio: (request) => invoke(IPC_CHANNELS.comfyui.extractVideoAudio, request),
   upscaleVideo: (request) => invoke(IPC_CHANNELS.comfyui.upscaleVideo, request),
   listComfyWorkflows: () => invoke(IPC_CHANNELS.comfyui.listWorkflows),
+  listGenerationTasks: (projectId) => invoke(IPC_CHANNELS.comfyui.listGenerationTasks, projectId),
+  acknowledgeGenerationTask: (projectId, nodeId, taskId) => invoke(IPC_CHANNELS.comfyui.acknowledgeGenerationTask, projectId, nodeId, taskId),
+  dismissGenerationTask: (projectId, nodeId, taskId) => invoke(IPC_CHANNELS.comfyui.dismissGenerationTask, projectId, nodeId, taskId),
   getAppSettings: () => invoke(IPC_CHANNELS.settings.get),
   saveAppSettings: (request) => invoke(IPC_CHANNELS.settings.save, request),
   testComfyUIConnection: (baseUrl) => invoke(IPC_CHANNELS.settings.testComfyUI, baseUrl),

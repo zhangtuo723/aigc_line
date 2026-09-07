@@ -21,8 +21,19 @@ import { generateImageWithGoogle, isGoogleImageWorkflow } from '../services/goog
 import { generateImageWithSeedream, isSeedreamImageWorkflow } from '../services/seedream-image.service'
 import { generateVideoWithSeedance, isSeedanceVideoWorkflow } from '../services/seedance-video.service'
 import { getRuntimeSettings } from '../services/settings.service'
+import { acknowledgeGenerationTaskResult, dismissGenerationTask, listProjectGenerationTasks } from '../services/generation-task.service'
 
 export function registerComfyUIHandlers(): void {
+  ipcMain.handle(IPC_CHANNELS.comfyui.listGenerationTasks, async (_event, projectId: string) => {
+    const tasks = await listProjectGenerationTasks(projectId)
+    return tasks.map(({ id, projectId, nodeId, provider, operation, status, taskId, relativePath, error, acknowledged, updatedAt, request }) =>
+      ({ id, projectId, nodeId, provider, operation, status, taskId, relativePath, error, acknowledged, updatedAt,
+        sourceVideoPath: 'sourceVideoPath' in request ? request.sourceVideoPath : undefined }))
+  })
+  ipcMain.handle(IPC_CHANNELS.comfyui.acknowledgeGenerationTask, (_event, projectId: string, nodeId: string, taskId: string) =>
+    acknowledgeGenerationTaskResult(projectId, nodeId, taskId))
+  ipcMain.handle(IPC_CHANNELS.comfyui.dismissGenerationTask, (_event, projectId: string, nodeId: string, taskIdOrLocalId: string) =>
+    dismissGenerationTask(projectId, nodeId, taskIdOrLocalId))
   ipcMain.handle(IPC_CHANNELS.comfyui.listWorkflows, () => listComfyWorkflows())
   ipcMain.handle(
     IPC_CHANNELS.comfyui.generateImage,

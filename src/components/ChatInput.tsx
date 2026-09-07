@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ChangeEvent, ClipboardEvent, KeyboardEvent } from 'react';
+import type { ChangeEvent, ClipboardEvent, KeyboardEvent, SetStateAction } from 'react';
 import type { Attachment, AvailableSkill, AvailableSkillSource } from '../shared/ipc.types';
 import { useAppStore } from '../stores/app.store';
+import { canClearSubmittedDraft } from '../shared/chat-state';
 import {
   filterAvailableSkills,
   getSkillSearchQuery,
@@ -9,7 +10,7 @@ import {
 } from '../shared/skill-command';
 
 interface ChatInputProps {
-  onSend: (content: string, attachments?: Attachment[]) => void;
+  onSend: (content: string, attachments?: Attachment[]) => Promise<boolean>;
   disabled?: boolean;
 }
 
@@ -57,8 +58,14 @@ const SKILL_SOURCE_LABELS: Record<AvailableSkillSource, string> = {
 };
 
 export function ChatInput({ onSend, disabled }: ChatInputProps) {
-  const [content, setContent] = useState('');
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [content, setContentValue] = useState('');
+  const [attachments, setAttachmentsValue] = useState<Attachment[]>([]);
+  const draftVersionRef = useRef(0);
+  const projectEpochRef = useRef(0);
+  const submissionRef = useRef(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const setContent = (value: string) => { draftVersionRef.current += 1; setContentValue(value); };
+  const setAttachments = (value: SetStateAction<Attachment[]>) => { draftVersionRef.current += 1; setAttachmentsValue(value); };
   const [hint, setHint] = useState('');
   const [skills, setSkills] = useState<AvailableSkill[]>([]);
   const [skillsLoading, setSkillsLoading] = useState(false);
@@ -105,6 +112,9 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
   }, [skillQuery]);
 
   useEffect(() => {
+    projectEpochRef.current += 1;
+    submissionRef.current = false;
+    setIsSubmitting(false);
     setContent('');
     setAttachments([]);
     setHint('');
@@ -123,7 +133,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     if (!showSkillMenu) {
       if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
         event.preventDefault();
-        handleSend();
+        void handleSend();
       }
       return;
     }
@@ -142,11 +152,28 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     }
   };
 
-  const handleSend = () => {
-    if (pastedImageCount > 0 || (!content.trim() && attachments.length === 0 && !hasReferences)) return;
-    onSend(content.trim(), attachments.length > 0 ? attachments : undefined);
-    setContent('');
-    setAttachments([]);
+  const handleSend = async () => {
+    if (disabled || !currentProject || submissionRef.current || pastedImageCount > 0 || (!content.trim() && attachments.length === 0 && !hasReferences)) return;
+    const projectId = currentProject.id;
+    const epoch = projectEpochRef.current;
+    const version = draftVersionRef.current;
+    submissionRef.current = true;
+    setIsSubmitting(true);
+    try {
+      const accepted = await onSend(content.trim(), attachments.length > 0 ? attachments : undefined);
+      if (accepted && useAppStore.getState().currentProject === currentProject && epoch === projectEpochRef.current && canClearSubmittedDraft(version, draftVersionRef.current, projectId, useAppStore.getState().currentProject?.id)) {
+        setContent('');
+        setAttachments([]);
+      }
+    } catch {
+      // The parent displays the failure. Keeping the live draft also preserves
+      // any edits or new attachments added while the request was pending.
+    } finally {
+      if (epoch === projectEpochRef.current) {
+        submissionRef.current = false;
+        setIsSubmitting(false);
+      }
+    }
   };
 
   const handleFileSelect = (e: ChangeEvent<HTMLInputElement>) => {
@@ -180,6 +207,8 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
 
     event.preventDefault();
     const projectId = currentProject.id;
+    const epoch = projectEpochRef.current;
+    const isCurrent = () => useAppStore.getState().currentProject === currentProject && projectEpochRef.current === epoch;
     setPastedImageCount((count) => count + imageFiles.length);
     const saved: Attachment[] = [];
     const errors: string[] = [];
@@ -193,19 +222,19 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
         if (result.success && result.attachment) saved.push(result.attachment);
         else errors.push(result.error || '图片保存失败');
       }
-      if (useAppStore.getState().currentProject?.id !== projectId) return;
+      if (!isCurrent()) return;
       if (saved.length > 0) setAttachments((prev) => [...prev, ...saved]);
       if (errors.length > 0) {
         setHint(errors[0]);
         window.setTimeout(() => setHint(''), 3000);
       }
     } catch (error) {
-      if (useAppStore.getState().currentProject?.id === projectId) {
+      if (isCurrent()) {
         setHint(error instanceof Error ? error.message : '粘贴图片失败');
         window.setTimeout(() => setHint(''), 3000);
       }
     } finally {
-      if (useAppStore.getState().currentProject?.id === projectId) {
+      if (isCurrent()) {
         setPastedImageCount((count) => Math.max(0, count - imageFiles.length));
       }
     }
@@ -370,6 +399,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
           <input
             ref={fileInputRef}
             type='file'
+            aria-label='聊天附件'
             multiple
             onChange={handleFileSelect}
             className='hidden'
@@ -393,10 +423,10 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
 
           {/* Send button */}
           <button
-            onClick={handleSend}
-            disabled={disabled || pastedImageCount > 0 || (!content.trim() && attachments.length === 0 && !hasReferences)}
+            onClick={() => void handleSend()}
+            disabled={disabled || isSubmitting || pastedImageCount > 0 || (!content.trim() && attachments.length === 0 && !hasReferences)}
             className='ml-auto flex h-8 w-8 items-center justify-center rounded-full border border-[#d4af37]/50 bg-gradient-to-b from-[#e8c766] to-[#b08d2a] text-[#241a05] shadow-[0_2px_12px_rgba(212,175,55,0.25)] transition hover:brightness-110 disabled:border-white/10 disabled:bg-none disabled:bg-white/5 disabled:text-[#6d6a78] disabled:shadow-none'
-            title='发送'
+            title={isSubmitting ? '正在发送…' : '发送'}
           >
             <svg className='h-4 w-4' fill='none' stroke='currentColor' strokeWidth={2} viewBox='0 0 24 24'>
               <path strokeLinecap='round' strokeLinejoin='round' d='M5 12h14M13 6l6 6-6 6' />

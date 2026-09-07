@@ -11,6 +11,7 @@ import { codexSession, interruptCodex } from './codex-session';
 import type { AgentProvider } from '../../../../src/shared/agent-config';
 import { query, type Query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { app } from 'electron';
+import path from 'node:path';
 import log from 'electron-log/main';
 import type { ChatMessage } from '../../../../src/shared/ipc.types';
 import {
@@ -66,6 +67,7 @@ interface ProjectAgentSession {
   /** Wakes the generator when it is idle-waiting for input */
   wakeInput: (() => void) | null;
   activeQuery: Query | null;
+  activeToolCalls: Map<string, ToolCallInfo>;
   pumping: boolean;
   /** Turns the user has requested but the agent has not finished yet */
   pendingTurns: number;
@@ -73,6 +75,11 @@ interface ProjectAgentSession {
 }
 
 const sessions = new Map<string, ProjectAgentSession>();
+
+export function getActiveClaudeToolIds(folderPath: string): string[] {
+  return [...sessions.values()].filter((session) => path.resolve(session.folderPath) === path.resolve(folderPath) && session.activeQuery)
+    .flatMap((session) => [...session.activeToolCalls.values()].filter((tool) => tool.status === 'running').map((tool) => tool.id));
+}
 
 function getOrCreateSession(
   projectId: string,
@@ -88,6 +95,7 @@ function getOrCreateSession(
       queue: [],
       wakeInput: null,
       activeQuery: null,
+      activeToolCalls: new Map(),
       pumping: false,
       pendingTurns: 0,
       pendingContextClear: null,
@@ -216,6 +224,7 @@ async function pump(session: ProjectAgentSession): Promise<void> {
       const agentEnv = { ...process.env };
 
       const activeToolCalls = new Map<string, ToolCallInfo>();
+      session.activeToolCalls = activeToolCalls;
       const builtinPluginPath = resolveBuiltinPluginPath({
         isPackaged: app.isPackaged,
         appPath: app.getAppPath(),

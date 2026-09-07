@@ -10,6 +10,7 @@ import {
   _electron as electron,
 } from '@playwright/test'
 import type { BrowserWindow } from 'electron'
+import type { DirectorProject } from '../../src/shared/director.types'
 
 const root = path.resolve(import.meta.dirname, '..', '..')
 const runId = `${process.pid}-${Date.now()}`
@@ -77,6 +78,9 @@ test.afterAll(async () => {
 })
 
 test.describe('AIGC CANVAS Electron UI', () => {
+  // These steps intentionally exercise one end-to-end project workflow.
+  // Skip dependent steps after a failure; independent regression fixtures live in separate specs.
+  test.describe.configure({ mode: 'serial' })
   test('startup', async () => {
     const title = await page.title()
     expect(title).toBe('AIGC CANVAS')
@@ -212,6 +216,7 @@ test.describe('AIGC CANVAS Electron UI', () => {
   })
 
   test('3D director stage creates a persisted composition reference node', async () => {
+    test.setTimeout(90000)
     await page.getByTitle('添加3D 导演台节点').click()
     const directorNode = page.locator('.react-flow__node').filter({ has: page.getByRole('button', { name: '打开导演台' }) })
     const directorId = await directorNode.getAttribute('data-id')
@@ -231,13 +236,17 @@ test.describe('AIGC CANVAS Electron UI', () => {
     expect(stageCanvasBox).not.toBeNull()
     expect(stageToolbarBox).not.toBeNull()
     expect(stageToolbarBox!.y).toBeGreaterThan(stageCanvasBox!.y + stageCanvasBox!.height * 0.7)
-    await expect(page.getByRole('button', { name: '地面', exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: '楼梯', exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: '斜坡', exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: '胶囊', exact: true })).toBeVisible()
+    const stageLibrary = page.getByRole('region', { name: '片场素材库' })
+    await stageToolbar.getByRole('button', { name: '建筑', exact: true }).click()
+    await expect(stageLibrary.getByRole('button', { name: '地面', exact: true })).toBeVisible()
+    await expect(stageLibrary.getByRole('button', { name: '楼梯', exact: true })).toBeVisible()
+    await expect(stageLibrary.getByRole('button', { name: '斜坡', exact: true })).toBeVisible()
+    await stageToolbar.getByRole('button', { name: '基础几何', exact: true }).click()
+    await expect(stageLibrary.getByRole('button', { name: '胶囊', exact: true })).toBeVisible()
+    await stageLibrary.getByRole('button', { name: '收起素材库', exact: true }).click()
     const cameraViewButton = page.getByRole('button', { name: '机位视角', exact: true })
     const directorViewButton = page.getByRole('button', { name: '导演视角', exact: true })
-    const closeDirectorButton = page.getByRole('button', { name: '关闭', exact: true })
+    const closeDirectorButton = page.getByRole('button', { name: '保存并关闭', exact: true })
     expect((await cameraViewButton.boundingBox())?.y).toBeGreaterThanOrEqual(40)
     expect((await closeDirectorButton.boundingBox())?.y).toBeGreaterThanOrEqual(40)
     await cameraViewButton.click()
@@ -248,7 +257,8 @@ test.describe('AIGC CANVAS Electron UI', () => {
     await expect(page.getByText('白模调度 · 多机位 · 人物路径 · 24fps 工程')).toHaveCount(0)
     await page.getByRole('button', { name: '打开导演台' }).click()
     await expect(page.getByText('白模调度 · 多机位 · 人物路径 · 24fps 工程')).toBeVisible()
-    await page.getByRole('button', { name: '演员', exact: true }).click()
+    await stageToolbar.getByRole('button', { name: '人物', exact: true }).click()
+    await stageLibrary.getByRole('button', { name: '演员', exact: true }).click()
     await expect(page.getByText('演员 01', { exact: true })).toBeVisible()
     await expect(page.getByText(/^已自动保存 /)).toBeVisible()
     await closeDirectorButton.click()
@@ -277,9 +287,11 @@ test.describe('AIGC CANVAS Electron UI', () => {
     await pathCanvas.click({ position: pathPoint, modifiers: ['Control'] })
     await expect(page.getByText('路径点 2 · XYZ 世界坐标', { exact: true })).toBeVisible()
     await page.getByRole('button', { name: '完成绘制', exact: true }).click()
-    await page.getByRole('button', { name: '楼梯', exact: true }).click()
+    await stageToolbar.getByRole('button', { name: '建筑', exact: true }).click()
+    await stageLibrary.getByRole('button', { name: '楼梯', exact: true }).click()
     await expect(page.getByText('楼梯 02', { exact: true })).toBeVisible()
-    await page.getByRole('button', { name: '斜坡', exact: true }).click()
+    await stageToolbar.getByRole('button', { name: '建筑', exact: true }).click()
+    await stageLibrary.getByRole('button', { name: '斜坡', exact: true }).click()
     await expect(page.getByText('斜坡 03', { exact: true })).toBeVisible()
     await page.keyboard.press('z')
     await expect(page.getByRole('button', { name: '缩放 Z', exact: true })).toHaveClass(/bg-\[#e8e6df\]/)
@@ -338,7 +350,7 @@ test.describe('AIGC CANVAS Electron UI', () => {
     await page.getByRole('button', { name: '拍摄构图并发送到画布' }).click()
     await expect(page.getByRole('button', { name: '拍摄构图并发送到画布' })).toBeEnabled({ timeout: 15000 })
     await page.screenshot({ path: 'test/screenshots/director-stage.png' })
-    await page.getByRole('button', { name: '保存并返回画布' }).click()
+    await page.getByRole('button', { name: '保存并关闭', exact: true }).click()
 
     await expect(page.getByText('镜头 02 · 构图参考', { exact: true })).toBeVisible()
     await expect(page.getByText('镜头 02 · 预演视频', { exact: true })).toBeVisible()
@@ -352,6 +364,114 @@ test.describe('AIGC CANVAS Electron UI', () => {
     expect(directorFiles.some((file) => file.endsWith('.png'))).toBe(true)
     const directorVideos = await fs.readdir(path.join(testWorkspaceDir, 'generated', 'director-videos'))
     expect(directorVideos.some((file) => file.endsWith('.webm'))).toBe(true)
+  })
+
+  test('director material library creates, duplicates, and persists interior modules', async () => {
+    test.setTimeout(60000)
+    const directorNode = page.locator('.react-flow__node').filter({ has: page.getByRole('button', { name: '打开导演台' }) })
+    const directorId = await directorNode.getAttribute('data-id')
+    expect(directorId).toBeTruthy()
+    const readDirectorProject = () => page.evaluate(async ({ folderPath, nodeId }) => {
+      const snapshot = await window.electronAPI.loadCanvasSnapshot(folderPath) as {
+        nodes?: Array<{ id?: string; data?: { directorProject?: DirectorProject } }>
+      } | null
+      return snapshot?.nodes?.find((node) => node.id === nodeId)?.data?.directorProject
+    }, { folderPath: testWorkspaceDir, nodeId: directorId! })
+    await expect.poll(async () => (await readDirectorProject())?.elements.length ?? 0).toBeGreaterThan(0)
+    const originalCount = (await readDirectorProject())!.elements.length
+
+    await directorNode.getByRole('button', { name: '打开导演台' }).click()
+    const stage = page.locator('[data-director-stage-dialog]')
+    const toolbar = stage.getByRole('toolbar', { name: '添加到片场工具栏' })
+    const library = stage.getByRole('region', { name: '片场素材库' })
+    const search = library.getByRole('textbox', { name: '搜索片场素材' })
+    await toolbar.getByRole('button', { name: '素材库', exact: true }).click()
+    await search.fill('没有这个片场素材-e2e')
+    const assetNames = /^(演员|群众|立方体|球体|圆柱|圆锥|胶囊|墙体|地面|平台|楼梯|斜坡|门框|窗框|桌子|椅子|沙发|床|柜子|栏杆)$/
+    await expect(library.getByRole('button', { name: assetNames })).toHaveCount(0)
+    await search.fill('门框')
+    await expect(library.getByRole('button', { name: '门框', exact: true })).toBeVisible()
+    await expect(library.getByRole('button', { name: '桌子', exact: true })).toHaveCount(0)
+    await library.getByRole('button', { name: '门框', exact: true }).click()
+    await expect(library).toHaveCount(0)
+    await expect(stage.getByRole('button', { name: /^门框 \d+$/ })).toBeVisible()
+
+    const modules = [
+      { label: '窗框', category: '建筑' },
+      { label: '栏杆', category: '建筑' },
+      { label: '桌子', category: '家具' },
+      { label: '椅子', category: '家具' },
+      { label: '沙发', category: '家具' },
+      { label: '床', category: '家具' },
+      { label: '柜子', category: '家具' },
+    ]
+    for (const { label, category } of modules) {
+      await toolbar.getByRole('button', { name: category, exact: true }).click()
+      await library.getByRole('button', { name: label, exact: true }).click()
+      await expect(library).toHaveCount(0)
+      await expect(stage.getByRole('button', { name: new RegExp(`^${label} \\d+$`) })).toBeVisible()
+    }
+
+    const sofa = stage.getByRole('button', { name: /^沙发 \d+$/ })
+    const copyButton = stage.getByRole('button', { name: '复制选中物体', exact: true })
+    const copies = stage.getByRole('button', { name: /^沙发 .*副本/ })
+    await sofa.click()
+    await copyButton.click()
+    await expect(copies).toHaveCount(1)
+    await sofa.click()
+    await page.keyboard.press('Control+d')
+    await expect(copies).toHaveCount(2)
+
+    await toolbar.getByRole('button', { name: '家具', exact: true }).click()
+    await page.screenshot({ path: 'test/screenshots/director-interior-library.png' })
+    await search.fill('沙发')
+    await search.press('Control+d')
+    await expect(copies).toHaveCount(2)
+    await expect(search).toHaveValue('沙发')
+    await search.press('Escape')
+    await expect(library).toHaveCount(0)
+    await toolbar.getByRole('button', { name: '家具', exact: true }).click()
+    await sofa.click()
+    await expect(library).toHaveCount(0)
+
+    await sofa.click()
+    await stage.getByRole('button', { name: '锁定', exact: true }).click()
+    await expect(copyButton).toBeDisabled()
+    await page.keyboard.press('Control+d')
+    await expect(copies).toHaveCount(2)
+    await page.screenshot({ path: 'test/screenshots/director-interior-modules.png' })
+    await stage.getByRole('button', { name: '保存并关闭', exact: true }).click()
+
+    await expect.poll(async () => {
+      const project = await readDirectorProject()
+      return {
+        count: project?.elements.length,
+        sourceLocked: project?.elements.find((element) => element.kind === 'sofa' && !element.name.includes('副本'))?.locked,
+      }
+    }).toEqual({ count: originalCount + 10, sourceLocked: true })
+    const savedProject = (await readDirectorProject())!
+    expect(savedProject.elements.map((element) => element.kind)).toEqual(expect.arrayContaining([
+      'doorframe', 'windowframe', 'table', 'chair', 'sofa', 'bed', 'cabinet', 'railing',
+    ]))
+    const savedSofas = savedProject.elements.filter((element) => element.kind === 'sofa')
+    expect(savedSofas).toHaveLength(3)
+    expect(new Set(savedProject.elements.map((element) => element.id)).size).toBe(savedProject.elements.length)
+    expect(savedSofas.filter((element) => element.name.includes('副本'))).toHaveLength(2)
+    expect(savedSofas.find((element) => !element.name.includes('副本'))?.locked).toBe(true)
+
+    await page.reload()
+    await directorNode.getByRole('button', { name: '打开导演台' }).click()
+    await expect(copies).toHaveCount(2)
+    await expect(stage.getByRole('button', { name: /^门框 \d+$/ })).toBeVisible()
+    await expect(stage.getByRole('button', { name: /^窗框 \d+$/ })).toBeVisible()
+    await stage.getByRole('button', { name: /^沙发 \d+\s*锁$/ }).click()
+    await expect(copyButton).toBeDisabled()
+    await page.screenshot({ path: 'test/screenshots/director-interior-restored.png' })
+    await stage.getByRole('button', { name: '保存并关闭', exact: true }).click()
+    await expect(page.getByText('镜头 02 · 构图参考', { exact: true })).toBeVisible()
+    // Restore the preceding test's selection: a selected director is drawn
+    // above the next board added at the canvas center and blocks its controls.
+    await page.getByText('镜头 02 · 预演视频', { exact: true }).dispatchEvent('click')
   })
 
   test('board opens blank, loads connected images, and exports the selection as a linked node', async () => {
@@ -429,7 +549,7 @@ test.describe('AIGC CANVAS Electron UI', () => {
 
     await expect(openEditorButton).toBeEnabled()
     await openEditorButton.click()
-    await expect(page.getByText(/Excalidraw 自由画板 · 已载入 1 张连接素材/)).toBeVisible()
+    await expect(page.getByText('Excalidraw 自由画板 · 已载入 1/1 张连接素材')).toBeVisible()
     await expect(page.getByRole('button', { name: '保存编辑结果' })).toHaveCount(0)
 
     excalidrawCanvas = page.locator('canvas.excalidraw__canvas.interactive')
@@ -444,7 +564,7 @@ test.describe('AIGC CANVAS Electron UI', () => {
     const exportButton = page.getByRole('button', { name: /导出所选素材/ })
     await expect(exportButton).toBeEnabled()
     await exportButton.click()
-    await expect(page.getByText(/已导出 \d+ 个素材，并在外部画布创建图片节点/)).toBeVisible({ timeout: 15000 })
+    await expect(page.getByText(/已导出 \d+ 个素材 · \d+×\d+/)).toBeVisible({ timeout: 15000 })
     await page.getByRole('button', { name: '关闭并返回画布' }).click()
 
     await expect(page.getByText(/画板节点 \d+ · 导出 1/)).toBeVisible()

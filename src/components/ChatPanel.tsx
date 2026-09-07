@@ -1,9 +1,13 @@
 import { agentLabel } from '../shared/agent-config'
-import { useRef, useEffect, useState } from 'react'
+import { useRef, useEffect, useLayoutEffect, useMemo, useState } from 'react'
 import type { ChatMessage as ChatMessageType } from '../shared/ipc.types'
 import { ChatMessageItem } from './ChatMessage'
 import { ChatInput } from './ChatInput'
 import { useAppStore } from '../stores/app.store'
+import { chatDisplayMessages, sameChatQueue } from '../shared/chat-state'
+
+const HISTORY_PAGE_SIZE = 100
+const EMPTY_QUEUE: ChatMessageType[] = []
 
 export function ChatPanel() {
   const messages = useAppStore((state) => state.messages)
@@ -21,13 +25,16 @@ export function ChatPanel() {
   const [sendError, setSendError] = useState('')
   const [queueState, setQueueState] = useState<{ projectId: string; messages: ChatMessageType[] }>({ projectId: '', messages: [] })
   const [sendingNow, setSendingNow] = useState<string | null>(null)
-  const serverQueue = queueState.projectId === currentProject?.id ? queueState.messages : []
-  const queuedMessages = currentProject?.agent?.provider === 'codex'
-    ? [...serverQueue.filter(message => !messages.some(item => item.id === message.id && item.deliveryStatus && item.deliveryStatus !== 'queued')),
-      ...messages.filter(message => message.deliveryStatus === 'queued' && !serverQueue.some(item => item.id === message.id))]
-    : []
-  const queuedIds = new Set(queuedMessages.map(message => message.id))
-  const visibleMessages = messages.filter(message => !queuedIds.has(message.id))
+  const [historyLimit, setHistoryLimit] = useState(HISTORY_PAGE_SIZE)
+  const prependScrollRef = useRef<{ height: number; top: number } | null>(null)
+  const readingStartIdRef = useRef<string | null>(null)
+  const serverQueue = queueState.projectId === currentProject?.id ? queueState.messages : EMPTY_QUEUE
+  const { queued: queuedMessages, visible: visibleMessages } = useMemo(() => chatDisplayMessages(
+    messages, serverQueue, currentProject?.agent?.provider === 'codex',
+  ), [messages, serverQueue, currentProject?.agent?.provider])
+  const readingStartIndex = readingStartIdRef.current ? visibleMessages.findIndex((message) => message.id === readingStartIdRef.current) : -1
+  const hiddenMessageCount = readingStartIndex >= 0 ? readingStartIndex : Math.max(0, visibleMessages.length - historyLimit)
+  const displayedMessages = useMemo(() => visibleMessages.slice(hiddenMessageCount), [visibleMessages, hiddenMessageCount])
   useEffect(() => {
     if (currentProject?.agent?.provider !== 'codex') return
     const projectId = currentProject.id
@@ -36,7 +43,8 @@ export function ChatPanel() {
     const refresh = async () => {
       try {
         const result = await window.electronAPI.getCodexQueue(projectId)
-        if (active) setQueueState({ projectId, messages: result.messages })
+        if (active) setQueueState((previous) => previous.projectId === projectId && sameChatQueue(previous.messages, result.messages)
+          ? previous : { projectId, messages: result.messages })
       } catch { /* Retry while this project remains open. */ }
       if (active) timer = setTimeout(() => void refresh(), 500)
     }
@@ -51,36 +59,56 @@ export function ChatPanel() {
     try {
       await window.electronAPI.sendCodexQueuedNow(projectId, messageId)
     } catch (error) {
-      if (useAppStore.getState().currentProject?.id === projectId) setSendError(error instanceof Error ? error.message : String(error))
-    } finally { setSendingNow(null) }
+      if (useAppStore.getState().currentProject === currentProject) setSendError(error instanceof Error ? error.message : String(error))
+    } finally { if (useAppStore.getState().currentProject === currentProject) setSendingNow(null) }
   }
-  const toolStepCount = visibleMessages.reduce((count, message) => count + (message.toolCall ? 1 : 0), 0)
+  const toolStepCount = useMemo(() => visibleMessages.reduce((count, message) => count + (message.toolCall ? 1 : 0), 0), [visibleMessages])
   const dialogueCount = visibleMessages.length - toolStepCount
 
   useEffect(() => {
     const viewport = messagesViewportRef.current
     if (!viewport || !shouldStickToBottomRef.current) return
-    viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' })
+    viewport.scrollTop = viewport.scrollHeight
   }, [messages])
+
+  useLayoutEffect(() => {
+    const viewport = messagesViewportRef.current
+    const previous = prependScrollRef.current
+    if (viewport && previous) viewport.scrollTop = previous.top + viewport.scrollHeight - previous.height
+    prependScrollRef.current = null
+  }, [historyLimit])
 
   useEffect(() => {
     shouldStickToBottomRef.current = true
+    prependScrollRef.current = null
+    readingStartIdRef.current = null
+    setHistoryLimit(HISTORY_PAGE_SIZE)
     setSendError('')
+    setClearError('')
+    setClearConfirmOpen(false)
+    setIsClearingContext(false)
+    setSendingNow(null)
     const viewport = messagesViewportRef.current
     if (viewport) viewport.scrollTop = viewport.scrollHeight
   }, [currentProject?.id])
 
-  const handleSend = (content: string, attachments?: ChatMessageType['attachments']) => {
-    if (!currentProject) return
+  const handleSend = async (content: string, attachments?: ChatMessageType['attachments']): Promise<boolean> => {
+    if (!currentProject) throw new Error('当前项目不可用')
     if (/^\/clear(?:\s|$)/i.test(content.trim())) {
       setClearError('')
       setClearConfirmOpen(true)
-      return
+      return false
     }
     setSendError('')
-    void sendChatMessage(content, attachments).catch((error) => {
-      setSendError(error instanceof Error ? error.message : '消息发送失败，附件与节点引用已恢复')
-    })
+    try {
+      await sendChatMessage(content, attachments)
+      return true
+    } catch (error) {
+      if (useAppStore.getState().currentProject === currentProject) {
+        setSendError(`${error instanceof Error ? error.message : '消息发送失败'}。输入内容与附件已保留，可修改后重试。`)
+      }
+      throw error
+    }
   }
 
   const handleClearContext = async () => {
@@ -89,15 +117,16 @@ export function ChatPanel() {
     setClearError('')
     try {
       const result = await window.electronAPI.clearAgentContext(currentProject.id)
+      if (useAppStore.getState().currentProject !== currentProject) return
       if (!result.success) {
         setClearError(result.error || '新建上下文失败')
         return
       }
       setClearConfirmOpen(false)
     } catch (error) {
-      setClearError(error instanceof Error ? error.message : String(error))
+      if (useAppStore.getState().currentProject === currentProject) setClearError(error instanceof Error ? error.message : String(error))
     } finally {
-      setIsClearingContext(false)
+      if (useAppStore.getState().currentProject === currentProject) setIsClearingContext(false)
     }
   }
 
@@ -136,18 +165,22 @@ export function ChatPanel() {
         onScroll={(event) => {
           const element = event.currentTarget
           shouldStickToBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80
+          // Anchor the loaded range while reading, so appended output cannot
+          // remove its first row and shift the reader's position.
+          readingStartIdRef.current = shouldStickToBottomRef.current ? null : displayedMessages[0]?.id ?? null
         }}
         className="flex-1 overflow-y-auto p-3"
       >
-        {chatHistoryError ? (
+        {chatHistoryError && (
           <div className="m-4 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">
             {chatHistoryError}
           </div>
-        ) : visibleMessages.length === 0 ? (
+        )}
+        {visibleMessages.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center text-[#6d6a78]">
             <div className="relative">
               <div className="absolute inset-0 -m-4 rounded-full bg-[#d4af37]/10 blur-2xl" />
-              <img src="/logo.svg" alt="" className="relative h-14 w-14 rounded-2xl opacity-90" />
+              <img src={`${import.meta.env.BASE_URL}logo.svg`} alt="" className="relative h-14 w-14 rounded-2xl opacity-90" />
             </div>
             <p className="mt-5 font-display text-sm tracking-[0.25em] text-[#e8c766]">AIGC CANVAS</p>
             <p className="mt-2 max-w-[220px] text-center text-xs leading-relaxed text-[#6d6a78]">
@@ -156,7 +189,18 @@ export function ChatPanel() {
           </div>
         ) : (
           <div className="space-y-0.5">
-            {visibleMessages.map((message) => (
+            {hiddenMessageCount > 0 && (
+              <button type="button" onClick={() => {
+                const viewport = messagesViewportRef.current
+                if (viewport) prependScrollRef.current = { height: viewport.scrollHeight, top: viewport.scrollTop }
+                shouldStickToBottomRef.current = false
+                readingStartIdRef.current = visibleMessages[Math.max(0, hiddenMessageCount - HISTORY_PAGE_SIZE)]?.id ?? null
+                setHistoryLimit((limit) => limit + HISTORY_PAGE_SIZE)
+              }} className="mb-3 w-full rounded-lg border border-white/10 py-2 text-xs text-[#8a8794] hover:bg-white/5">
+                加载更早的 {Math.min(HISTORY_PAGE_SIZE, hiddenMessageCount)} 条消息（还有 {hiddenMessageCount} 条）
+              </button>
+            )}
+            {displayedMessages.map((message) => (
               <div key={message.id}>
                 {message.deliveryStatus === 'cancelled' && <p className="px-3 pt-2 text-right text-[10px] text-[#8a8794]">已取消发送</p>}
                 <ChatMessageItem message={message} />

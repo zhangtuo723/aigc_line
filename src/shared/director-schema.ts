@@ -1,4 +1,7 @@
 import { z } from 'zod'
+import { DIRECTOR_ELEMENT_KINDS, DIRECTOR_PRIMITIVE_KINDS } from './director-element-catalog'
+
+export const directorElementKindSchema = z.enum(DIRECTOR_ELEMENT_KINDS)
 
 const finiteNumber = z.number().finite()
 const vec3Schema = z.object({
@@ -20,7 +23,7 @@ const poseSchema = z.enum([
 
 export const directorElementSchema = z.object({
   id: z.string().min(1),
-  kind: z.enum(['actor', 'crowd', 'box', 'sphere', 'cylinder', 'wall', 'floor', 'platform', 'stairs', 'ramp', 'cone', 'capsule']),
+  kind: directorElementKindSchema,
   name: z.string(),
   transform: transformSchema,
   color: z.string().min(1),
@@ -127,7 +130,7 @@ export const directorSceneDraftSchema = z.object({
   groundColor: hexColorSchema.optional(),
   backgroundColor: hexColorSchema.optional(),
   elements: z.array(z.object({
-    kind: z.enum(['box', 'sphere', 'cylinder', 'wall', 'floor', 'platform', 'stairs', 'ramp', 'cone', 'capsule']),
+    kind: z.enum(DIRECTOR_PRIMITIVE_KINDS),
     name: z.string().min(1).max(80),
     color: hexColorSchema,
     placement: z.enum(['ground', 'elevated']),

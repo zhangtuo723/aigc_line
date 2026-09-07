@@ -1,4 +1,7 @@
 export const IPC_CHANNELS = {
+  app: {
+    closeReady: 'app:closeReady',
+  },
   project: {
     create: 'project:create',
     list: 'project:list',
@@ -34,6 +37,9 @@ export const IPC_CHANNELS = {
     save: 'artifact:save',
   },
   comfyui: {
+    listGenerationTasks: 'comfyui:listGenerationTasks',
+    acknowledgeGenerationTask: 'comfyui:acknowledgeGenerationTask',
+    dismissGenerationTask: 'comfyui:dismissGenerationTask',
     listWorkflows: 'comfyui:listWorkflows',
     generateImage: 'comfyui:generateImage',
     generateVideo: 'comfyui:generateVideo',
@@ -49,6 +55,8 @@ export const IPC_CHANNELS = {
     testSeedream: 'settings:testSeedream',
   },
   push: {
+    beforeClose: 'app:beforeClose',
+    closeCancelled: 'app:closeCancelled',
     chatMessage: 'chat:receiveMessage',
     artifact: 'artifact:receive',
     turnEnd: 'chat:turnEnd',
@@ -57,6 +65,7 @@ export const IPC_CHANNELS = {
 } as const;
 
 export type IpcChannel =
+  | (typeof IPC_CHANNELS.app)[keyof typeof IPC_CHANNELS.app]
   | (typeof IPC_CHANNELS.project)[keyof typeof IPC_CHANNELS.project]
   | (typeof IPC_CHANNELS.chat)[keyof typeof IPC_CHANNELS.chat]
   | (typeof IPC_CHANNELS.canvas)[keyof typeof IPC_CHANNELS.canvas]

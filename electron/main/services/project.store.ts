@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import { app } from 'electron';
 import log from 'electron-log/main';
 import { v4 as uuidv4 } from 'uuid';
+import { atomicWriteFile, serializeFileOperation } from './atomic-file';
 import type {
   Project,
   ProjectIndex,
@@ -50,16 +51,13 @@ async function readProjectsFile(): Promise<ProjectIndex> {
 async function writeProjectsFile(index: ProjectIndex): Promise<void> {
   await ensureAppDir();
   const filePath = path.join(getAppDataDir(), PROJECTS_FILE);
-  const tmpPath = `${filePath}.tmp`;
-  await fs.writeFile(tmpPath, JSON.stringify(index, null, 2), 'utf-8');
-  await fs.rename(tmpPath, filePath);
+  await atomicWriteFile(filePath, JSON.stringify(index, null, 2));
 }
 
-let projectCreateQueue: Promise<unknown> = Promise.resolve();
+const indexTransaction = <T>(operation: () => Promise<T>): Promise<T> =>
+  serializeFileOperation(path.join(getAppDataDir(), PROJECTS_FILE), operation);
 export function createProject(name: string, folderPath: string, agentConfig?: unknown): Promise<Project> {
-  const operation = projectCreateQueue.catch(() => undefined).then(() => createProjectInternal(name, folderPath, agentConfig));
-  projectCreateQueue = operation;
-  return operation;
+  return indexTransaction(() => createProjectInternal(name, folderPath, agentConfig));
 }
 
 async function createProjectInternal(
@@ -106,30 +104,34 @@ async function createProjectInternal(
 }
 
 export async function listProjects(): Promise<ProjectIndex> {
-  return readProjectsFile();
+  return indexTransaction(readProjectsFile);
 }
 
 export async function loadProject(id: string): Promise<Project | null> {
-  const index = await readProjectsFile();
+  const index = await listProjects();
   return index.projects.find((p) => p.id === id) ?? null;
 }
 
 export async function deleteProject(id: string): Promise<void> {
+  return indexTransaction(async () => {
   const index = await readProjectsFile();
   index.projects = index.projects.filter((p) => p.id !== id);
   if (index.lastOpenedId === id) {
     delete index.lastOpenedId;
   }
   await writeProjectsFile(index);
+  });
 }
 
 export async function setLastOpened(id: string): Promise<void> {
+  return indexTransaction(async () => {
   const index = await readProjectsFile();
   if (index.projects.some((p) => p.id === id)) {
     if (index.lastOpenedId === id) return;
     index.lastOpenedId = id;
     await writeProjectsFile(index);
   }
+  });
 }
 
 export async function readManifest(folderPath: string): Promise<ProjectManifest | null> {
@@ -157,123 +159,97 @@ export async function writeManifest(
   manifest: ProjectManifest,
 ): Promise<void> {
   const dir = path.join(folderPath, PROJECT_DIR_NAME);
-  await fs.mkdir(dir, { recursive: true });
   const filePath = path.join(dir, MANIFEST_FILE);
-  const tmpPath = `${filePath}.tmp`;
-  await fs.writeFile(tmpPath, JSON.stringify(manifest, null, 2), 'utf-8');
-  await fs.rename(tmpPath, filePath);
+  await serializeFileOperation(filePath, () => atomicWriteFile(filePath, JSON.stringify(manifest, null, 2)));
 }
 
-// Chat history persistence. Each project has one append-only JSONL event log.
-const chatWriteQueues = new Map<string, Promise<void>>();
-const chatNextSequences = new Map<string, number>();
-
-function chatEventsPath(folderPath: string): string {
-  return path.join(folderPath, PROJECT_DIR_NAME, CHAT_EVENTS_FILE);
+// The log remains append-only; its current message index is rebuilt only after external changes.
+interface ChatIndex {
+  signature: string;
+  nextSeq: number;
+  messages: ChatMessage[];
+  indexes: Map<string, number>;
+  incompleteContent?: string;
 }
-
-async function readChatEventLog(folderPath: string): Promise<ReturnType<typeof parseChatEventLog>> {
-  const filePath = chatEventsPath(folderPath);
+const chatIndexes = new Map<string, ChatIndex>();
+const chatEventsPath = (folderPath: string): string => path.join(folderPath, PROJECT_DIR_NAME, CHAT_EVENTS_FILE);
+const chatKey = (folderPath: string): string => process.platform === 'win32' ? path.resolve(folderPath).toLowerCase() : path.resolve(folderPath);
+async function chatSignature(filePath: string): Promise<string> {
   try {
-    const data = await fs.readFile(filePath, 'utf-8');
-    return parseChatEventLog(data);
+    const stat = await fs.stat(filePath);
+    return [stat.size, stat.mtimeMs, stat.ctimeMs, stat.ino].join(':');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { events: [], ignoredIncompleteTail: false };
-    }
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
     throw error;
   }
 }
-
-export async function readChatHistory(folderPath: string): Promise<ChatMessage[]> {
-  const pendingWrite = chatWriteQueues.get(path.resolve(folderPath));
-  if (pendingWrite) await pendingWrite;
-  const { events, ignoredIncompleteTail } = await readChatEventLog(folderPath);
-  if (ignoredIncompleteTail) {
-    log.warn('[ProjectStore] Ignoring incomplete final chat event:', chatEventsPath(folderPath));
+async function loadChatIndex(folderPath: string, forWrite: boolean): Promise<ChatIndex> {
+  const filePath = chatEventsPath(folderPath);
+  const key = chatKey(folderPath);
+  const signature = await chatSignature(filePath);
+  let cached = chatIndexes.get(key);
+  if (!cached || cached.signature !== signature) {
+    const parsed = signature === 'missing'
+      ? { events: [] as ChatHistoryEvent[], ignoredIncompleteTail: false }
+      : parseChatEventLog(await fs.readFile(filePath, 'utf8'));
+    const messages = replayChatEvents(parsed.events);
+    cached = { signature, nextSeq: (parsed.events.at(-1)?.seq ?? 0) + 1, messages,
+      indexes: new Map(messages.map((message, index) => [message.id, index])),
+      incompleteContent: parsed.ignoredIncompleteTail ? parsed.events.map(event => JSON.stringify(event)).join('\n') : undefined };
+    if (parsed.ignoredIncompleteTail) log.warn('[ProjectStore] Ignoring incomplete final chat event:', filePath);
+    chatIndexes.set(key, cached);
   }
-  return replayChatEvents(events);
+  // Bound retained project indexes; entries can always be reconstructed from the log.
+  chatIndexes.delete(key); chatIndexes.set(key, cached);
+  if (chatIndexes.size > 8) chatIndexes.delete(chatIndexes.keys().next().value!);
+  if (forWrite && cached.incompleteContent !== undefined) {
+    await fs.copyFile(filePath, filePath + '.corrupt-' + uuidv4());
+    await atomicWriteFile(filePath, cached.incompleteContent ? cached.incompleteContent + '\n' : '');
+    cached.incompleteContent = undefined;
+    cached.signature = await chatSignature(filePath);
+  }
+  return cached;
 }
-
-function enqueueChatWrite(folderPath: string, operation: () => Promise<void>): Promise<void> {
-  const key = path.resolve(folderPath);
-  const previous = chatWriteQueues.get(key) ?? Promise.resolve();
-  const current = previous.catch(() => undefined).then(operation);
-  chatWriteQueues.set(key, current);
-  void current.finally(() => {
-    if (chatWriteQueues.get(key) === current) chatWriteQueues.delete(key);
-  }).catch(() => undefined);
-  return current;
+export async function readChatHistory(folderPath: string): Promise<ChatMessage[]> {
+  return serializeFileOperation(chatEventsPath(folderPath), async () => structuredClone((await loadChatIndex(folderPath, false)).messages));
 }
-
-async function appendChatEvent(
-  folderPath: string,
-  makeEvent: (seq: number) => ChatHistoryEvent,
-): Promise<void> {
-  await enqueueChatWrite(folderPath, async () => {
-    const dir = path.join(folderPath, PROJECT_DIR_NAME);
-    await fs.mkdir(dir, { recursive: true });
-    const filePath = chatEventsPath(folderPath);
-    const key = path.resolve(folderPath);
-    let nextSeq = chatNextSequences.get(key);
-    if (nextSeq === undefined) {
-      const parsed = await readChatEventLog(folderPath);
-      if (parsed.ignoredIncompleteTail) {
-        const corruptPath = `${filePath}.corrupt-${Date.now()}`;
-        await fs.copyFile(filePath, corruptPath);
-        const validContent = parsed.events.map((event) => JSON.stringify(event)).join('\n');
-        await fs.writeFile(filePath, validContent ? `${validContent}\n` : '', 'utf-8');
+async function writeChatEvent(folderPath: string, cached: ChatIndex, event: ChatHistoryEvent): Promise<void> {
+  const filePath = chatEventsPath(folderPath);
+  try {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.appendFile(filePath, JSON.stringify(event) + '\n', 'utf8');
+    cached.nextSeq = event.seq + 1;
+    if (event.type === 'message.created') {
+      cached.indexes.set(event.message.id, cached.messages.length);
+      cached.messages.push(event.message);
+    } else {
+      const index = cached.indexes.get(event.messageId);
+      if (index !== undefined) {
+        cached.messages[index] = event.message;
+        cached.indexes.delete(event.messageId);
+        cached.indexes.set(event.message.id, index);
       }
-      nextSeq = (parsed.events.at(-1)?.seq ?? 0) + 1;
     }
-    const event = makeEvent(nextSeq);
-    try {
-      await fs.appendFile(filePath, `${JSON.stringify(event)}\n`, 'utf-8');
-      chatNextSequences.set(key, nextSeq + 1);
-    } catch (error) {
-      chatNextSequences.delete(key);
-      throw error;
-    }
+    cached.signature = await chatSignature(filePath);
+  } catch (error) {
+    chatIndexes.delete(chatKey(folderPath));
+    throw error;
+  }
+}
+export function appendChatMessage(folderPath: string, message: ChatMessage): Promise<void> {
+  const captured = structuredClone(message);
+  return serializeFileOperation(chatEventsPath(folderPath), async () => {
+    const cached = await loadChatIndex(folderPath, true);
+    await writeChatEvent(folderPath, cached, { version: 1, seq: cached.nextSeq, type: 'message.created', message: captured });
   });
 }
-
-export function appendChatMessage(folderPath: string, message: ChatMessage): Promise<void> {
-  return appendChatEvent(folderPath, (seq) => ({
-    version: 1,
-    seq,
-    type: 'message.created',
-    message,
-  }));
-}
-
-export async function updateChatMessage(
-  folderPath: string,
-  messageId: string,
-  updater: (msg: ChatMessage) => ChatMessage,
-): Promise<void> {
-  await enqueueChatWrite(folderPath, async () => {
-    const parsed = await readChatEventLog(folderPath);
-    if (parsed.ignoredIncompleteTail) {
-      throw new Error('聊天事件日志末行不完整，请重新加载后再更新消息');
-    }
-    const current = replayChatEvents(parsed.events).find((message) => message.id === messageId);
-    if (!current) return;
-    const key = path.resolve(folderPath);
-    const seq = chatNextSequences.get(key) ?? ((parsed.events.at(-1)?.seq ?? 0) + 1);
-    const event: ChatHistoryEvent = {
-      version: 1,
-      seq,
-      type: 'message.replaced',
-      messageId,
-      message: updater(current),
-    };
-    try {
-      await fs.appendFile(chatEventsPath(folderPath), `${JSON.stringify(event)}\n`, 'utf-8');
-      chatNextSequences.set(key, seq + 1);
-    } catch (error) {
-      chatNextSequences.delete(key);
-      throw error;
-    }
+export function updateChatMessage(folderPath: string, messageId: string, updater: (msg: ChatMessage) => ChatMessage): Promise<void> {
+  return serializeFileOperation(chatEventsPath(folderPath), async () => {
+    const cached = await loadChatIndex(folderPath, true);
+    const index = cached.indexes.get(messageId);
+    if (index === undefined) return;
+    const message = structuredClone(updater(structuredClone(cached.messages[index])));
+    await writeChatEvent(folderPath, cached, { version: 1, seq: cached.nextSeq, type: 'message.replaced', messageId, message });
   });
 }
 
@@ -291,11 +267,8 @@ export async function readSessionId(folderPath: string, provider: AgentProvider 
 
 export async function writeSessionId(folderPath: string, sessionId: string, provider: AgentProvider = 'claude-code'): Promise<void> {
   const dir = path.join(folderPath, PROJECT_DIR_NAME);
-  await fs.mkdir(dir, { recursive: true });
   const filePath = path.join(dir, provider === 'codex' ? 'codex-session.json' : SESSION_FILE);
-  const tmpPath = `${filePath}.tmp`;
-  await fs.writeFile(tmpPath, JSON.stringify({ sessionId }, null, 2), 'utf-8');
-  await fs.rename(tmpPath, filePath);
+  await serializeFileOperation(filePath, () => atomicWriteFile(filePath, JSON.stringify({ sessionId }, null, 2)));
 }
 
 // Canvas snapshot persistence
@@ -304,16 +277,15 @@ export async function readCanvasSnapshot(folderPath: string): Promise<unknown | 
   try {
     const data = await fs.readFile(filePath, 'utf-8');
     return JSON.parse(data);
-  } catch {
-    return null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw new Error(`画布快照读取失败，原文件已保留：${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
 export async function writeCanvasSnapshot(folderPath: string, snapshot: unknown): Promise<void> {
   const dir = path.join(folderPath, PROJECT_DIR_NAME);
-  await fs.mkdir(dir, { recursive: true });
   const filePath = path.join(dir, CANVAS_SNAPSHOT_FILE);
-  const tmpPath = `${filePath}.tmp`;
-  await fs.writeFile(tmpPath, JSON.stringify(snapshot, null, 2), 'utf-8');
-  await fs.rename(tmpPath, filePath);
+  const content = JSON.stringify(snapshot);
+  await serializeFileOperation(filePath, () => atomicWriteFile(filePath, content));
 }

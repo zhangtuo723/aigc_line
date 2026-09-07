@@ -1,3 +1,5 @@
+import { runLocalGeneration, TerminalGenerationError } from './generation-task.service'
+import { readBoundedMedia } from './media-io'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import type {
@@ -107,8 +109,9 @@ export function isGoogleImageWorkflow(workflowId?: string): boolean {
   return GOOGLE_IMAGE_MODELS.some((item) => item.id === workflowId)
 }
 
-export async function generateImageWithGoogle(
+async function generateImageWithGoogleInternal(
   request: GenerateImageRequest,
+  markSubmitting: () => void,
 ): Promise<GenerateImageResult> {
   const project = await loadProject(request.projectId)
   if (!project) throw new Error('项目不存在或已被删除')
@@ -130,7 +133,7 @@ export async function generateImageWithGoogle(
     const extension = path.extname(imagePath).toLowerCase()
     const mimeType = MIME_BY_EXTENSION[extension]
     if (!mimeType) throw new Error('Nano Banana 图生图仅支持 PNG、JPEG、WebP 或 GIF 参考图片')
-    const bytes = await fs.readFile(imagePath)
+    const bytes = await readBoundedMedia(imagePath, 20 * 1024 * 1024, 'Nano Banana 参考图片')
     if (bytes.byteLength > 20 * 1024 * 1024) {
       throw new Error('Nano Banana 参考图片不能超过 20 MB')
     }
@@ -138,6 +141,7 @@ export async function generateImageWithGoogle(
   }
   const parts = buildGoogleImageParts(prompt, referenceImages)
 
+  markSubmitting()
   const response = await fetchGoogleApi(
     `https://generativelanguage.googleapis.com/v1/models/${selected.model}:generateContent`,
     {
@@ -162,10 +166,11 @@ export async function generateImageWithGoogle(
     throw new Error(`Google 图片生成返回了无效响应（HTTP ${response.status}）`)
   }
   if (!response.ok) {
-    throw new Error(`Google 图片生成失败（HTTP ${response.status}）：${payload.error?.message || responseText.slice(0, 500)}`)
+    throw new TerminalGenerationError(`Google 图片生成失败（HTTP ${response.status}）：${payload.error?.message || responseText.slice(0, 500)}`)
   }
 
   const generated = responseImage(payload)
+  if (generated.data.length > 140 * 1024 * 1024) throw new Error('Google 图片生成结果超过大小上限')
   const bytes = Buffer.from(generated.data, 'base64')
   if (!bytes.length) throw new Error('Google 图片生成返回了空图片')
   const safeNodeId = request.nodeId.replace(/[^a-zA-Z0-9_-]/g, '-').slice(-48)
@@ -179,4 +184,10 @@ export async function generateImageWithGoogle(
     success: true,
     relativePath: path.relative(project.folderPath, outputPath).split(path.sep).join('/'),
   }
+}
+
+export async function generateImageWithGoogle(request: GenerateImageRequest): Promise<GenerateImageResult> {
+  const project = await loadProject(request.projectId)
+  if (!project) throw new Error('项目不存在或已被删除')
+  return runLocalGeneration({ project, provider: 'google', request }, markSubmitting => generateImageWithGoogleInternal(request, markSubmitting))
 }

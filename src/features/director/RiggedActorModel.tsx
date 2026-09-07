@@ -1,5 +1,5 @@
 import { useLoader } from '@react-three/fiber'
-import { useLayoutEffect, useMemo } from 'react'
+import { useEffect, useLayoutEffect, useMemo } from 'react'
 import {
   Box3,
   Color,
@@ -15,6 +15,7 @@ import {
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js'
 import type { DirectorBodyType, DirectorPoseId } from '../../shared/director.types'
+import { disposeDirectorRig } from './director-rig-resources'
 
 const MODEL_URL = `${import.meta.env.BASE_URL}models/ue-mannequin-retopology.glb`
 
@@ -199,6 +200,8 @@ export function RiggedActorModel({ color, bodyType = 'standard', poseId = 'stand
   const gltf = useLoader(GLTFLoader, MODEL_URL)
   const scene = useMemo(() => cloneSkeleton(gltf.scene) as Group, [gltf.scene])
   const restPose = useMemo(() => captureRestPose(scene), [scene])
+
+  useEffect(() => () => { disposeDirectorRig(scene) }, [scene])
 
   useLayoutEffect(() => { tint(scene, color) }, [color, scene])
 

@@ -1,4 +1,7 @@
-import { app, BrowserWindow, shell, ipcMain, nativeTheme, protocol, net } from 'electron'
+import { app, BrowserWindow, shell, ipcMain, nativeTheme, protocol, net, dialog } from 'electron'
+import { randomUUID } from 'node:crypto'
+import { IPC_CHANNELS } from '../../src/shared/ipc.channels'
+import type { CloseReadyResult } from '../../src/shared/ipc.types'
 import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
@@ -14,6 +17,7 @@ import { registerArtifactHandlers } from './ipc/artifact.handlers'
 import { registerComfyUIHandlers } from './ipc/comfyui.handlers'
 import { registerSettingsHandlers } from './ipc/settings.handlers'
 import { loadProject } from './services/project.store'
+import { flushFileOperations } from './services/atomic-file'
 
 const require = createRequire(import.meta.url)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -248,6 +252,44 @@ async function createWindow() {
   } else {
     win.loadFile(indexHtml)
   }
+
+  const windowForClose = win
+  let allowClose = false
+  let pendingClose: string | undefined
+  let closeTimer: ReturnType<typeof setTimeout> | undefined
+  const showCloseError = async (message: string) => {
+    pendingClose = undefined
+    clearTimeout(closeTimer)
+    if (windowForClose.isDestroyed()) return
+    windowForClose.webContents.send(IPC_CHANNELS.push.closeCancelled)
+    await dialog.showMessageBox(windowForClose, {
+      type: 'error', title: '修改尚未保存',
+      message: '未关闭项目，请保存成功后再退出。', detail: message,
+      buttons: ['继续编辑'],
+    })
+  }
+  const handleCloseReady = async (event: Electron.IpcMainEvent, result: CloseReadyResult) => {
+    if (event.sender !== windowForClose.webContents || !pendingClose || result?.requestId !== pendingClose) return
+    clearTimeout(closeTimer)
+    if (result.success === true) {
+      try { await flushFileOperations(); allowClose = true; windowForClose.close() }
+      catch (error) { void showCloseError(error instanceof Error ? error.message : String(error)) }
+    }
+    else void showCloseError(result.error || '无法确认保存结果，请重试。')
+  }
+  ipcMain.on(IPC_CHANNELS.app.closeReady, handleCloseReady)
+  windowForClose.on('close', (event) => {
+    if (allowClose || windowForClose.webContents.isDestroyed()) return
+    event.preventDefault()
+    if (pendingClose) return
+    pendingClose = randomUUID()
+    windowForClose.webContents.send(IPC_CHANNELS.push.beforeClose, pendingClose)
+    closeTimer = setTimeout(() => void showCloseError('等待保存超时，草稿仍保留在当前窗口。'), 30_000)
+  })
+  windowForClose.once('closed', () => {
+    clearTimeout(closeTimer)
+    ipcMain.removeListener(IPC_CHANNELS.app.closeReady, handleCloseReady)
+  })
 
   // Test actively push message to the Electron-Renderer
   win.webContents.on('did-finish-load', () => {

@@ -1,17 +1,7 @@
+import type { DIRECTOR_ELEMENT_KINDS, DIRECTOR_PRIMITIVE_KINDS } from './director-element-catalog'
+
 export type DirectorAspectRatio = '16:9' | '9:16' | '4:3' | '1:1'
-export type DirectorElementKind =
-  | 'actor'
-  | 'crowd'
-  | 'box'
-  | 'sphere'
-  | 'cylinder'
-  | 'wall'
-  | 'floor'
-  | 'platform'
-  | 'stairs'
-  | 'ramp'
-  | 'cone'
-  | 'capsule'
+export type DirectorElementKind = typeof DIRECTOR_ELEMENT_KINDS[number]
 export type DirectorPoseId =
   | 'stand'
   | 'walk'
@@ -135,7 +125,7 @@ export interface DirectorProject {
   updatedAt: number
 }
 
-export type DirectorSceneDraftPrimitiveKind = Exclude<DirectorElementKind, 'actor' | 'crowd'>
+export type DirectorSceneDraftPrimitiveKind = typeof DIRECTOR_PRIMITIVE_KINDS[number]
 export type DirectorSceneDraftPlacement = 'ground' | 'elevated'
 
 export interface DirectorSceneDraftPrimitive {

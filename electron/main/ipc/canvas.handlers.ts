@@ -35,7 +35,7 @@ export function registerCanvasHandlers(): void {
         return snapshot;
       } catch (err) {
         log.error('[Canvas] load failed:', err);
-        return null;
+        throw err;
       }
     },
   );

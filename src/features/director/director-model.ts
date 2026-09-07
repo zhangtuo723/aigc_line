@@ -14,6 +14,7 @@ import type {
   DirectorVec3,
 } from '../../shared/director.types'
 import { directorProjectSchema } from '../../shared/director-schema'
+import { directorElementCatalogEntry } from '../../shared/director-element-catalog'
 import { DIRECTOR_ACTOR_MODELS, DIRECTOR_BODY_PROFILES } from './actor-model'
 
 const clone = <T,>(value: T): T => structuredClone(value)
@@ -55,39 +56,14 @@ export const transform = (
 
 export function createDirectorElement(kind: DirectorElementKind, index: number): DirectorElement {
   const actorLike = kind === 'actor' || kind === 'crowd'
-  const nameByKind: Record<DirectorElementKind, string> = {
-    actor: '演员',
-    crowd: '群众阵列',
-    box: '立方体',
-    sphere: '球体',
-    cylinder: '圆柱体',
-    wall: '墙体',
-    floor: '地面',
-    platform: '平台',
-    stairs: '楼梯',
-    ramp: '斜坡',
-    cone: '圆锥体',
-    capsule: '胶囊体',
-  }
-  const scaleByKind: Partial<Record<DirectorElementKind, DirectorVec3>> = {
-    box: vec3(1.5, 0.8, 1.5),
-    sphere: vec3(0.8, 0.8, 0.8),
-    cylinder: vec3(0.65, 1.2, 0.65),
-    wall: vec3(4, 2.4, 0.15),
-    floor: vec3(8, 0.08, 8),
-    platform: vec3(3, 0.45, 3),
-    stairs: vec3(2.4, 1.5, 3.2),
-    ramp: vec3(2.4, 1.2, 3.2),
-    cone: vec3(1.2, 1.8, 1.2),
-    capsule: vec3(0.9, 1.8, 0.9),
-  }
+  const entry = directorElementCatalogEntry(kind)
   const colors = ['#4f8ef7', '#e0524d', '#f2a900', '#12b886', '#9c4dcc', '#00b8d9']
   return {
     id: directorId('element'),
     kind,
-    name: `${nameByKind[kind]} ${String(index + 1).padStart(2, '0')}`,
-    transform: transform(vec3((index % 4) * 1.4 - 2, 0, Math.floor(index / 4) * 1.6), vec3(), scaleByKind[kind] ?? vec3(1, 1, 1)),
-    color: kind === 'floor' ? '#596170' : kind === 'platform' || kind === 'stairs' || kind === 'ramp' ? '#8a8178' : colors[index % colors.length],
+    name: `${entry.name ?? entry.label} ${String(index + 1).padStart(2, '0')}`,
+    transform: transform(vec3((index % 4) * 1.4 - 2, 0, Math.floor(index / 4) * 1.6), vec3(), { ...entry.size }),
+    color: entry.color ?? colors[index % colors.length],
     visible: true,
     locked: false,
     poseId: actorLike ? 'stand' : undefined,
@@ -164,6 +140,18 @@ export function addDirectorElement(project: DirectorProject, element: DirectorEl
     ...project,
     elements: [...project.elements, element],
   }
+}
+
+/** Copy the global scene element without its reference-image ownership or Shot bindings. */
+export function duplicateDirectorElement(project: DirectorProject, elementId: string): DirectorProject {
+  const source = project.elements.find((element) => element.id === elementId)
+  if (!source || source.locked) return project
+  const duplicate = clone(source)
+  duplicate.id = directorId('element')
+  duplicate.name = `${source.name} 副本`
+  duplicate.transform.position.x += 1
+  delete duplicate.referenceNodeId
+  return addDirectorElement(project, duplicate)
 }
 
 export function updateDirectorElement(
@@ -439,6 +427,8 @@ export function upsertDirectorActorTrack(
 }
 
 export function removeDirectorActorTrack(project: DirectorProject, shotId: string, elementId: string): DirectorProject {
+  const element = project.elements.find((item) => item.id === elementId)
+  if (!element || element.locked) return project
   return {
     ...project,
     shots: project.shots.map((shot) => shot.id === shotId && !shot.locked
@@ -663,9 +653,7 @@ export type { DirectorActorModelId, DirectorBodyType }
 export function validateDirectorProject(project: DirectorProject): string[] {
   const issues: string[] = []
   const structure = directorProjectSchema.safeParse(project)
-  if (!structure.success && (!Array.isArray(project?.elements) || !Array.isArray(project?.shots))) {
-    return ['导演工程结构损坏']
-  }
+  if (!structure.success) return structure.error.issues.map((issue) => `工程字段 ${issue.path.join('.')}：${issue.message}`)
   if (project.version !== 2) issues.push('不支持的导演工程版本')
   if (project.fps !== 24) issues.push('导演工程必须使用 24fps')
   if (project.shots.length === 0) issues.push('至少需要一个镜头')

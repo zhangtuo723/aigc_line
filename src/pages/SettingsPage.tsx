@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { AppSettingsView, ComfyWorkflowInfo } from '../shared/ipc.types';
 import { useAppStore } from '../stores/app.store';
 import { listCachedComfyWorkflows } from '../shared/comfy-workflows';
+import { registerEditFlusher } from '../shared/pending-edits';
 
 const fieldClass = 'w-full rounded-lg border border-white/[0.1] bg-[#09090e] px-3.5 py-3 text-sm text-[#e8e6df] outline-none transition placeholder:text-[#4f4c59] focus:border-[#d4af37]/60 focus:ring-2 focus:ring-[#d4af37]/10';
 const DEFAULT_QWEN_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
@@ -54,6 +55,17 @@ export function SettingsPage() {
   const [googleAiTestResult, setGoogleAiTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [seedreamTestResult, setSeedreamTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [notice, setNotice] = useState('');
+  const [leaveOpen, setLeaveOpen] = useState(false);
+  const dirty = !!savedSettings && (
+    comfyuiBaseUrl !== savedSettings.comfyuiBaseUrl || qwenBaseUrl !== savedSettings.qwenBaseUrl
+    || qwenApiKey !== savedSettings.qwenApiKey || googleAiApiKey !== savedSettings.googleAiApiKey
+    || googleAiProxyUrl !== savedSettings.googleAiProxyUrl || seedreamBaseUrl !== savedSettings.seedreamBaseUrl
+    || seedreamApiKey !== savedSettings.seedreamApiKey || defaultImageWorkflowId !== savedSettings.defaultImageWorkflowId
+    || clearQwenApiKey || clearGoogleAiApiKey || clearSeedreamApiKey
+  );
+  useEffect(() => registerEditFlusher(async () => {
+    if (dirty) throw new Error('系统配置有未保存修改，请先保存配置或返回时放弃修改。');
+  }, 5), [dirty]);
 
   useEffect(() => {
     Promise.all([window.electronAPI.getAppSettings(), listCachedComfyWorkflows(true)])
@@ -135,6 +147,9 @@ export function SettingsPage() {
         throw new Error('Seedream API Key 保存后校验失败，输入内容已保留，请重试。');
       }
       setSavedSettings(next);
+      setComfyuiBaseUrl(next.comfyuiBaseUrl);
+      setQwenBaseUrl(next.qwenBaseUrl);
+      setDefaultImageWorkflowId(next.defaultImageWorkflowId);
       setQwenApiKey(next.qwenApiKey);
       setClearQwenApiKey(false);
       setGoogleAiApiKey(next.googleAiApiKey);
@@ -146,8 +161,10 @@ export function SettingsPage() {
       setNotice(next.qwenApiKeyConfigured || next.googleAiApiKeyConfigured || next.seedreamApiKeyConfigured
         ? '配置已保存，API Key 持久化校验通过'
         : '配置已保存，将在下一次生成或 Agent 对话时生效');
+      return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '保存失败');
+      return false;
     } finally {
       setSaving(false);
     }
@@ -203,12 +220,12 @@ export function SettingsPage() {
       <header className="relative flex items-center justify-between border-b border-white/[0.08] bg-[#0d0d14] px-8 py-4">
         <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-[#d4af37]/40 to-transparent" />
         <div className="flex items-center gap-4">
-          <button onClick={() => setCurrentPage('home')} className="flex h-10 w-10 items-center justify-center rounded-lg border border-white/[0.1] bg-white/[0.04] text-[#8a8794] transition hover:border-[#d4af37]/40 hover:text-[#e8c766]" title="返回首页">
+          <button onClick={() => dirty ? setLeaveOpen(true) : setCurrentPage('home')} className="flex h-10 w-10 items-center justify-center rounded-lg border border-white/[0.1] bg-white/[0.04] text-[#8a8794] transition hover:border-[#d4af37]/40 hover:text-[#e8c766]" title="返回首页">
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M15 19l-7-7 7-7" /></svg>
           </button>
           <div>
             <h1 className="font-display text-lg font-semibold tracking-[0.22em] text-[#e8c766]">系统配置</h1>
-            <p className="mt-1 text-[11px] tracking-[0.22em] text-[#777482]">图片、视频与分析服务</p>
+            <p className="mt-1 text-xs text-[#9a97a3]">{dirty ? '有未保存修改' : '图片、视频与分析服务'}</p>
           </div>
         </div>
         <button onClick={handleSave} disabled={saving || loading} className="rounded-lg border border-[#d4af37]/50 bg-gradient-to-b from-[#e8c766] to-[#b08d2a] px-6 py-2.5 text-[13px] font-semibold tracking-widest text-[#241a05] transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50">
@@ -225,7 +242,7 @@ export function SettingsPage() {
           <SettingsCard title="ComfyUI 服务" description="本地图片工作流、视频生成与视频放大请求发送到此服务器。修改后可先测试连接。">
             <label className="text-xs tracking-wider text-[#9a97a3]">HTTP 地址</label>
             <div className="mt-2 flex gap-3">
-              <input value={comfyuiBaseUrl} onChange={(event) => { setComfyuiBaseUrl(event.target.value); setTestResult(null); }} className={fieldClass} placeholder="http://127.0.0.1:8188" spellCheck={false} />
+              <input aria-label="ComfyUI HTTP 地址" value={comfyuiBaseUrl} onChange={(event) => { setComfyuiBaseUrl(event.target.value); setTestResult(null); }} className={fieldClass} placeholder="http://127.0.0.1:8188" spellCheck={false} />
               <button onClick={handleTest} disabled={testing || !comfyuiBaseUrl.trim()} className="shrink-0 rounded-lg border border-white/[0.12] bg-white/[0.05] px-5 text-sm text-[#d7d4cb] transition hover:border-[#d4af37]/40 hover:text-[#e8c766] disabled:opacity-40">
                 {testing ? '测试中…' : '测试连接'}
               </button>
@@ -242,7 +259,7 @@ export function SettingsPage() {
             <div className="grid gap-5">
               <div>
                 <label className="text-xs tracking-wider text-[#9a97a3]">OpenAI 兼容 API 地址</label>
-                <input value={qwenBaseUrl} onChange={(event) => { setQwenBaseUrl(event.target.value); setQwenTestResult(null); }} className={`${fieldClass} mt-2`} placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" spellCheck={false} />
+                <input aria-label="Qwen API 地址" value={qwenBaseUrl} onChange={(event) => { setQwenBaseUrl(event.target.value); setQwenTestResult(null); }} className={`${fieldClass} mt-2`} placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" spellCheck={false} />
               </div>
               <div>
                 <label className="text-xs tracking-wider text-[#9a97a3]">固定模型</label>
@@ -254,7 +271,7 @@ export function SettingsPage() {
                   {savedSettings?.qwenApiKeyConfigured && !clearQwenApiKey && <span className="text-[11px] text-emerald-400">已安全配置</span>}
                 </div>
                 <div className="relative mt-2">
-                  <input type={showQwenApiKey ? 'text' : 'password'} value={qwenApiKey} onChange={(event) => { setQwenApiKey(event.target.value); setClearQwenApiKey(false); setQwenTestResult(null); }} className={`${fieldClass} pr-16`} placeholder="输入 API Key" autoComplete="off" spellCheck={false} />
+                  <input type={showQwenApiKey ? 'text' : 'password'} aria-label="Qwen API Key" value={qwenApiKey} onChange={(event) => { setQwenApiKey(event.target.value); setClearQwenApiKey(false); setQwenTestResult(null); }} className={`${fieldClass} pr-16`} placeholder="输入 API Key" autoComplete="off" spellCheck={false} />
                   <button type="button" onClick={() => setShowQwenApiKey((value) => !value)} className="absolute inset-y-0 right-0 px-4 text-xs text-[#777482] hover:text-[#e8c766]">{showQwenApiKey ? '隐藏' : '显示'}</button>
                 </div>
                 {savedSettings?.qwenApiKeyConfigured && (
@@ -282,7 +299,7 @@ export function SettingsPage() {
                   {savedSettings?.googleAiApiKeyConfigured && !clearGoogleAiApiKey && <span className="text-[11px] text-emerald-400">已安全配置</span>}
                 </div>
                 <div className="relative mt-2">
-                  <input type={showGoogleAiApiKey ? 'text' : 'password'} value={googleAiApiKey} onChange={(event) => { setGoogleAiApiKey(event.target.value); setClearGoogleAiApiKey(false); setGoogleAiTestResult(null); }} className={`${fieldClass} pr-16`} placeholder="输入 Google AI Studio API Key" autoComplete="off" spellCheck={false} />
+                  <input type={showGoogleAiApiKey ? 'text' : 'password'} aria-label="Google AI Studio API Key" value={googleAiApiKey} onChange={(event) => { setGoogleAiApiKey(event.target.value); setClearGoogleAiApiKey(false); setGoogleAiTestResult(null); }} className={`${fieldClass} pr-16`} placeholder="输入 Google AI Studio API Key" autoComplete="off" spellCheck={false} />
                   <button type="button" onClick={() => setShowGoogleAiApiKey((value) => !value)} className="absolute inset-y-0 right-0 px-4 text-xs text-[#777482] hover:text-[#e8c766]">{showGoogleAiApiKey ? '隐藏' : '显示'}</button>
                 </div>
                 {savedSettings?.googleAiApiKeyConfigured && (
@@ -294,7 +311,7 @@ export function SettingsPage() {
               </div>
               <div>
                 <label className="text-xs tracking-wider text-[#9a97a3]">Google API 代理（可选）</label>
-                <input value={googleAiProxyUrl} onChange={(event) => { setGoogleAiProxyUrl(event.target.value); setGoogleAiTestResult(null); }} className={`${fieldClass} mt-2`} placeholder="例如 http://127.0.0.1:7890" spellCheck={false} />
+                <input aria-label="Google AI 代理地址" value={googleAiProxyUrl} onChange={(event) => { setGoogleAiProxyUrl(event.target.value); setGoogleAiTestResult(null); }} className={`${fieldClass} mt-2`} placeholder="例如 http://127.0.0.1:7890" spellCheck={false} />
                 <p className="mt-2 text-[11px] leading-5 text-[#5f5c68]">留空时使用 Electron/系统网络配置；无法直连 Google 时可填写本地 HTTP、HTTPS 或 SOCKS 代理。</p>
               </div>
               <div className="flex items-center gap-3">
@@ -311,7 +328,7 @@ export function SettingsPage() {
             <div className="grid gap-5">
               <div>
                 <label className="text-xs tracking-wider text-[#9a97a3]">方舟 API Base URL</label>
-                <input value={seedreamBaseUrl} onChange={(event) => { setSeedreamBaseUrl(event.target.value); setSeedreamTestResult(null); }} className={`${fieldClass} mt-2`} placeholder={DEFAULT_SEEDREAM_BASE_URL} spellCheck={false} />
+                <input aria-label="火山方舟 API 地址" value={seedreamBaseUrl} onChange={(event) => { setSeedreamBaseUrl(event.target.value); setSeedreamTestResult(null); }} className={`${fieldClass} mt-2`} placeholder={DEFAULT_SEEDREAM_BASE_URL} spellCheck={false} />
                 <p className="mt-2 text-[11px] leading-5 text-[#5f5c68]">普通 API 填 <span className="font-mono">…/api/v3</span>，Agent Plan 填 <span className="font-mono">…/api/plan/v3</span>；无需附加 <span className="font-mono">/images/generations</span>，粘贴完整地址时会自动移除。</p>
               </div>
               <div>
@@ -320,7 +337,7 @@ export function SettingsPage() {
                   {savedSettings?.seedreamApiKeyConfigured && !clearSeedreamApiKey && <span className="text-[11px] text-emerald-400">已保存</span>}
                 </div>
                 <div className="relative mt-2">
-                  <input type={showSeedreamApiKey ? 'text' : 'password'} value={seedreamApiKey} onChange={(event) => { setSeedreamApiKey(event.target.value); setClearSeedreamApiKey(false); setSeedreamTestResult(null); }} className={`${fieldClass} pr-16`} placeholder="输入火山方舟 API Key" autoComplete="off" spellCheck={false} />
+                  <input type={showSeedreamApiKey ? 'text' : 'password'} aria-label="火山方舟 API Key" value={seedreamApiKey} onChange={(event) => { setSeedreamApiKey(event.target.value); setClearSeedreamApiKey(false); setSeedreamTestResult(null); }} className={`${fieldClass} pr-16`} placeholder="输入火山方舟 API Key" autoComplete="off" spellCheck={false} />
                   <button type="button" onClick={() => setShowSeedreamApiKey((value) => !value)} className="absolute inset-y-0 right-0 px-4 text-xs text-[#777482] hover:text-[#e8c766]">{showSeedreamApiKey ? '隐藏' : '显示'}</button>
                 </div>
                 {savedSettings?.seedreamApiKeyConfigured && (
@@ -360,6 +377,17 @@ export function SettingsPage() {
           </SettingsCard>
         </div>
       </main>
+      {leaveOpen && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-6 app-no-drag">
+        <section role="dialog" aria-modal="true" aria-label="未保存的配置" className="w-full max-w-md space-y-5 rounded-2xl border border-white/15 bg-[#17171e] p-6">
+          <h2 className="text-base font-semibold">配置尚未保存</h2>
+          <p className="text-sm text-white/65">保存后返回，或放弃这次修改。</p>
+          <div className="flex flex-wrap justify-end gap-3 text-sm">
+            <button autoFocus onClick={() => setLeaveOpen(false)} className="rounded-lg border border-white/15 px-3 py-2">继续编辑</button>
+            <button disabled={saving} onClick={() => setCurrentPage('home')} className="rounded-lg border border-white/15 px-3 py-2">放弃修改</button>
+            <button disabled={saving} onClick={async () => { if (await handleSave()) setCurrentPage('home'); else setLeaveOpen(false); }} className="rounded-lg bg-[#d4af37] px-3 py-2 text-black">{saving ? '保存中…' : '保存后返回'}</button>
+          </div>
+        </section>
+      </div>}
     </div>
   );
 }
