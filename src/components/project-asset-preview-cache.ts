@@ -4,6 +4,11 @@ export class AssetPreviewCache {
   private bytes = 0
   constructor(private limit = 80, private byteLimit = 8 * 1024 * 1024) {}
 
+  /** Read during initial render without changing recency. Effects use get(). */
+  peek(key: string): string | undefined {
+    return this.entries.get(key)
+  }
+
   get(key: string): string | undefined {
     const value = this.entries.get(key)
     if (value !== undefined) { this.entries.delete(key); this.entries.set(key, value) }

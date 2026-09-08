@@ -192,3 +192,9 @@
 .react-flow__controls-button:hover {
   background: rgba(255, 255, 255, 0.08);
 }
+
+/* Isolate the changing SVG minimap mask from the large graph's raster layer. */
+.react-flow__minimap {
+  contain: layout paint;
+  transform: translateZ(0);
+}

@@ -1,5 +1,11 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AssetPreviewCache, AssetPreviewPool } from '../src/components/project-asset-preview-cache'
+import { beginCanvasInteraction, endCanvasInteraction, resetCanvasInteraction, waitForCanvasIdle } from '../src/components/canvas-interaction'
+
+afterEach(() => {
+  resetCanvasInteraction()
+  vi.useRealTimers()
+})
 
 describe('asset thumbnail resource bounds', () => {
   it('uses complete project URLs and evicts least recently used thumbnails within both limits', () => {
@@ -34,5 +40,44 @@ describe('asset thumbnail resource bounds', () => {
     expect(await final).toBe('ready')
     expect(skipped).not.toHaveBeenCalled()
     expect(last).toHaveBeenCalledOnce()
+  })
+
+  it('reads an initial cached image without making abandoned renders change eviction order', () => {
+    const cache = new AssetPreviewCache(2, 100)
+    cache.set('first', 'poster one')
+    cache.set('second', 'poster two')
+    expect(cache.peek('first')).toBe('poster one')
+    cache.set('third', 'poster three')
+    expect(cache.peek('first')).toBeUndefined()
+    expect(cache.peek('second')).toBe('poster two')
+  })
+
+  it('releases idle-waiting decoder slots on cancellation and resumes remaining work after the drag settles', async () => {
+    vi.useFakeTimers()
+    const pool = new AssetPreviewPool(1)
+    const departed = new AbortController()
+    const remaining = new AbortController()
+    const decode = vi.fn(async () => 'poster')
+    beginCanvasInteraction('viewport')
+    const cancelled = pool.run(async () => {
+      await waitForCanvasIdle(departed.signal)
+      return decode()
+    }, departed.signal)
+    const rejection = expect(cancelled).rejects.toMatchObject({ name: 'AbortError' })
+    const next = pool.run(async () => {
+      await waitForCanvasIdle(remaining.signal)
+      return decode()
+    }, remaining.signal)
+    await Promise.resolve()
+    departed.abort()
+    await rejection
+    await vi.advanceTimersByTimeAsync(0)
+    expect(decode).not.toHaveBeenCalled()
+    endCanvasInteraction('viewport')
+    await vi.advanceTimersByTimeAsync(179)
+    expect(decode).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(await next).toBe('poster')
+    expect(decode).toHaveBeenCalledOnce()
   })
 })

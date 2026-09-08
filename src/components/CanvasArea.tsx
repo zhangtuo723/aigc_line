@@ -1,9 +1,7 @@
 import { normalizeVideoDuration } from '../shared/video-duration'
-import { createContext, lazy, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent } from 'react'
+import { createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent } from 'react'
 import {
   addEdge,
-  Background,
-  BackgroundVariant,
   ConnectionLineType,
   Controls,
   Handle,
@@ -16,7 +14,7 @@ import {
   useEdgesState,
   useEdges,
   useNodesState,
-  useNodes,
+  useStore,
   useReactFlow,
   type Connection,
   type Edge,
@@ -24,6 +22,7 @@ import {
   type NodeChange,
   type NodeProps,
   type Viewport,
+  type ReactFlowState,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { useAppStore } from '../stores/app.store'
@@ -50,11 +49,16 @@ import {
 } from '../shared/node-capabilities'
 import { buildCanvasNodeDetail, buildCanvasOverview } from '../shared/canvas-read-model'
 import { CanvasReferenceIndex } from '../shared/canvas-reference-index'
+import { retainCanvasNodeContent } from '../shared/canvas-node-content'
 import { projectSnapshotWriter } from '../shared/snapshot-persistence'
 import { registerEditFlusher } from '../shared/pending-edits'
 import { EditHistory } from '../shared/edit-history'
 import { vacantNodePosition } from '../shared/canvas-placement'
 import { ProjectAssetPreview } from './ProjectAssetPreview'
+import { CanvasImagePreview, CanvasVideoPreview } from './CanvasMediaPreview'
+import { CanvasBackground } from './CanvasBackground'
+import { CanvasEdge } from './CanvasEdge'
+import { beginCanvasInteraction, endCanvasInteraction, resetCanvasInteraction } from './canvas-interaction'
 import { orderImageReferences } from '../shared/image-references'
 import type { DirectorActorModelId, DirectorAspectRatio, DirectorBodyType, DirectorPoseId, DirectorProject, DirectorShot, DirectorVec3 } from '../shared/director.types'
 import { directorElementKindSchema, directorProjectSchema, directorSceneDraftSchema } from '../shared/director-schema'
@@ -419,8 +423,14 @@ function EmptyPreview({ kind }: { kind: 'image' | 'video' }) {
   )
 }
 
+const selectNodeContent = (state: ReactFlowState) => state.nodes as StoryNode[]
+const equalNodeContent = (previous: StoryNode[], next: StoryNode[]) => retainCanvasNodeContent(previous, next) === previous
+const beginNodeInteraction = () => beginCanvasInteraction('nodes')
+const endNodeInteraction = () => endCanvasInteraction('nodes')
+const beginViewportInteraction = () => beginCanvasInteraction('viewport')
+
 function PromptPanel({ id, kind }: { id: string; kind: 'image' | 'video' }) {
-  const nodes = useNodes<StoryNode>()
+  const nodes = useStore(selectNodeContent, equalNodeContent)
   const edges = useEdges<StoryEdge>()
   const { setNodes, deleteElements } = useReactFlow<StoryNode, StoryEdge>()
   const currentProject = useAppStore((state) => state.currentProject)
@@ -961,7 +971,7 @@ const UPSCALE_QUALITY_LABELS: Record<(typeof UPSCALE_QUALITIES)[number], string>
 }
 
 function UpscalePanel({ id }: { id: string }) {
-  const nodes = useNodes<StoryNode>()
+  const nodes = useStore(selectNodeContent, equalNodeContent)
   const edges = useEdges<StoryEdge>()
   const { setNodes, deleteElements } = useReactFlow<StoryNode, StoryEdge>()
   const [scaleMenuOpen, setScaleMenuOpen] = useState(false)
@@ -1136,7 +1146,7 @@ function NodeDeleteButton({ id }: { id: string }) {
   )
 }
 
-function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
+const StoryNodeCard = memo(function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
   const references = useContext(ReferenceIndexContext)!
   const referenceId = data.kind === 'director' || data.kind === 'image-editor' ? id : ''
   const subscribeReferences = useCallback((listener: () => void) => references.subscribe(referenceId, listener), [references, referenceId])
@@ -1581,30 +1591,9 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
           <div className="relative overflow-hidden rounded-[11px] bg-[#202023] transition-[height] duration-200" style={{ aspectRatio: aspectRatioValue }}>
             {data.preview ? (
               data.kind === 'image' ? (
-                <img src={data.preview} alt={data.title} draggable={false} className="h-full w-full object-contain" />
+                <CanvasImagePreview url={data.preview} name={data.title} selected={selected} />
               ) : (
-                <video
-                  src={data.preview}
-                  className="nodrag nowheel h-full w-full cursor-auto object-contain"
-                  controls
-                  playsInline
-                  preload="metadata"
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onDoubleClick={(event) => event.stopPropagation()}
-                  onLoadedMetadata={() => {
-                    if (!data.generationError) return
-                    setNodes((nodes) => nodes.map((node) => node.id === id
-                      ? { ...node, data: { ...node.data, generationError: '' } }
-                      : node))
-                  }}
-                  onError={(event) => {
-                    const mediaError = event.currentTarget.error
-                    const detail = mediaError?.message || `媒体错误码 ${mediaError?.code ?? '未知'}`
-                    setNodes((nodes) => nodes.map((node) => node.id === id
-                      ? { ...node, data: { ...node.data, generationStatus: 'error', generationError: `视频加载失败：${detail}` } }
-                      : node))
-                  }}
-                />
+                <CanvasVideoPreview key={data.preview} url={data.preview} name={data.title} />
               )
             ) : (
               <EmptyPreview kind={visualMediaKind} />
@@ -1675,9 +1664,10 @@ function StoryNodeCard({ id, data, selected }: NodeProps<StoryNode>) {
       )}
     </div>
   )
-}
+}, (previous, next) => previous.id === next.id && previous.data === next.data && previous.selected === next.selected)
 
 const nodeTypes = { storyNode: StoryNodeCard }
+const edgeTypes = { default: CanvasEdge }
 
 const makeNode = (kind: StoryNodeKind, index: number, position?: { x: number; y: number }): StoryNode => ({
   id: `${kind}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
@@ -1734,7 +1724,7 @@ const makeLinkedEdge = (
   target,
   sourceHandle,
   type: 'default',
-  animated: true,
+  animated: false,
   markerEnd: { type: MarkerType.ArrowClosed, color: '#8aa5c2', width: 14, height: 14 },
   style: { stroke: '#8aa5c2', strokeWidth: 1.5 },
 })
@@ -1745,6 +1735,9 @@ function CanvasFlow() {
   const artifacts = useAppStore((state) => state.artifacts)
   const folderPath = currentProject?.folderPath
   const [nodes, setNodes, onNodesChange] = useNodesState<StoryNode>([])
+  const contentNodesRef = useRef(nodes)
+  const contentNodes = retainCanvasNodeContent(contentNodesRef.current, nodes)
+  useLayoutEffect(() => { contentNodesRef.current = contentNodes }, [contentNodes])
   const [edges, setEdges, onEdgesChange] = useEdgesState<StoryEdge>([])
   const [dismissedArtifacts, setDismissedArtifacts] = useState<Record<string, number>>({})
   const dismissedArtifactsRef = useRef(dismissedArtifacts)
@@ -1782,6 +1775,21 @@ function CanvasFlow() {
     type: 'react-flow', version: 4, nodes: snapshotNodes, edges: edgesRef.current,
     viewport: getViewport(), dismissedArtifacts: dismissedArtifactsRef.current,
   }), [getViewport])
+  const endViewportInteraction = useCallback(() => {
+    endCanvasInteraction('viewport')
+    if (readyToSaveRef.current) writer.schedule(snapshot())
+  }, [snapshot, writer])
+  useEffect(() => {
+    window.addEventListener('pointerup', endNodeInteraction)
+    window.addEventListener('pointercancel', resetCanvasInteraction)
+    window.addEventListener('blur', resetCanvasInteraction)
+    return () => {
+      window.removeEventListener('pointerup', endNodeInteraction)
+      window.removeEventListener('pointercancel', resetCanvasInteraction)
+      window.removeEventListener('blur', resetCanvasInteraction)
+      resetCanvasInteraction()
+    }
+  }, [])
   const persistNode = useCallback(async (nodeId: string, patch: Partial<StoryNodeData>) => {
     if (!readyToSaveRef.current || loadedFolderRef.current !== folderPath) throw new Error('画布未成功加载，暂时不能保存')
     if (!nodesRef.current.some((node) => node.id === nodeId)) throw new Error('源节点已不存在')
@@ -1792,7 +1800,7 @@ function CanvasFlow() {
     await writer.flush()
   }, [folderPath, setNodes, snapshot, writer])
 
-  useLayoutEffect(() => { referenceIndex.update(nodes, edges) }, [referenceIndex, nodes, edges])
+  useLayoutEffect(() => { referenceIndex.update(contentNodes, edges) }, [referenceIndex, contentNodes, edges])
   useEffect(() => {
     const unregister = registerEditFlusher(writer.flush)
     return () => { unregister(); void writer.flush().catch(() => {}) }
@@ -2477,7 +2485,7 @@ function CanvasFlow() {
               ? { ...node, data: { ...node.data, generationStatus: 'idle' as const, generationError: '' } }
               : node
           })
-          const restoredEdges = migrated.edges.map((edge) => ({ ...edge, type: 'default' as const }))
+          const restoredEdges = migrated.edges.map((edge) => ({ ...edge, type: 'default' as const, animated: false }))
           nodesRef.current = restoredNodes
           edgesRef.current = restoredEdges
           setNodes(restoredNodes)
@@ -2529,6 +2537,7 @@ function CanvasFlow() {
 
   useEffect(() => {
     if (!readyToSaveRef.current || artifacts.length === 0) return
+    const nodes = contentNodes
     const additions: StoryNode[] = []
     const linkedEdges: StoryEdge[] = []
 
@@ -2623,7 +2632,7 @@ function CanvasFlow() {
         return freshEdges.length > 0 ? [...current, ...freshEdges] : current
       })
     }
-  }, [artifacts, dismissedArtifacts, nodes, setEdges, setNodes])
+  }, [artifacts, contentNodes, dismissedArtifacts, setEdges, setNodes])
 
   const handleNodesChange = useCallback((changes: NodeChange<StoryNode>[]) => {
     // React Flow listens for Delete/Backspace globally. Full-screen node editors
@@ -2645,7 +2654,7 @@ function CanvasFlow() {
       useAppStore.getState().removeCanvasNodeReference(nodeId)
     }
 
-    const removedArtifacts = nodes
+    const removedArtifacts = nodesRef.current
       .filter((node) => removedIds.has(node.id) && node.data.artifactId)
       .map((node) => node.data.artifactId!)
     if (removedArtifacts.length > 0) {
@@ -2661,7 +2670,7 @@ function CanvasFlow() {
 
     onNodesChange(safeChanges)
     setEdges((current) => current.filter((edge) => !removedIds.has(edge.source) && !removedIds.has(edge.target)))
-  }, [artifacts, nodes, onNodesChange, setEdges])
+  }, [artifacts, onNodesChange, setEdges])
 
   const onConnect = useCallback((connection: Connection) => {
     if (!connection.source || !connection.target || connection.source === connection.target) return
@@ -2762,10 +2771,16 @@ function CanvasFlow() {
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         onNodesChange={handleNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
-        onMoveEnd={() => { if (readyToSaveRef.current) writer.schedule(snapshot()) }}
+        onMoveStart={beginViewportInteraction}
+        onMoveEnd={endViewportInteraction}
+        onNodeDragStart={beginNodeInteraction}
+        onNodeDragStop={endNodeInteraction}
+        onSelectionDragStart={beginNodeInteraction}
+        onSelectionDragStop={endNodeInteraction}
         onDragOver={handleAssetDragOver}
         onDrop={handleAssetDrop}
         selectionOnDrag={interactionMode === 'select'}
@@ -2782,7 +2797,7 @@ function CanvasFlow() {
         onlyRenderVisibleElements
         fitViewOptions={{ padding: 0.2 }}
       >
-        <Background color="rgba(255,255,255,0.16)" gap={18} size={1} variant={BackgroundVariant.Dots} />
+        <CanvasBackground />
         <Controls position="bottom-left" showInteractive={false} />
         <MiniMap
           position="bottom-right"
