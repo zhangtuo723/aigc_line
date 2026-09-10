@@ -22,6 +22,8 @@ pip install pyJianYingDraft
 ## 核心概念
 
 - 时间单位是**微秒**。用 `trange("0s", "5s")` 构造时间范围（第二参数是**持续时长**不是结束时间），`tim("1m30s")` 转微秒，`SEC` 为 1 秒的微秒数。
+  - ⚠️ **`trange` 的数字参数=微秒，不是秒**：`trange(0, 5)` = 起点 0、时长 **5 微秒**（≈0s），`trange(0, 5*SEC)` 才是 5 秒。**不要直接把"秒"数字传给 `trange`**。
+  - 顺序排 5/10/15s 片段时长也同理：`trange(cursor*SEC, dur*SEC)`（`cursor`/`dur` 以秒累加），或统一用字符串 `trange(f"{cursor}s", f"{dur}s")`。
 - 流程固定为：`DraftFolder` → `create_draft()` 得 `ScriptFile` → 建轨道 → 造片段 → `add_segment` → `save()`。
 - 轨道用 `TrackSpec(TrackType.video, "名称")` 描述，类型有 video / audio / text / effect / filter / sticker。`append_track` 追加到最上层（后来居上），`insert_track` 可指定层次。
 - 同一类型轨道多于一条时，`add_segment` 必须指定轨道名。
@@ -93,6 +95,7 @@ script.save()
 
 ## 常见坑
 
+- **`trange` 传秒而不是微秒 → 时间轴看似空轨**：`trange(0, 5)` 时长是 **5 微秒**≈0s，所有片段长度≈0、叠在起点，剪映里下方时间轴看不到视频。必须 `trange(0, 5*SEC)` 或 `trange("0s","5s")`。拼多段时用 `trange(cursor*SEC, dur*SEC)`，`cursor` 为已累积的秒数。
 - `trange` 第二参数是**持续时长**；`source_timerange` 不能超出素材实际长度，否则抛 `ValueError`。
 - 转场加在**前一个**视频片段上；每片段只能有一个转场、一个蒙版、一个淡入淡出、一个色度抠图。
 - 文本同时加出入场动画和循环动画时，**先加出入场再加循环**；视频的组合动画不能与出入场动画共存。
