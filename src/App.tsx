@@ -12,6 +12,15 @@ function App() {
   const loadProjects = useAppStore((state) => state.loadProjects);
 
   useEffect(() => {
+    // Wait for the committed React UI to paint before fading out the preload screen.
+    let paintedFrame = 0;
+    const frame = requestAnimationFrame(() => {
+      paintedFrame = requestAnimationFrame(() => window.postMessage({ payload: 'removeLoading' }, '*'));
+    });
+    return () => { cancelAnimationFrame(frame); cancelAnimationFrame(paintedFrame); };
+  }, []);
+
+  useEffect(() => {
     void loadProjects({ restoreLastOpened: true });
   }, [loadProjects]);
 

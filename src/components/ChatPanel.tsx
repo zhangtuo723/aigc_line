@@ -180,7 +180,7 @@ export function ChatPanel() {
           <div className="flex h-full flex-col items-center justify-center text-[#6d6a78]">
             <div className="relative">
               <div className="absolute inset-0 -m-4 rounded-full bg-[#d4af37]/10 blur-2xl" />
-              <img src={`${import.meta.env.BASE_URL}logo.svg`} alt="" className="relative h-14 w-14 rounded-2xl opacity-90" />
+              <img src={`${import.meta.env.BASE_URL}app-icon.png`} alt="" className="relative h-14 w-14 rounded-2xl opacity-90" />
             </div>
             <p className="mt-5 font-display text-sm tracking-[0.25em] text-[#e8c766]">AIGC CANVAS</p>
             <p className="mt-2 max-w-[220px] text-center text-xs leading-relaxed text-[#6d6a78]">

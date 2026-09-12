@@ -21,6 +21,7 @@
     }
   ],
   "mac": {
+    "icon": "resources/app-icons/icon.icns",
     "artifactName": "${productName}_${version}.${ext}",
     "target": [
       "dmg",
@@ -28,6 +29,7 @@
     ]
   },
   "win": {
+    "icon": "resources/app-icons/icon.ico",
     "target": [
       {
         "target": "nsis",
@@ -39,6 +41,8 @@
     "artifactName": "${productName}_${version}.${ext}"
   },
   "nsis": {
+    "installerIcon": "resources/app-icons/icon.ico",
+    "uninstallerIcon": "resources/app-icons/icon.ico",
     "oneClick": false,
     "perMachine": false,
     "allowToChangeInstallationDirectory": true,

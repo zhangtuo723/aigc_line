@@ -226,7 +226,7 @@ async function createWindow() {
     },
     width: 1400,
     height: 900,
-    icon: path.join(process.env.VITE_PUBLIC || '', 'favicon.ico'),
+    icon: path.join(process.env.VITE_PUBLIC || '', process.platform === 'win32' ? 'app-icon.ico' : 'app-icon.png'),
     webPreferences: {
       preload,
       // Warning: Enable nodeIntegration and disable contextIsolation is not secure in production

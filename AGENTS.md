@@ -70,8 +70,13 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Code / Codex Agent（对话）�
 | `test/` | vitest 单元测试 + `test/e2e/` Playwright 端到端测试 |
 | `dist/` `dist-electron/` `build/` | 构建产物，勿手改 |
 | `public/` | 静态资源（logo 等） |
+| `resources/app-icons/` | 应用品牌图标：生图源文件、PNG/ICO/ICNS、生成提示词与 Windows PowerShell 格式导出脚本；打包配置显式引用这里，不修改 `build/` 模板资源 |
 
 ## 现有功能
+
+- **启动加载页**：`electron/preload/startup-screen.ts` 在 React 加载前显示与主界面一致的深色黑金品牌屏，使用本地 `app-icon.png`、品牌文案和不表示百分比的加载指示，保留顶部窗口拖动区，支持窄屏和减少动态效果偏好。React 首次提交并绘制后由 `App.tsx` 发出就绪消息，启动屏淡出并清理监听/计时器；不再在 `root.render()` 后立即隐藏，也不再满 5 秒强制露出空白页。超过 15 秒未收到就绪消息时显示较慢提示和“重新加载”，不会伪造加载完成。
+
+- **应用图标**：黑金画框与播放标志统一用于安装包、应用窗口、标题栏、首页和聊天空状态。`resources/app-icons/icon.ico` 包含 16–256px 多尺寸，`icon.icns` 包含 16–1024px 多尺寸，`icon.png` 为 1024px；界面使用 `public/app-icon.png`（256px），Windows 窗口使用 `public/app-icon.ico`。源图更新后用 Windows PowerShell 运行 `resources/app-icons/export-icons.ps1` 同步导出，保留透明通道；原 `public/logo.svg` / `favicon.ico` 与 `build/icon.*` 只作为旧资源保留，不再用于主应用图标。
 
 - **项目管理**：新建项目弹窗选择名称、Claude Code / Codex、模型（动态列表/默认/自定义）及目录；项目索引与 `.aigc-line/manifest.json` 保存 `agent.provider/model`，缺失字段的历史项目默认 Claude Code。模型列表加载期间显示转圈动画与加载提示，并暂时禁用模型下拉框；完成或失败后恢复选择。模型列表使用 `chat:listModels` IPC；Claude 从 SDK `supportedModels()` 获取，Codex SDK 无模型发现方法，仅列表查询使用只读 app-server `model/list`。同目录重复创建或已有清单时拒绝覆盖；创建、删除、设置最近打开项目及索引读取通过同一事务队列，整个读改写过程串行；目录/清单写入成功后才更新索引。创建/打开/删除项目，每项目一个本地目录，聊天历史、画布快照、生成产物都持久化在项目内。应用启动时恢复退出前仍打开的项目；用户点击项目页“返回”时，先刷新待保存编辑，再通过 `project:close` IPC 按项目 ID 在索引事务中清除 `lastOpenedId`，成功后清空当前工作区并回首页，下次启动不再自动打开；保存或索引写入失败时保留项目并提示重试，旧项目关闭请求不得清除新项目的恢复目标。普通列表刷新或删除项目时保持当前页面，不触发自动导航。首页使用最大 1920px 的响应式项目网格，突出项目名称，分层展示目录、Agent、模型和创建日期；支持按名称/目录/Agent/模型搜索，默认按最新创建排序，也可按名称排序；打开与删除按钮独立，操作失败在首页显示错误。
 - **聊天持久化**：每个项目使用 `.aigc-line/chat-events.jsonl` 追加保存 `message.created` / `message.replaced` 事件，并按项目串行写入；首次加载时重放为消息列表，之后维护消息 ID/序号索引，普通更新不再完整读取日志；文件签名变化时重新校验，最多缓存 8 个项目。崩溃造成的末行不完整可忽略并在下次写入前备份、修复；中间行损坏必须明确报错，不得静默显示为空。旧 `chat-history.json` 不再读取或迁移。
@@ -191,6 +196,8 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Code / Codex Agent（对话）�
 - **TransformControls 绑定对象**：必须用 `object={objectRef}` 直接绑定带 Transform 的场景元素；不要把已定位元素作为 children 包进 TransformControls 的内部 wrapper，否则实际拖动的是外层、持久化读取的是内层，重新选择元素时会恢复旧位置。
 
 ## 常用命令
+
+- **自动打包**：`.github/workflows/build.yml` 只构建 Windows 和 macOS，矩阵设置 `fail-fast: false`，单个平台失败不得取消另一个平台。CI 沿用 `npm install`，React / React DOM 固定为本地已验证的 `19.2.7`，禁止自动漂移至当前 `@react-three/fiber` 不接受的 React 19.3；更新 React 时同时核对 Fiber 的 peer 范围。打包显式传入 `--publish never`，产物仅上传 Actions Artifacts（保留 5 天），不自动发布 GitHub Release。
 
 ```bash
 pnpm dev          # 开发（vite + electron 热重载）

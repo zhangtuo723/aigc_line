@@ -57,7 +57,7 @@ export function HomePage() {
       {creating && <CreateProjectDialog onClose={() => setCreating(false)} />}
       <header className="flex shrink-0 items-center justify-between gap-4 border-b border-white/[0.07] bg-[#0d0d14] px-6 py-4 lg:px-12">
         <div className="flex min-w-0 items-center gap-3">
-          <img src={`${import.meta.env.BASE_URL}logo.svg`} alt="" className="h-9 w-9 rounded-lg" />
+          <img src={`${import.meta.env.BASE_URL}app-icon.png`} alt="" className="h-9 w-9 rounded-lg" />
           <div>
             <h1 className="font-display text-base font-semibold tracking-[0.18em] text-[#e8c766]">AIGC CANVAS</h1>
             <p className="mt-0.5 text-[11px] tracking-widest text-[#8a8794]">AI 分镜视频创作画布</p>
