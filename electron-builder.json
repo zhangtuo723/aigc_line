@@ -36,9 +36,19 @@
         "arch": [
           "x64"
         ]
+      },
+      {
+        "target": "portable",
+        "arch": [
+          "x64"
+        ]
       }
     ],
-    "artifactName": "${productName}_${version}.${ext}"
+    "artifactName": "${productName}_${version}_Setup.${ext}"
+  },
+  "portable": {
+    "artifactName": "${productName}_${version}_Portable.${ext}",
+    "requestExecutionLevel": "user"
   },
   "nsis": {
     "installerIcon": "resources/app-icons/icon.ico",

@@ -309,6 +309,13 @@ pnpm build
 
 ## 可用脚本
 
+Windows 构建会在 `release/<版本>/` 同时生成两种 x64 程序：
+
+- `AIGC CANVAS_<版本>_Setup.exe`：安装版，可选择安装目录。
+- `AIGC CANVAS_<版本>_Portable.exe`：单文件免安装版，下载后双击运行。
+
+免安装版的设置仍保存在系统用户数据目录，项目保存在你选定的目录。macOS 构建继续生成 `.dmg` 和 `.zip`。GitHub Actions 的 Windows 构建产物包含上述两种 EXE。
+
 - pnpm dev：启动 Vite 与 Electron 开发环境
 - pnpm build：构建并通过 electron-builder 打包
 - pnpm typecheck：检查渲染进程、Electron 主进程与 preload 的 TypeScript 类型

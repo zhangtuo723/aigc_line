@@ -197,6 +197,8 @@ AIGC CANVAS：Electron 桌面应用，把 Claude Code / Codex Agent（对话）�
 
 ## 常用命令
 
+- **Windows 发行产物**：`electron-builder.json` 同时生成 x64 NSIS 安装版 `AIGC CANVAS_<版本>_Setup.exe` 和单文件免安装版 `AIGC CANVAS_<版本>_Portable.exe`，通过 `portable.artifactName` 避免同名覆盖；免安装版以普通用户权限运行。`pnpm build` 和 Windows Actions 构建都会输出两者到 `release/<版本>/`。免安装只影响程序启动方式，设置仍保存在系统用户数据目录，项目保存在用户选定目录；macOS 继续输出 DMG/ZIP。
+
 - **自动打包**：`.github/workflows/build.yml` 只构建 Windows 和 macOS，矩阵设置 `fail-fast: false`，单个平台失败不得取消另一个平台。CI 沿用 `npm install`，React / React DOM 固定为本地已验证的 `19.2.7`，禁止自动漂移至当前 `@react-three/fiber` 不接受的 React 19.3；更新 React 时同时核对 Fiber 的 peer 范围。打包显式传入 `--publish never`，产物仅上传 Actions Artifacts（保留 5 天），不自动发布 GitHub Release。
 
 ```bash

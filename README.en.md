@@ -183,6 +183,13 @@ pnpm build
 
 ## Scripts
 
+Windows builds produce two x64 executables in `release/<version>/`:
+
+- `AIGC CANVAS_<version>_Setup.exe`: installer with a selectable installation directory.
+- `AIGC CANVAS_<version>_Portable.exe`: a single executable that runs without installation.
+
+The portable edition still stores settings in the system user-data directory and projects in the directory you choose. macOS builds continue to produce `.dmg` and `.zip` files. GitHub Actions Windows artifacts include both executables.
+
 - pnpm dev: start Vite and Electron in development mode
 - pnpm build: build and package with electron-builder
 - pnpm typecheck: run TypeScript checks
