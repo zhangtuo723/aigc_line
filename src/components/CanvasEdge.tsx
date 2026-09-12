@@ -1,30 +1,52 @@
-import { memo, useMemo } from 'react'
-import { BaseEdge, getBezierPath, useStore, type EdgeProps, type ReactFlowState } from '@xyflow/react'
+import { memo, useMemo, useSyncExternalStore } from 'react'
+import { BaseEdge, getBezierPath, useStoreApi, type EdgeProps } from '@xyflow/react'
 import { clipCanvasBezierPath } from '../shared/canvas-edge-path'
+import { canvasRenderWindow } from '../shared/canvas-render-window'
 
-// A quantized, padded window avoids recomputing every curve on every pan pixel.
+// A shared, padded window avoids recomputing every curve on every pan pixel.
 // It covers the whole screen, including paths whose endpoints are both offscreen.
-function edgeWindow(state: ReactFlowState): readonly number[] {
-  const [x, y, zoom] = state.transform
-  const tile = 512
-  const padding = 256
-  return [
-    Math.floor((-x - padding) / zoom / tile) * tile,
-    Math.floor((-y - padding) / zoom / tile) * tile,
-    Math.ceil((-x + state.width + padding) / zoom / tile) * tile,
-    Math.ceil((-y + state.height + padding) / zoom / tile) * tile,
-  ]
+function createRenderWindowStore(store: ReturnType<typeof useStoreApi>) {
+  let state = store.getState()
+  let window = canvasRenderWindow(undefined, state.transform, state.width, state.height)
+  const listeners = new Set<() => void>()
+  let unsubscribe: (() => void) | undefined
+  const update = () => {
+    const next = store.getState()
+    if (next.transform === state.transform && next.width === state.width && next.height === state.height) return
+    state = next
+    const nextWindow = canvasRenderWindow(window, state.transform, state.width, state.height)
+    if (nextWindow === window) return
+    window = nextWindow
+    listeners.forEach((listener) => listener())
+  }
+  return {
+    getSnapshot: () => window,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener)
+      if (!unsubscribe) { unsubscribe = store.subscribe(update); update() }
+      return () => {
+        listeners.delete(listener)
+        if (!listeners.size) { unsubscribe?.(); unsubscribe = undefined }
+      }
+    },
+  }
 }
-const sameWindow = (a: readonly number[], b: readonly number[]) => a.every((value, index) => value === b[index])
+// One viewport subscription per canvas, rather than allocations and comparisons
+// in every edge on every pointer event. Weak keys isolate separate projects.
+const renderWindows = new WeakMap<ReturnType<typeof useStoreApi>, ReturnType<typeof createRenderWindowStore>>()
 
 export const CanvasEdge = memo(function CanvasEdge(props: EdgeProps) {
-  const [left, top, right, bottom] = useStore(edgeWindow, sameWindow)
+  const store = useStoreApi()
+  const windowStore = useMemo(() => {
+    let existing = renderWindows.get(store)
+    if (!existing) { existing = createRenderWindowStore(store); renderWindows.set(store, existing) }
+    return existing
+  }, [store])
+  const window = useSyncExternalStore(windowStore.subscribe, windowStore.getSnapshot)
   const [path, labelX, labelY] = useMemo(() => getBezierPath(props), [
     props.sourceX, props.sourceY, props.targetX, props.targetY, props.sourcePosition, props.targetPosition,
   ])
-  const clipped = useMemo(() => clipCanvasBezierPath(path, {
-    x: left, y: top, width: right - left, height: bottom - top,
-  }), [path, left, top, right, bottom])
+  const clipped = useMemo(() => clipCanvasBezierPath(path, window), [path, window])
   if (!clipped.path) return null
   // A clip can have several disjoint subpaths. SVG repeats markers per subpath;
   // draw arrows only on the fragment containing the original endpoint.

@@ -13,18 +13,54 @@ const project = (id: string) => ({ id, folderPath: `/projects/${id}`, name: id, 
 const message = (id: string, content = id): ChatMessage => ({ id, role: 'assistant', content, timestamp: 1 })
 let push: (payload: ProjectChatMessagePush) => void
 let end: (payload: { projectId: string }) => void
-let api: { loadProject: ReturnType<typeof vi.fn>; loadChatHistory: ReturnType<typeof vi.fn>; sendChatMessage: ReturnType<typeof vi.fn> }
+let api: { loadProject: ReturnType<typeof vi.fn>; closeProject: ReturnType<typeof vi.fn>; loadChatHistory: ReturnType<typeof vi.fn>; sendChatMessage: ReturnType<typeof vi.fn> }
 let store: typeof import('../src/stores/app.store')['useAppStore']
 
 beforeEach(async () => {
   vi.resetModules()
   flush.mockClear()
-  api = { loadProject: vi.fn(async (id: string) => project(id)), loadChatHistory: vi.fn(async () => []), sendChatMessage: vi.fn(async () => {}) }
+  api = { loadProject: vi.fn(async (id: string) => project(id)), closeProject: vi.fn(async () => {}), loadChatHistory: vi.fn(async () => []), sendChatMessage: vi.fn(async () => {}) }
   vi.stubGlobal('window', { electronAPI: { ...api, onChatMessage: (handler: typeof push) => { push = handler }, onTurnEnd: (handler: typeof end) => { end = handler }, onArtifact: vi.fn() } })
   store = (await import('../src/stores/app.store')).useAppStore
 })
 
 describe('chat store project and streaming races', () => {
+  it('waits for saved edits and persisted close before clearing the workspace', async () => {
+    await store.getState().selectProject('a')
+    push({ projectId: 'a', message: message('history') })
+    const saving = deferred<void>()
+    const closing = deferred<void>()
+    flush.mockReturnValueOnce(saving.promise)
+    api.closeProject.mockReturnValueOnce(closing.promise)
+    const close = store.getState().closeProject()
+    expect(api.closeProject).not.toHaveBeenCalled()
+    expect(store.getState().currentPage).toBe('project')
+    saving.resolve()
+    await vi.waitFor(() => expect(api.closeProject).toHaveBeenCalledWith('a'))
+    expect(store.getState().currentProject?.id).toBe('a')
+    closing.resolve()
+    await close
+    expect(store.getState().currentProject).toBeNull()
+    expect(store.getState().currentPage).toBe('home')
+    push({ projectId: 'a', message: message('background') })
+    expect(store.getState().messages).toEqual([])
+  })
+  it('keeps the workspace and restore target when saving fails', async () => {
+    await store.getState().selectProject('a')
+    flush.mockRejectedValueOnce(new Error('disk full'))
+    await expect(store.getState().closeProject()).rejects.toThrow('disk full')
+    expect(api.closeProject).not.toHaveBeenCalled()
+    expect(store.getState().currentProject?.id).toBe('a')
+    expect(store.getState().currentPage).toBe('project')
+  })
+  it('keeps the workspace when persisting the close fails and permits retry', async () => {
+    await store.getState().selectProject('a')
+    api.closeProject.mockRejectedValueOnce(new Error('index unavailable'))
+    await expect(store.getState().closeProject()).rejects.toThrow('index unavailable')
+    expect(store.getState().currentProject?.id).toBe('a')
+    await store.getState().closeProject()
+    expect(store.getState().currentPage).toBe('home')
+  })
   it('upserts a stream and avoids rebuilding unrelated runtime state on every chunk', async () => {
     await store.getState().selectProject('a')
     push({ projectId: 'a', message: message('stream', 'part') })

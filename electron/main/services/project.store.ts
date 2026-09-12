@@ -134,6 +134,17 @@ export async function setLastOpened(id: string): Promise<void> {
   });
 }
 
+/** Closing an older workspace must not clear a newer workspace's restore target. */
+export async function closeProject(id: string): Promise<void> {
+  if (typeof id !== 'string' || !id) throw new Error('项目 ID 无效');
+  return indexTransaction(async () => {
+    const index = await readProjectsFile();
+    if (index.lastOpenedId !== id) return;
+    delete index.lastOpenedId;
+    await writeProjectsFile(index);
+  });
+}
+
 export async function readManifest(folderPath: string): Promise<ProjectManifest | null> {
   const filePath = path.join(folderPath, PROJECT_DIR_NAME, MANIFEST_FILE);
   try {

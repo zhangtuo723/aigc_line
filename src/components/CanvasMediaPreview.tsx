@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { useStore, type ReactFlowState } from '@xyflow/react'
 import { prepareCanvasOriginalImage, ProjectAssetPreview } from './ProjectAssetPreview'
+import { useNearCanvasViewport } from './canvas-visibility'
 
 // Subscribe only to a screen-sized quality tier, not the changing viewport.
 // Ordinary navigation never mounts every visible 2K/4K original at once.
@@ -14,19 +15,21 @@ export const CanvasImagePreview = memo(function CanvasImagePreview({ url, name, 
 }) {
   const maxEdge = useStore(imagePreviewSize)
   const [originalReady, setOriginalReady] = useState<string | null>(null)
+  const container = useRef<HTMLDivElement>(null)
+  const nearViewport = useNearCanvasViewport(container)
 
   useEffect(() => {
-    if (!selected) return
+    if (!selected || nearViewport !== true) { setOriginalReady(null); return }
     const controller = new AbortController()
     void prepareCanvasOriginalImage(url, controller.signal).then(() => {
       if (!controller.signal.aborted) setOriginalReady(url)
     }, () => { /* A failed original leaves the usable preview in place. */ })
     return () => controller.abort()
-  }, [selected, url])
+  }, [selected, url, nearViewport])
 
-  const showOriginal = selected && originalReady === url
+  const showOriginal = selected && nearViewport === true && originalReady === url
   return (
-    <div className="relative h-full w-full">
+    <div ref={container} className="relative h-full w-full">
       <div className="h-full w-full" aria-hidden={showOriginal || undefined}>
         <ProjectAssetPreview url={url} kind="image" name={name} maxEdge={maxEdge} />
       </div>
@@ -36,6 +39,24 @@ export const CanvasImagePreview = memo(function CanvasImagePreview({ url, name, 
       )}
     </div>
   )
+})
+
+function AudioPlayer({ url }: { url: string }) {
+  const audio = useRef<HTMLAudioElement>(null)
+  useEffect(() => {
+    const element = audio.current!
+    element.src = url
+    return () => { element.pause(); element.removeAttribute('src'); element.load() }
+  }, [url])
+  return <audio ref={audio} controls preload="metadata" className="w-full" />
+}
+
+export const CanvasAudioPreview = memo(function CanvasAudioPreview({ url }: { url: string }) {
+  const container = useRef<HTMLDivElement>(null)
+  const nearViewport = useNearCanvasViewport(container)
+  return <div ref={container} className="h-[54px] w-full">
+    {nearViewport === true && <AudioPlayer url={url} />}
+  </div>
 })
 
 // One explicitly opened player per canvas renderer. Posters share the bounded

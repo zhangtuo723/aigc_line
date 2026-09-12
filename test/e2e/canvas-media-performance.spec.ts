@@ -108,10 +108,12 @@ async function expectBackgroundTracksViewport(page: Page) {
     const transform = new DOMMatrixReadOnly(getComputedStyle(viewport).transform)
     const style = getComputedStyle(element)
     const [width, height] = style.backgroundSize.split(' ').map(Number.parseFloat)
+    const patternTransform = new DOMMatrixReadOnly(style.transform)
     const [x, y] = style.backgroundPosition.split(' ').map(Number.parseFloat)
     const gap = 18 * transform.a
     return Math.max(Math.abs(width - gap), Math.abs(height - gap),
-      Math.abs(x - (transform.e % gap - gap / 2)), Math.abs(y - (transform.f % gap - gap / 2)))
+      Math.abs(x + gap / 2), Math.abs(y + gap / 2),
+      Math.abs(patternTransform.e - transform.e % gap), Math.abs(patternTransform.f - transform.f % gap))
   })).toBeLessThan(0.02)
 }
 

@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, ClipboardEvent, KeyboardEvent, SetStateAction } from 'react';
 import type { Attachment, AvailableSkill, AvailableSkillSource } from '../shared/ipc.types';
 import { useAppStore } from '../stores/app.store';
 import { canClearSubmittedDraft } from '../shared/chat-state';
+import { chatTextAttachmentPrompt, shouldAttachChatText } from '../shared/chat-text-attachment';
 import {
   filterAvailableSkills,
   getSkillSearchQuery,
@@ -64,7 +65,11 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
   const projectEpochRef = useRef(0);
   const submissionRef = useRef(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const setContent = (value: string) => { draftVersionRef.current += 1; setContentValue(value); };
+  const contentRef = useRef('');
+  const [isComposing, setIsComposing] = useState(false);
+  const [convertingTextCount, setConvertingTextCount] = useState(0);
+  const textAttachmentRef = useRef<{ epoch: number; content: string; promise: Promise<Attachment> } | null>(null);
+  const setContent = (value: string) => { draftVersionRef.current += 1; contentRef.current = value; setContentValue(value); };
   const setAttachments = (value: SetStateAction<Attachment[]>) => { draftVersionRef.current += 1; setAttachmentsValue(value); };
   const [hint, setHint] = useState('');
   const [skills, setSkills] = useState<AvailableSkill[]>([]);
@@ -121,7 +126,54 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     setSkills([]);
     setSkillMenuDismissed(false);
     setPastedImageCount(0);
+    setConvertingTextCount(0);
+    setIsComposing(false);
+    textAttachmentRef.current = null;
   }, [currentProject?.id]);
+
+  const prepareTextAttachment = useCallback((text: string) => {
+    const epoch = projectEpochRef.current;
+    const existing = textAttachmentRef.current;
+    if (existing?.epoch === epoch && existing.content === text) return existing.promise;
+    if (!currentProject) return Promise.reject(new Error('当前项目不可用'));
+    const entry = {
+      epoch, content: text,
+      promise: window.electronAPI.saveChatTextAttachment(currentProject.id, text).then((result) => {
+        if (!result.success || !result.attachment) throw new Error(result.error || '文本附件保存失败');
+        return result.attachment;
+      }),
+    };
+    textAttachmentRef.current = entry;
+    entry.promise = entry.promise.catch((error) => {
+      if (textAttachmentRef.current === entry) textAttachmentRef.current = null;
+      throw error;
+    });
+    return entry.promise;
+  }, [currentProject]);
+
+  useEffect(() => {
+    if (disabled || !currentProject || isComposing || isSubmitting || !shouldAttachChatText(content)) return;
+    const epoch = projectEpochRef.current;
+    let cancelled = false;
+    // Let typing/pasting and Chinese IME composition finish before taking a copy.
+    const timer = window.setTimeout(() => {
+      if (submissionRef.current) return;
+      setConvertingTextCount((count) => count + 1);
+      void prepareTextAttachment(content).then((attachment) => {
+        if (cancelled || submissionRef.current || epoch !== projectEpochRef.current
+          || useAppStore.getState().currentProject !== currentProject || contentRef.current !== content) return;
+        setAttachments((previous) => [...previous, attachment]);
+        setContent(chatTextAttachmentPrompt(content, attachment.name));
+        setSkillMenuDismissed(true);
+        setHint('超过 1000 字的文本已转为 TXT 附件，完整原文已保留。');
+      }).catch((error) => {
+        if (!cancelled && epoch === projectEpochRef.current) setHint(`${error instanceof Error ? error.message : '文本附件保存失败'}，原文已保留，可点击发送重试。`);
+      }).finally(() => {
+        if (epoch === projectEpochRef.current) setConvertingTextCount((count) => Math.max(0, count - 1));
+      });
+    }, 300);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [content, currentProject, disabled, isComposing, isSubmitting, prepareTextAttachment]);
 
   const selectSkill = (skill: AvailableSkill) => {
     setContent(makeSkillCommand(skill.name));
@@ -153,19 +205,35 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
   };
 
   const handleSend = async () => {
-    if (disabled || !currentProject || submissionRef.current || pastedImageCount > 0 || (!content.trim() && attachments.length === 0 && !hasReferences)) return;
+    if (disabled || !currentProject || isComposing || submissionRef.current || pastedImageCount > 0 || (!content.trim() && attachments.length === 0 && !hasReferences)) return;
     const projectId = currentProject.id;
     const epoch = projectEpochRef.current;
     const version = draftVersionRef.current;
     submissionRef.current = true;
     setIsSubmitting(true);
+    let handedToParent = false;
     try {
-      const accepted = await onSend(content.trim(), attachments.length > 0 ? attachments : undefined);
+      let outgoingContent = content.trim();
+      let outgoingAttachments = attachments;
+      // Sending before the debounce finishes follows the same conversion path.
+      if (shouldAttachChatText(content)) {
+        const attachment = await prepareTextAttachment(content);
+        if (epoch !== projectEpochRef.current || useAppStore.getState().currentProject !== currentProject) return;
+        outgoingContent = chatTextAttachmentPrompt(content, attachment.name);
+        outgoingAttachments = [...attachments, attachment];
+      }
+      handedToParent = true;
+      const accepted = await onSend(outgoingContent, outgoingAttachments.length > 0 ? outgoingAttachments : undefined);
       if (accepted && useAppStore.getState().currentProject === currentProject && epoch === projectEpochRef.current && canClearSubmittedDraft(version, draftVersionRef.current, projectId, useAppStore.getState().currentProject?.id)) {
         setContent('');
         setAttachments([]);
+        setHint('');
+        textAttachmentRef.current = null;
       }
-    } catch {
+    } catch (error) {
+      if (!handedToParent && epoch === projectEpochRef.current && useAppStore.getState().currentProject === currentProject) {
+        setHint(`${error instanceof Error ? error.message : '文本附件保存失败'}。输入内容与附件已保留，可重试。`);
+      }
       // The parent displays the failure. Keeping the live draft also preserves
       // any edits or new attachments added while the request was pending.
     } finally {
@@ -344,7 +412,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
         )}
 
         {/* Selected attachments preview */}
-        {(attachments.length > 0 || pastedImageCount > 0) && (
+        {(attachments.length > 0 || pastedImageCount > 0 || convertingTextCount > 0) && (
           <div className='flex flex-wrap gap-2 px-3 pt-3'>
             {attachments.map((attachment, index) => (
               <div
@@ -374,6 +442,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
                 正在添加图片…
               </div>
             )}
+            {convertingTextCount > 0 && <span role='status' className='px-2 py-1 text-xs text-[#e8c766]'>正在转换为 TXT 附件…</span>}
           </div>
         )}
 
@@ -383,10 +452,13 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
           value={content}
           onChange={(e) => {
             setContent(e.target.value);
+            setHint('');
             setSkillMenuDismissed(false);
           }}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
+          onCompositionStart={() => setIsComposing(true)}
+          onCompositionEnd={() => setIsComposing(false)}
           onBlur={() => window.setTimeout(() => setSkillMenuDismissed(true), 100)}
           disabled={disabled}
           placeholder='描述你的想法，输入 / 使用 Skill，或添加文件…'

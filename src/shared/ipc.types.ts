@@ -12,6 +12,7 @@ export interface Project {
 
 export interface ProjectIndex {
   projects: Project[];
+  /** Startup restore target; cleared when the user explicitly closes the project. */
   lastOpenedId?: string;
 }
 
@@ -551,4 +552,10 @@ export interface GenerationTaskSummary {
   error?: string;
   acknowledged?: boolean;
   updatedAt: number;
+}
+
+export interface SaveChatTextAttachmentResult {
+  success: boolean;
+  attachment?: Attachment;
+  error?: string;
 }

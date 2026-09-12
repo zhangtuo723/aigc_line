@@ -17,10 +17,15 @@ export const CanvasBackground = memo(function CanvasBackground() {
       const gap = 18 * zoom
       if (previous[2] !== zoom) {
         style.backgroundSize = `${gap}px ${gap}px`
+        style.backgroundPosition = `${-gap / 2}px ${-gap / 2}px`
         const radius = zoom / 2
         style.backgroundImage = `radial-gradient(circle, rgba(255,255,255,0.16) ${radius}px, transparent ${radius}px)`
+        style.left = style.top = `${-2 * gap}px`
+        style.width = style.height = `calc(100% + ${4 * gap}px)`
       }
-      style.backgroundPosition = `${x % gap - gap / 2}px ${y % gap - gap / 2}px`
+      // Move a cached, oversized pattern on its own compositor layer. Updating
+      // background-position would repaint the entire canvas on every pan frame.
+      style.transform = `translate3d(${x % gap}px, ${y % gap}px, 0)`
       previous = transform
     }
     paint()
@@ -32,5 +37,7 @@ export const CanvasBackground = memo(function CanvasBackground() {
     return () => { unsubscribe(); cancelAnimationFrame(frame) }
   }, [store])
 
-  return <div ref={element} aria-hidden="true" data-testid="rf__background" className="react-flow__background react-flow__container" />
+  return <div aria-hidden="true" className="react-flow__background react-flow__container" style={{ overflow: 'hidden' }}>
+    <div ref={element} data-testid="rf__background" className="absolute" style={{ willChange: 'transform', pointerEvents: 'none' }} />
+  </div>
 })

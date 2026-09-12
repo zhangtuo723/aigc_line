@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const environment = vi.hoisted(() => ({ root: '' }))
 vi.mock('electron', () => ({ app: { getPath: () => environment.root } }))
 vi.mock('electron-log/main', () => ({ default: { warn: vi.fn(), info: vi.fn() } }))
-import { appendChatMessage, createProject, deleteProject, listProjects, readCanvasSnapshot, readChatHistory, setLastOpened, updateChatMessage, writeCanvasSnapshot } from '../electron/main/services/project.store'
+import { appendChatMessage, closeProject, createProject, deleteProject, listProjects, readCanvasSnapshot, readChatHistory, setLastOpened, updateChatMessage, writeCanvasSnapshot } from '../electron/main/services/project.store'
 
 let workspace: string
 beforeEach(async () => {
@@ -16,6 +16,25 @@ beforeEach(async () => {
 afterEach(async () => { vi.restoreAllMocks(); await fs.rm(environment.root, { recursive: true, force: true }) })
 
 describe('serialized persistence', () => {
+  it('persists an explicit close without removing the project or its saved canvas', async () => {
+    const project = await createProject('keep files', workspace)
+    await writeCanvasSnapshot(workspace, { nodes: [{ id: 'saved' }] })
+    await setLastOpened(project.id)
+    await closeProject(project.id)
+    expect((await listProjects()).lastOpenedId).toBeUndefined()
+    expect((await listProjects()).projects).toHaveLength(1)
+    expect(await readCanvasSnapshot(workspace)).toEqual({ nodes: [{ id: 'saved' }] })
+    await setLastOpened(project.id)
+    expect((await listProjects()).lastOpenedId).toBe(project.id)
+  })
+  it('does not let a stale close clear a newer project restore target', async () => {
+    const first = await createProject('first', workspace)
+    const secondFolder = path.join(environment.root, 'second'); await fs.mkdir(secondFolder)
+    const second = await createProject('second', secondFolder)
+    await setLastOpened(first.id)
+    await Promise.all([setLastOpened(second.id), closeProject(first.id)])
+    expect((await listProjects()).lastOpenedId).toBe(second.id)
+  })
   it('keeps the last concurrent snapshot complete without shared temporary file collisions', async () => {
     const snapshots = Array.from({ length: 20 }, (_, index) => ({ index, content: String(index).repeat(100_000 + index) }))
     await Promise.all(snapshots.map(snapshot => writeCanvasSnapshot(workspace, snapshot)))

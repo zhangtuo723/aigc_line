@@ -135,8 +135,9 @@ test.describe('AIGC CANVAS Electron UI', () => {
     await page.reload()
     await expect(page.getByRole('heading', { name: 'Codex', exact: true })).toBeVisible()
     await page.getByRole('button', { name: '返回' }).click()
-    const card = page.getByRole('heading', { name: 'Codex E2E', exact: true }).locator('..')
-    await expect(card).toContainText('Codex · custom-codex-model')
+    const card = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Codex E2E', exact: true }) })
+    await expect(card).toContainText('Codex')
+    await expect(card).toContainText('custom-codex-model')
     await card.hover()
     await card.getByRole('button', { name: '删除项目' }).click()
   })
@@ -583,7 +584,7 @@ test.describe('AIGC CANVAS Electron UI', () => {
     // Reload the project index, then explicitly return to the home page.
     await page.reload()
     await page.getByRole('button', { name: '返回' }).click()
-    const card = page.getByText(projectName, { exact: true }).locator('..')
+    const card = page.getByRole('article').filter({ has: page.getByRole('heading', { name: projectName, exact: true }) })
     await card.hover()
     await card.getByRole('button', { name: '删除项目' }).click()
 

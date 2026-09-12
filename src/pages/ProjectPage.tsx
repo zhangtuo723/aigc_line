@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '../stores/app.store'
 import { CanvasArea } from '../components/CanvasArea'
 import { ChatPanel } from '../components/ChatPanel'
-import { beginEditBarrier, flushPendingEdits } from '../shared/pending-edits'
 
 const MIN_CHAT_WIDTH = 320
 const MAX_CHAT_WIDTH = 800
@@ -10,7 +9,7 @@ const DEFAULT_CHAT_WIDTH = 420
 
 export function ProjectPage() {
   const currentProject = useAppStore((state) => state.currentProject)
-  const setCurrentPage = useAppStore((state) => state.setCurrentPage)
+  const closeProject = useAppStore((state) => state.closeProject)
   const [chatWidth, setChatWidth] = useState(() => {
     try { return Number(localStorage.getItem('canvas-chat-width')) || DEFAULT_CHAT_WIDTH } catch { return DEFAULT_CHAT_WIDTH }
   })
@@ -32,12 +31,11 @@ export function ProjectPage() {
   useEffect(() => { try { localStorage.setItem('canvas-chat-width', String(chatWidth)) } catch { /* Layout still works without storage. */ } }, [chatWidth])
 
   const leaveProject = async () => {
-    const release = beginEditBarrier()
     setLeaving(true)
     setSaveError('')
-    try { await flushPendingEdits(); setCurrentPage('home') }
+    try { await closeProject() }
     catch (error) { setSaveError(error instanceof Error ? error.message : '保存失败，请重试') }
-    finally { release(); setLeaving(false) }
+    finally { setLeaving(false) }
   }
 
   return (
@@ -48,6 +46,7 @@ export function ProjectPage() {
         <button
           onClick={() => void leaveProject()}
           disabled={leaving}
+          title="保存并关闭项目，返回首页"
           className="flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm text-[#8a8794] transition hover:bg-white/5 hover:text-[#e8e6df]"
         >
           <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

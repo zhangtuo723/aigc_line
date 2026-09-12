@@ -9,7 +9,7 @@ import { IPC_CHANNELS } from '../../../src/shared/ipc.channels';
 import type { ChatMessage } from '../../../src/shared/ipc.types';
 import { normalizeInactiveChatTools } from '../../../src/shared/chat-history-tools';
 import { clearAgentContext, enqueueAgentMessage, interruptAgentTurn, listAvailableSkills } from '../services/agent';
-import { stageChatAttachments } from '../services/chat-attachment.service';
+import { saveChatTextAttachment, stageChatAttachments } from '../services/chat-attachment.service';
 import { loadProject, readChatHistory, updateChatMessage } from '../services/project.store';
 import log from 'electron-log/main';
 
@@ -23,6 +23,15 @@ const MAX_PASTED_IMAGE_BYTES = 20 * 1024 * 1024;
 const activeToolIds = (folderPath: string) => new Set([...getActiveClaudeToolIds(folderPath), ...getActiveCodexToolIds(folderPath)]);
 
 export function registerChatHandlers(): void {
+  ipcMain.handle(IPC_CHANNELS.chat.saveTextAttachment, async (_event, projectId: string, content: string) => {
+    try {
+      const project = await loadProject(projectId);
+      if (!project) return { success: false, error: '项目不存在或已被删除' };
+      return { success: true, attachment: await saveChatTextAttachment(project.folderPath, content) };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
   ipcMain.handle(IPC_CHANNELS.chat.listModels, (_event, provider) => listAgentModels(provider));
   ipcMain.handle(
     IPC_CHANNELS.chat.savePastedImage,

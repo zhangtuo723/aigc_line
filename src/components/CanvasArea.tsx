@@ -50,12 +50,13 @@ import {
 import { buildCanvasNodeDetail, buildCanvasOverview } from '../shared/canvas-read-model'
 import { CanvasReferenceIndex } from '../shared/canvas-reference-index'
 import { retainCanvasNodeContent } from '../shared/canvas-node-content'
+import { filterUnchangedNodeMeasurements } from '../shared/canvas-node-measurements'
 import { projectSnapshotWriter } from '../shared/snapshot-persistence'
 import { registerEditFlusher } from '../shared/pending-edits'
 import { EditHistory } from '../shared/edit-history'
 import { vacantNodePosition } from '../shared/canvas-placement'
 import { ProjectAssetPreview } from './ProjectAssetPreview'
-import { CanvasImagePreview, CanvasVideoPreview } from './CanvasMediaPreview'
+import { CanvasAudioPreview, CanvasImagePreview, CanvasVideoPreview } from './CanvasMediaPreview'
 import { CanvasBackground } from './CanvasBackground'
 import { CanvasEdge } from './CanvasEdge'
 import { beginCanvasInteraction, endCanvasInteraction, resetCanvasInteraction } from './canvas-interaction'
@@ -1524,7 +1525,7 @@ const StoryNodeCard = memo(function StoryNodeCard({ id, data, selected }: NodePr
             <div className="relative aspect-video overflow-hidden bg-[radial-gradient(circle_at_50%_35%,#273148_0%,#11141c_50%,#090a0e_100%)]">
               {boardPreview && !boardPreviewFailed ? (
                 <div className="relative h-full w-full bg-[#0d0f14]">
-                  <img src={boardPreview} alt="画板中心预览" className="h-full w-full object-cover" draggable={false} onError={() => setBoardPreviewFailed(true)} />
+                  <ProjectAssetPreview url={boardPreview} kind="image" name="画板中心预览" maxEdge={640} onError={() => setBoardPreviewFailed(true)} />
                   <span className="absolute bottom-3 left-3 rounded-md border border-white/10 bg-black/55 px-2 py-1 text-[9px] text-white/65">画板中心预览</span>
                 </div>
               ) : imageEditorPreviewSources.length > 0 ? (
@@ -1540,7 +1541,7 @@ const StoryNodeCard = memo(function StoryNodeCard({ id, data, selected }: NodePr
                     const showOverflow = hiddenCount > 0 && index === imageEditorPreviewSources.length - 1
                     return (
                       <div key={source.nodeId} className="relative min-h-0 overflow-hidden bg-[#0d0f14]" title={source.title}>
-                        <img src={source.url} alt={source.title} className="h-full w-full object-cover" draggable={false} />
+                        <ProjectAssetPreview url={source.url} kind="image" name={source.title} maxEdge={320} />
                         {showOverflow && (
                           <div className="absolute inset-0 flex items-center justify-center bg-black/65 text-lg font-semibold text-white/85 backdrop-blur-[1px]">
                             +{hiddenCount}
@@ -1569,7 +1570,7 @@ const StoryNodeCard = memo(function StoryNodeCard({ id, data, selected }: NodePr
           <div className="nodrag nowheel overflow-hidden rounded-[11px] bg-[#121318]" onPointerDown={(event) => event.stopPropagation()}>
             <div className="relative aspect-video overflow-hidden bg-[radial-gradient(circle_at_50%_30%,#273148_0%,#11141c_48%,#090a0e_100%)]">
               {data.preview ? (
-                <img src={data.preview} alt="导演台最近构图" className="h-full w-full object-contain" draggable={false} />
+                <ProjectAssetPreview url={data.preview} kind="image" name="导演台最近构图" maxEdge={640} />
               ) : (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-white/32">
                   <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-[#d4af37]/25 bg-[#d4af37]/10 text-2xl text-[#e8c766]">◫</div>
@@ -1608,7 +1609,7 @@ const StoryNodeCard = memo(function StoryNodeCard({ id, data, selected }: NodePr
         ) : isAudio ? (
           <div className="nodrag nowheel flex min-h-[150px] flex-col items-center justify-center gap-4 rounded-[11px] bg-[#17171b] p-5" onPointerDown={(event) => event.stopPropagation()}>
             {data.preview ? (
-              <audio src={data.preview} controls preload="metadata" className="w-full" />
+              <CanvasAudioPreview url={data.preview} />
             ) : (
               <div className="flex flex-col items-center gap-2 text-white/28">
                 <div className="text-3xl">♪</div>
@@ -2517,7 +2518,9 @@ function CanvasFlow() {
     const focused = document.activeElement
     const group = focused?.matches('input,textarea,[contenteditable="true"]') ? focused : undefined
     historyRef.current.observe(value, canvasEditKey(value), group)
-    setHistoryState({ undo: historyRef.current.canUndo, redo: historyRef.current.canRedo })
+    const undo = historyRef.current.canUndo
+    const redo = historyRef.current.canRedo
+    setHistoryState((current) => current.undo === undo && current.redo === redo ? current : { undo, redo })
   }, [nodes, edges, dismissedArtifacts, loaded, snapshot])
 
   const restoreEdit = useCallback((direction: 'undo' | 'redo') => {
@@ -2635,6 +2638,8 @@ function CanvasFlow() {
   }, [artifacts, contentNodes, dismissedArtifacts, setEdges, setNodes])
 
   const handleNodesChange = useCallback((changes: NodeChange<StoryNode>[]) => {
+    changes = filterUnchangedNodeMeasurements(changes, nodesRef.current)
+    if (!changes.length) return
     // React Flow listens for Delete/Backspace globally. Full-screen node editors
     // are rendered in portals, so their keyboard events can still produce
     // node-removal changes. Keep non-removal changes, but never remove underlying

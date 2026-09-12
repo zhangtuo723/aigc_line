@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react'
+import { useNearCanvasViewport } from './canvas-visibility'
 import type { ProjectMediaKind } from '../shared/ipc.types'
 import { AssetPreviewCache, AssetPreviewPool } from './project-asset-preview-cache'
 import { waitForCanvasIdle } from './canvas-interaction'
@@ -123,28 +124,23 @@ function createThumbnail(url: string, kind: 'image' | 'video', signal: AbortSign
   })
 }
 
-export const ProjectAssetPreview = memo(function ProjectAssetPreview({ url, kind, name, maxEdge = 320 }: {
+export const ProjectAssetPreview = memo(function ProjectAssetPreview({ url, kind, name, maxEdge = 320, onError }: {
   url: string
   kind: ProjectMediaKind
   name: string
   maxEdge?: PreviewSize
+  onError?: () => void
 }) {
   const container = useRef<HTMLDivElement>(null)
   // Cached images can paint on the first mount, before IntersectionObserver's
   // initial callback. Unknown visibility must not start a new decode.
-  const [nearViewport, setNearViewport] = useState<boolean | null>(null)
+  const nearViewport = useNearCanvasViewport(container)
   // The complete workspace URL includes project identity, path and any version.
   const mediaKey = `${kind}:${url}`
   const key = previewKey(mediaKey, maxEdge)
   const [preview, setPreview] = useState<Preview | null>(() => cachedPreview(mediaKey, maxEdge))
   const current = preview?.mediaKey === mediaKey ? preview : null
-
-  useEffect(() => {
-    if (!container.current || kind === 'audio') return
-    const observer = new IntersectionObserver(([entry]) => setNearViewport(entry.isIntersecting), { rootMargin: '160px' })
-    observer.observe(container.current)
-    return () => observer.disconnect()
-  }, [kind])
+  useEffect(() => { if (current?.failed) onError?.() }, [current?.failed, onError])
 
   useEffect(() => {
     if (nearViewport !== true || !url || kind === 'audio') {

@@ -43,6 +43,7 @@ interface AppState {
   loadProjects: (options?: { restoreLastOpened?: boolean }) => Promise<void>;
   createProject: (name: string, folderPath: string, agent?: ProjectAgentConfig) => Promise<Project>;
   selectProject: (id: string) => Promise<void>;
+  closeProject: () => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
   sendChatMessage: (content: string, attachments?: ChatMessage['attachments']) => Promise<void>;
   sendScopedAgentMessage: (content: string, nodeRefs: CanvasNodeRef[]) => Promise<void>;
@@ -120,11 +121,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     })),
 
   loadProjects: async (options) => {
+    const selectionSequence = projectSelectionSequence;
     const projects = await electronAPI.listProjects();
     set({ projects });
     // Only restore navigation during app startup. Refreshing the list after a
     // delete/create must not unexpectedly leave the home page.
-    if (options?.restoreLastOpened && projects.lastOpenedId) {
+    if (options?.restoreLastOpened && projects.lastOpenedId
+      && selectionSequence === projectSelectionSequence && get().currentPage === 'home') {
       await get().selectProject(projects.lastOpenedId);
     }
   },
@@ -189,6 +192,30 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
     }
     await get().loadProjects();
+  },
+
+  closeProject: async () => {
+    const project = get().currentProject;
+    if (!project) return;
+    const release = beginEditBarrier();
+    const selectionSequence = ++projectSelectionSequence;
+    chatHistorySequence += 1;
+    try {
+      await flushPendingEdits();
+      if (selectionSequence !== projectSelectionSequence) return;
+      await electronAPI.closeProject(project.id);
+      if (selectionSequence !== projectSelectionSequence) return;
+      set((state) => ({
+        projects: { ...state.projects, lastOpenedId: undefined },
+        currentProject: null,
+        currentPage: 'home',
+        messages: [],
+        chatHistoryError: null,
+        artifacts: [],
+        referencedArtifacts: [],
+        referencedCanvasNodes: [],
+      }));
+    } finally { release(); }
   },
 
   loadChatHistory: async () => {

@@ -6,6 +6,7 @@ import {
   createProject,
   listProjects,
   loadProject,
+  closeProject,
   deleteProject,
   setLastOpened,
   readManifest,
@@ -30,6 +31,10 @@ export function registerProjectHandlers(): void {
       await setLastOpened(id);
     }
     return project;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.project.close, async (_event, id: string) => {
+    await closeProject(id);
   });
 
   ipcMain.handle(IPC_CHANNELS.project.delete, async (_event, id: string) => {

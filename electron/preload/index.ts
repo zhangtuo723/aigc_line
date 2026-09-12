@@ -36,6 +36,7 @@ import type {
   ProjectArtifactPush,
   ProjectTurnEndPush,
   SavePastedImageResult,
+  SaveChatTextAttachmentResult,
   SaveImageEditRequest,
   SaveImageEditResult,
   SaveBoardPreviewRequest,
@@ -51,6 +52,7 @@ export interface ElectronAPI {
   createProject: (name: string, folderPath: string, agent?: ProjectAgentConfig) => Promise<Project>;
   listProjects: () => Promise<ProjectIndex>;
   loadProject: (id: string) => Promise<Project | null>;
+  closeProject: (id: string) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
   importAudio: (projectId: string) => Promise<ImportAudioResult>;
   importProjectMedia: (projectId: string) => Promise<ImportProjectMediaResult>;
@@ -61,6 +63,7 @@ export interface ElectronAPI {
     data: ArrayBuffer,
     mimeType: string,
   ) => Promise<SavePastedImageResult>;
+  saveChatTextAttachment: (projectId: string, content: string) => Promise<SaveChatTextAttachmentResult>;
   interruptAgent: (projectId: string) => Promise<void>;
   getCodexQueue: (projectId: string) => Promise<CodexQueueResult>;
   sendCodexQueuedNow: (projectId: string, messageId: string) => Promise<void>;
@@ -121,6 +124,7 @@ const api: ElectronAPI = {
     invoke(IPC_CHANNELS.project.create, name, folderPath, agent),
   listProjects: () => invoke(IPC_CHANNELS.project.list),
   loadProject: (id) => invoke(IPC_CHANNELS.project.load, id),
+  closeProject: (id) => invoke(IPC_CHANNELS.project.close, id),
   deleteProject: (id) => invoke(IPC_CHANNELS.project.delete, id),
   importAudio: (projectId) => invoke(IPC_CHANNELS.project.importAudio, projectId),
   importProjectMedia: (projectId) => invoke(IPC_CHANNELS.project.importMedia, projectId),
@@ -129,6 +133,7 @@ const api: ElectronAPI = {
     invoke(IPC_CHANNELS.chat.sendMessage, projectId, message),
   savePastedImage: (projectId, data, mimeType) =>
     invoke(IPC_CHANNELS.chat.savePastedImage, projectId, data, mimeType),
+  saveChatTextAttachment: (projectId, content) => invoke(IPC_CHANNELS.chat.saveTextAttachment, projectId, content),
   getCodexQueue: (projectId) => invoke(IPC_CHANNELS.chat.codexQueue, projectId),
   sendCodexQueuedNow: (projectId, messageId) => invoke(IPC_CHANNELS.chat.codexSendNow, projectId, messageId),
   interruptAgent: (projectId) =>

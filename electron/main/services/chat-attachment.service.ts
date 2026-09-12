@@ -2,6 +2,16 @@ import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { Attachment } from '../../../src/shared/ipc.types';
+import { atomicWriteFile } from './atomic-file';
+
+/** Preserve the exact input, including whitespace, as a UTF-8 workspace file. */
+export async function saveChatTextAttachment(folderPath: string, content: string): Promise<Attachment> {
+  if (typeof content !== 'string' || !content.trim()) throw new Error('文本附件内容为空');
+  const name = `输入文本-${Date.now()}-${randomUUID().slice(0, 8)}.txt`;
+  const filePath = path.join(path.resolve(folderPath), 'uploads', 'chat-attachments', name);
+  await atomicWriteFile(filePath, content);
+  return { type: 'txt', name, path: filePath };
+}
 
 /** Copy chat attachments into the project before their paths reach the Agent. */
 export async function stageChatAttachments(

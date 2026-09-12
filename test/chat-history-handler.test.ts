@@ -4,7 +4,7 @@ import { IPC_CHANNELS } from '../src/shared/ipc.channels'
 
 const state = vi.hoisted(() => ({
   handlers: new Map<string, (...args: any[]) => any>(),
-  read: vi.fn(), update: vi.fn(), load: vi.fn(), stage: vi.fn(), enqueue: vi.fn(),
+  read: vi.fn(), update: vi.fn(), load: vi.fn(), stage: vi.fn(), saveText: vi.fn(), enqueue: vi.fn(),
   claudeIds: [] as string[], codexIds: [] as string[], pending: new Set<string>(),
 }))
 vi.mock('electron', () => ({ ipcMain: { handle: (channel: string, handler: (...args: any[]) => any) => state.handlers.set(channel, handler) }, nativeImage: {} }))
@@ -17,7 +17,7 @@ vi.mock('../electron/main/services/agent/codex-session', () => ({
 }))
 vi.mock('../electron/main/services/agent/session-manager', () => ({ getActiveClaudeToolIds: () => state.claudeIds }))
 vi.mock('../electron/main/services/agent', () => ({ clearAgentContext: vi.fn(), enqueueAgentMessage: state.enqueue, interruptAgentTurn: vi.fn(), listAvailableSkills: vi.fn() }))
-vi.mock('../electron/main/services/chat-attachment.service', () => ({ stageChatAttachments: state.stage }))
+vi.mock('../electron/main/services/chat-attachment.service', () => ({ stageChatAttachments: state.stage, saveChatTextAttachment: state.saveText }))
 vi.mock('../electron/main/services/project.store', () => ({ loadProject: state.load, readChatHistory: state.read, updateChatMessage: state.update }))
 import { registerChatHandlers } from '../electron/main/ipc/chat.handlers'
 
@@ -31,6 +31,17 @@ beforeEach(() => {
 })
 
 describe('chat history keeps runtime and persistence consistent', () => {
+  it('saves text only in an existing project and reports disk errors', async () => {
+    const save = state.handlers.get(IPC_CHANNELS.chat.saveTextAttachment)!
+    state.load.mockResolvedValue(null)
+    expect(await save(null, 'missing', 'input')).toEqual({ success: false, error: '项目不存在或已被删除' })
+    expect(state.saveText).not.toHaveBeenCalled()
+    state.load.mockResolvedValue({ folderPath: '/project' })
+    state.saveText.mockRejectedValue(new Error('disk full'))
+    expect(await save(null, 'project', ' exact input\n')).toEqual({ success: false, error: 'disk full' })
+    expect(state.saveText).toHaveBeenCalledWith('/project', ' exact input\n')
+  })
+
   it('keeps live Claude/Codex calls running and interrupts only orphaned calls', async () => {
     const records = [tool('claude'), tool('codex'), tool('orphan')]
     state.read.mockResolvedValue(records)
