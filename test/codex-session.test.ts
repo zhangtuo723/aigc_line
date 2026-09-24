@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-const state = vi.hoisted(() => ({ options:[] as any[], starts:[] as any[], resumes:[] as any[], runs:[] as any[], events:[] as any[], hold:false, sessionIds:new Map<string,string>(), append:vi.fn(), update:vi.fn(), push:vi.fn(), end:vi.fn(), error:vi.fn(), close:vi.fn() }));
+const state = vi.hoisted(() => ({ options:[] as any[], starts:[] as any[], resumes:[] as any[], runs:[] as any[], events:[] as any[], hold:false, sessionIds:new Map<string,string>(), append:vi.fn(), update:vi.fn(), push:vi.fn(), end:vi.fn(), error:vi.fn(), close:vi.fn(), childRead:vi.fn(), childClose:vi.fn() }));
+vi.mock('../electron/main/services/agent/codex-subagent-reader',()=>({CodexSubagentReader:class { read=state.childRead; close=state.childClose; }}));
 vi.mock('electron',()=>({app:{on:vi.fn(),getPath:()=>'/tmp'}}));
 vi.mock('../electron/main/services/project.store',()=>({
  appendChatMessage:state.append,updateChatMessage:state.update,
@@ -28,6 +29,21 @@ function setup(){const id=`sdk-project-${++sequence}`;return{id,session:codexSes
 const message={id:'user-1',role:'user' as const,content:'/aigc-canvas:demo hello',timestamp:1,attachments:[{name:'image',type:'png',path:'/workspace/image.png'}]};
 beforeEach(()=>{vi.clearAllMocks();state.options=[];state.starts=[];state.resumes=[];state.runs=[];state.events=[{type:'thread.started',thread_id:'sdk-thread'},{type:'turn.completed'}];state.hold=false});
 describe('Codex SDK sessions',()=>{
+ it('routes native collab events and child history to isolated panels without changing the main reply',async()=>{
+ const {session}=setup();
+ state.childRead.mockResolvedValue({turns:[{id:'child-turn',status:'completed',items:[{id:'same-item',type:'agentMessage',text:'子 Agent 检查通过'}]}]});
+ state.events=[{type:'thread.started',thread_id:'sdk-thread'},
+ {type:'item.completed',item:{id:'spawn',type:'collab_tool_call',tool:'spawn_agent',status:'completed',sender_thread_id:'sdk-thread',receiver_thread_ids:['child-thread'],prompt:'检查分镜',agents_states:{'child-thread':{status:'running'}}}},
+ {type:'item.completed',item:{id:'same-item',type:'agent_message',text:'主 Agent 总结'}},{type:'turn.completed'}];
+ await session.enqueue(message);await vi.waitFor(()=>expect(state.end).toHaveBeenCalled());
+ expect(state.childRead).toHaveBeenCalledWith('child-thread','sdk-thread',expect.any(Set));
+ expect(state.push.mock.calls.some(([,m])=>m.subagentTask?.status==='running')).toBe(true);
+ expect(state.push.mock.calls.some(([,m])=>m.subagentTask?.status==='completed')).toBe(true);
+ const main=state.push.mock.calls.map(([,m])=>m).find(m=>m.content==='主 Agent 总结');
+ const child=state.push.mock.calls.map(([,m])=>m).find(m=>m.content==='子 Agent 检查通过');
+ expect(main.subagent).toBeUndefined();expect(child.subagent.agentId).toBe('child-thread');expect(main.id).not.toBe(child.id);
+ expect(state.childClose).toHaveBeenCalled();expect(state.error).not.toHaveBeenCalled();
+ });
  it('interrupts then resumes with the selected queued message first, preserving other messages',async()=>{
  const {session,id}=setup();state.hold=true;
  await session.enqueue(message);await vi.waitFor(()=>expect(state.runs).toHaveLength(1));

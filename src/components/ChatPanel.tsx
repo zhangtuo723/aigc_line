@@ -2,9 +2,11 @@ import { agentLabel } from '../shared/agent-config'
 import { useRef, useEffect, useLayoutEffect, useMemo, useState } from 'react'
 import type { ChatMessage as ChatMessageType } from '../shared/ipc.types'
 import { ChatMessageItem } from './ChatMessage'
+import { ChatSubagentGroup } from './ChatSubagentGroup'
 import { ChatInput } from './ChatInput'
 import { useAppStore } from '../stores/app.store'
 import { chatDisplayMessages, sameChatQueue } from '../shared/chat-state'
+import { groupChatSubagents } from '../shared/chat-subagents'
 
 const HISTORY_PAGE_SIZE = 100
 const EMPTY_QUEUE: ChatMessageType[] = []
@@ -35,6 +37,7 @@ export function ChatPanel() {
   const readingStartIndex = readingStartIdRef.current ? visibleMessages.findIndex((message) => message.id === readingStartIdRef.current) : -1
   const hiddenMessageCount = readingStartIndex >= 0 ? readingStartIndex : Math.max(0, visibleMessages.length - historyLimit)
   const displayedMessages = useMemo(() => visibleMessages.slice(hiddenMessageCount), [visibleMessages, hiddenMessageCount])
+  const displayItems = useMemo(() => groupChatSubagents(displayedMessages, visibleMessages), [displayedMessages, visibleMessages])
   useEffect(() => {
     if (currentProject?.agent?.provider !== 'codex') return
     const projectId = currentProject.id
@@ -63,7 +66,7 @@ export function ChatPanel() {
     } finally { if (useAppStore.getState().currentProject === currentProject) setSendingNow(null) }
   }
   const toolStepCount = useMemo(() => visibleMessages.reduce((count, message) => count + (message.toolCall ? 1 : 0), 0), [visibleMessages])
-  const dialogueCount = visibleMessages.length - toolStepCount
+  const dialogueCount = useMemo(() => visibleMessages.filter(message => !message.toolCall && !message.subagentTask).length, [visibleMessages])
 
   useEffect(() => {
     const viewport = messagesViewportRef.current
@@ -200,12 +203,12 @@ export function ChatPanel() {
                 加载更早的 {Math.min(HISTORY_PAGE_SIZE, hiddenMessageCount)} 条消息（还有 {hiddenMessageCount} 条）
               </button>
             )}
-            {displayedMessages.map((message) => (
-              <div key={message.id}>
-                {message.deliveryStatus === 'cancelled' && <p className="px-3 pt-2 text-right text-[10px] text-[#8a8794]">已取消发送</p>}
-                <ChatMessageItem message={message} />
-              </div>
-            ))}
+            {displayItems.map((item) => item.kind === 'subagent'
+              ? <ChatSubagentGroup key={`subagent:${item.id}`} group={item} />
+              : <div key={item.message.id}>
+                  {item.message.deliveryStatus === 'cancelled' && <p className="px-3 pt-2 text-right text-[10px] text-[#8a8794]">已取消发送</p>}
+                  <ChatMessageItem message={item.message} />
+                </div>)}
             {isAgentThinking && (
               <div className="flex gap-2 py-2">
                 <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full border border-[#d4af37]/30 bg-[#d4af37]/10 text-[10px] font-medium text-[#e8c766]">

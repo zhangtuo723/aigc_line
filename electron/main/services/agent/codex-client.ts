@@ -4,7 +4,7 @@ import { getCodexRuntime } from './codex-runtime';
 
 type RpcMessage = { id?: number | string; method?: string; params?: any; result?: any; error?: { message: string } };
 
-/** Read-only model discovery connection; agent turns use @openai/codex-sdk. */
+/** Read-only model/child-history connection; agent turns use @openai/codex-sdk. */
 export class CodexClient {
   private child: ChildProcessWithoutNullStreams;
   private nextId = 0;
@@ -28,22 +28,22 @@ export class CodexClient {
     });
   }
 
-  async initialize(): Promise<void> {
+  async initialize(timeoutMs = 30_000): Promise<void> {
     await this.request('initialize', {
       clientInfo: { name: 'aigc_canvas', title: 'AIGC CANVAS', version: '0.1.0' },
       capabilities: { experimentalApi: true },
-    });
+    }, timeoutMs);
     this.send({ method: 'initialized' });
   }
 
-  request(method: string, params: unknown): Promise<any> {
+  request(method: string, params: unknown, timeoutMs = 30_000): Promise<any> {
     if (this.closed) return Promise.reject(new Error('Codex 连接已关闭'));
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`Codex 请求超时：${method}`));
-      }, 30_000);
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       this.send({ id, method, params });
     });

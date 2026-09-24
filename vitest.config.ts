@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
+  ssr: { external: ['node:sqlite'] },
   test: {
     root: __dirname,
     include: ['test/**/*.{test,spec}.?(c|m)[jt]s?(x)'],

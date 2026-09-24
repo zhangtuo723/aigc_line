@@ -1,13 +1,13 @@
 import { ipcMain, nativeImage } from 'electron';
 import { listAgentModels } from '../services/agent/models';
-import { getCodexQueue, sendCodexQueuedNow, isCodexMessagePending, getActiveCodexToolIds } from '../services/agent/codex-session';
-import { getActiveClaudeToolIds } from '../services/agent/session-manager';
+import { getCodexQueue, sendCodexQueuedNow, isCodexMessagePending, getActiveCodexToolIds, getActiveCodexSubagentMessageIds } from '../services/agent/codex-session';
+import { getActiveClaudeToolIds, getActiveClaudeSubagentMessageIds } from '../services/agent/session-manager';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { IPC_CHANNELS } from '../../../src/shared/ipc.channels';
 import type { ChatMessage } from '../../../src/shared/ipc.types';
-import { normalizeInactiveChatTools } from '../../../src/shared/chat-history-tools';
+import { normalizeInactiveChatTools, normalizeInactiveSubagent } from '../../../src/shared/chat-history-tools';
 import { clearAgentContext, enqueueAgentMessage, interruptAgentTurn, listAvailableSkills } from '../services/agent';
 import { saveChatTextAttachment, stageChatAttachments } from '../services/chat-attachment.service';
 import { loadProject, readChatHistory, updateChatMessage } from '../services/project.store';
@@ -21,6 +21,7 @@ const PASTED_IMAGE_EXTENSIONS: Record<string, string> = {
 };
 const MAX_PASTED_IMAGE_BYTES = 20 * 1024 * 1024;
 const activeToolIds = (folderPath: string) => new Set([...getActiveClaudeToolIds(folderPath), ...getActiveCodexToolIds(folderPath)]);
+const activeSubagentIds = (folderPath: string) => new Set([...getActiveClaudeSubagentMessageIds(folderPath), ...getActiveCodexSubagentMessageIds(folderPath)]);
 
 export function registerChatHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.chat.saveTextAttachment, async (_event, projectId: string, content: string) => {
@@ -112,6 +113,13 @@ export function registerChatHandlers(): void {
         const persistedHistory = await readChatHistory(folderPath);
         const persistedById = new Map(persistedHistory.map((message) => [message.id, message]));
         for (const message of persistedHistory) {
+          if (normalizeInactiveSubagent(message, activeSubagentIds(folderPath)) !== message) {
+            await updateChatMessage(folderPath, message.id, current => {
+              const next = normalizeInactiveSubagent(current, activeSubagentIds(folderPath));
+              Object.assign(message, next);
+              return next;
+            });
+          }
           if (message.deliveryStatus === 'queued' && !isCodexMessagePending(folderPath, message.id)) {
             await updateChatMessage(folderPath, message.id, (current) => {
               const next = current.deliveryStatus === 'queued' && !isCodexMessagePending(folderPath, current.id)

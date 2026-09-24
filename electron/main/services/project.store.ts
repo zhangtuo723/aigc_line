@@ -6,6 +6,8 @@ import { app } from 'electron';
 import log from 'electron-log/main';
 import { v4 as uuidv4 } from 'uuid';
 import { atomicWriteFile, serializeFileOperation } from './atomic-file';
+import { findProject, insertProject, listProjectIndex, openProjectDatabase, projectFolderKey, queryProjectPage } from './project-index-db';
+import type { ProjectPage, ProjectPageQuery } from '../../../src/shared/ipc.types';
 import type {
   Project,
   ProjectIndex,
@@ -19,7 +21,7 @@ import {
 } from '../../../src/shared/chat-event-log';
 
 const APP_DIR_NAME = 'aigc-line';
-const PROJECTS_FILE = 'projects.json';
+const PROJECTS_DATABASE_FILE = 'projects.sqlite';
 const PROJECT_DIR_NAME = '.aigc-line';
 const MANIFEST_FILE = 'manifest.json';
 const CHAT_EVENTS_FILE = 'chat-events.jsonl';
@@ -31,32 +33,8 @@ export function getAppDataDir(): string {
   return dir;
 }
 
-async function ensureAppDir(): Promise<void> {
-  const dir = getAppDataDir();
-  await fs.mkdir(dir, { recursive: true });
-}
-
-async function readProjectsFile(): Promise<ProjectIndex> {
-  await ensureAppDir();
-  const filePath = path.join(getAppDataDir(), PROJECTS_FILE);
-  try {
-    const data = await fs.readFile(filePath, 'utf-8');
-    const parsed = JSON.parse(data) as ProjectIndex;
-    return { projects: (parsed.projects ?? []).map(p => ({ ...p, agent: normalizeProjectAgent(p.agent) })), lastOpenedId: parsed.lastOpenedId };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { projects: [] };
-    throw new Error(`项目列表读取失败：${error instanceof Error ? error.message : String(error)}`);
-  }
-}
-
-async function writeProjectsFile(index: ProjectIndex): Promise<void> {
-  await ensureAppDir();
-  const filePath = path.join(getAppDataDir(), PROJECTS_FILE);
-  await atomicWriteFile(filePath, JSON.stringify(index, null, 2));
-}
-
 const indexTransaction = <T>(operation: () => Promise<T>): Promise<T> =>
-  serializeFileOperation(path.join(getAppDataDir(), PROJECTS_FILE), operation);
+  serializeFileOperation(path.join(getAppDataDir(), PROJECTS_DATABASE_FILE), operation);
 export function createProject(name: string, folderPath: string, agentConfig?: unknown): Promise<Project> {
   return indexTransaction(() => createProjectInternal(name, folderPath, agentConfig));
 }
@@ -70,68 +48,87 @@ async function createProjectInternal(
   if (typeof folderPath !== 'string' || !path.isAbsolute(folderPath)) throw new Error('请选择有效的项目目录');
   folderPath = await fs.realpath(folderPath);
   if (!(await fs.stat(folderPath)).isDirectory()) throw new Error('项目路径必须是文件夹');
-  const index = await readProjectsFile();
-  if (index.projects.some(p => path.resolve(p.folderPath).toLowerCase() === folderPath.toLowerCase())) throw new Error('该目录已有项目，请直接打开历史项目');
+  const db = await openProjectDatabase(getAppDataDir());
   try {
-    await fs.access(path.join(folderPath, PROJECT_DIR_NAME, MANIFEST_FILE));
-    throw new Error('该目录包含已有项目，请选择一个新的目录');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-  const now = Date.now();
-  const project: Project = {
-    id: uuidv4(),
-    agent,
-    name: name.trim() || path.basename(folderPath),
-    folderPath,
-    comfyuiBaseUrl: 'http://127.0.0.1:8188',
-    createdAt: now,
-    updatedAt: now,
-  };
+    if (db.prepare('SELECT 1 FROM projects WHERE folder_path_key = ?').get(projectFolderKey(folderPath))) {
+      throw new Error('该目录已有项目，请直接打开历史项目');
+    }
+    try {
+      await fs.access(path.join(folderPath, PROJECT_DIR_NAME, MANIFEST_FILE));
+      throw new Error('该目录包含已有项目，请选择一个新的目录');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const now = Date.now();
+    const project: Project = {
+      id: uuidv4(),
+      agent,
+      name: name.trim() || path.basename(folderPath),
+      folderPath,
+      comfyuiBaseUrl: 'http://127.0.0.1:8188',
+      createdAt: now,
+      updatedAt: now,
+    };
 
-  await fs.mkdir(path.join(folderPath, PROJECT_DIR_NAME), { recursive: true });
-  const manifest: ProjectManifest = {
-    projectId: project.id,
-    agent,
-    folderPath,
-    cues: [],
-    scenes: [],
-    runs: [],
-  };
-  await writeManifest(folderPath, manifest);
-  index.projects.push(project);
-  await writeProjectsFile(index);
-  return project;
+    await fs.mkdir(path.join(folderPath, PROJECT_DIR_NAME), { recursive: true });
+    const manifest: ProjectManifest = {
+      projectId: project.id,
+      agent,
+      folderPath,
+      cues: [],
+      scenes: [],
+      runs: [],
+    };
+    await writeManifest(folderPath, manifest);
+    insertProject(db, project);
+    return project;
+  } finally { db.close(); }
 }
 
 export async function listProjects(): Promise<ProjectIndex> {
-  return indexTransaction(readProjectsFile);
+  return indexTransaction(async () => {
+    const db = await openProjectDatabase(getAppDataDir());
+    try { return listProjectIndex(db); }
+    finally { db.close(); }
+  });
+}
+
+export async function searchProjects(query: ProjectPageQuery): Promise<ProjectPage> {
+  return indexTransaction(async () => {
+    const db = await openProjectDatabase(getAppDataDir());
+    try { return queryProjectPage(db, query); }
+    finally { db.close(); }
+  });
 }
 
 export async function loadProject(id: string): Promise<Project | null> {
-  const index = await listProjects();
-  return index.projects.find((p) => p.id === id) ?? null;
+  return indexTransaction(async () => {
+    const db = await openProjectDatabase(getAppDataDir());
+    try { return findProject(db, id); }
+    finally { db.close(); }
+  });
 }
 
 export async function deleteProject(id: string): Promise<void> {
   return indexTransaction(async () => {
-  const index = await readProjectsFile();
-  index.projects = index.projects.filter((p) => p.id !== id);
-  if (index.lastOpenedId === id) {
-    delete index.lastOpenedId;
-  }
-  await writeProjectsFile(index);
+    const db = await openProjectDatabase(getAppDataDir());
+    try { db.prepare('DELETE FROM projects WHERE id = ?').run(id); }
+    finally { db.close(); }
   });
 }
 
 export async function setLastOpened(id: string): Promise<void> {
   return indexTransaction(async () => {
-  const index = await readProjectsFile();
-  if (index.projects.some((p) => p.id === id)) {
-    if (index.lastOpenedId === id) return;
-    index.lastOpenedId = id;
-    await writeProjectsFile(index);
-  }
+    const db = await openProjectDatabase(getAppDataDir());
+    try {
+      if (!findProject(db, id)) return;
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        db.prepare('UPDATE projects SET restore_on_launch = 0 WHERE restore_on_launch = 1').run();
+        db.prepare('UPDATE projects SET restore_on_launch = 1 WHERE id = ?').run(id);
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+    } finally { db.close(); }
   });
 }
 
@@ -139,10 +136,9 @@ export async function setLastOpened(id: string): Promise<void> {
 export async function closeProject(id: string): Promise<void> {
   if (typeof id !== 'string' || !id) throw new Error('项目 ID 无效');
   return indexTransaction(async () => {
-    const index = await readProjectsFile();
-    if (index.lastOpenedId !== id) return;
-    delete index.lastOpenedId;
-    await writeProjectsFile(index);
+    const db = await openProjectDatabase(getAppDataDir());
+    try { db.prepare('UPDATE projects SET restore_on_launch = 0 WHERE id = ? AND restore_on_launch = 1').run(id); }
+    finally { db.close(); }
   });
 }
 

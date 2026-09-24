@@ -42,7 +42,7 @@ export default defineConfig(({ command }) => {
               minify: isBuild,
               outDir: 'dist-electron/main',
               rollupOptions: {
-                external: [...external, 'electron'],
+                external: [...external, 'electron', 'node:sqlite'],
               },
             },
           },

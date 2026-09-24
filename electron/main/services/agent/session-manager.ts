@@ -20,7 +20,7 @@ import {
   appendChatMessage,
 } from '../project.store';
 import { messageHub } from '../message-hub';
-import type { AgentOptions, ToolCallInfo } from './types';
+import type { AgentOptions, SubagentTask, ToolCallInfo } from './types';
 import type { AvailableSkill } from '../../../../src/shared/ipc.types';
 import { buildUserPrompt, buildSystemPromptAppend } from './prompts';
 import { createPushArtifactServer } from './tools';
@@ -30,6 +30,8 @@ import { createBuiltinPluginConfig, resolveBuiltinPluginPath } from './builtin-p
 import { scanAvailableSkills } from './skills';
 import { mergeDiscoveredSkills } from './skill-metadata';
 import { getClaudeExecutablePath } from './claude-runtime';
+import { trackSubagentTask, stopActiveSubagentTasks } from './subagent-tasks';
+import { isSubagentTaskActive } from '../../../../src/shared/chat-subagents';
 
 /** MCP tools exposed to every session (bare names match mcp__push-artifact__*). */
 const CANVAS_MCP_TOOLS = [
@@ -69,6 +71,8 @@ interface ProjectAgentSession {
   wakeInput: (() => void) | null;
   activeQuery: Query | null;
   activeToolCalls: Map<string, ToolCallInfo>;
+  subagentTasks: Map<string, SubagentTask>;
+  subagentInvocations: Set<string>;
   pumping: boolean;
   /** Turns the user has requested but the agent has not finished yet */
   pendingTurns: number;
@@ -76,6 +80,13 @@ interface ProjectAgentSession {
 }
 
 const sessions = new Map<string, ProjectAgentSession>();
+
+export function getActiveClaudeSubagentMessageIds(folderPath: string): string[] {
+  return [...sessions.values()].filter(session => path.resolve(session.folderPath) === path.resolve(folderPath) && session.activeQuery)
+    .flatMap(session => [...session.subagentTasks.values()]
+      .filter(task => task.message?.subagentTask && isSubagentTaskActive(task.message.subagentTask))
+      .map(task => task.message!.id));
+}
 
 export function getActiveClaudeToolIds(folderPath: string): string[] {
   return [...sessions.values()].filter((session) => path.resolve(session.folderPath) === path.resolve(folderPath) && session.activeQuery)
@@ -97,6 +108,8 @@ function getOrCreateSession(
       wakeInput: null,
       activeQuery: null,
       activeToolCalls: new Map(),
+      subagentTasks: new Map(),
+      subagentInvocations: new Set(),
       pumping: false,
       pendingTurns: 0,
       pendingContextClear: null,
@@ -134,6 +147,16 @@ async function handleStreamMessage(
 ): Promise<void> {
   if (message && typeof message === 'object') {
     const msg = message as Record<string, unknown>;
+    await trackSubagentTask(session, msg);
+    if (msg.type === 'system' && typeof msg.task_id === 'string') {
+      const task = session.subagentTasks.get(msg.task_id.replace(/^agent-/, ''));
+      if (task?.message?.subagentTask && !isSubagentTaskActive(task.message.subagentTask)) {
+        await interruptActiveToolCalls(session.projectId, session.folderPath, activeToolCalls,
+          '子 Agent 任务已结束，工具未返回完成事件。', tool =>
+            tool.subagent?.parentToolUseId === task.parentToolUseId
+            || tool.subagent?.agentId?.replace(/^agent-/, '') === String(msg.task_id).replace(/^agent-/, ''));
+      }
+    }
     // Capture session ID from init message
     if (msg.type === 'system' && msg.subtype === 'init') {
       const sessionIdFromMsg =
@@ -146,7 +169,9 @@ async function handleStreamMessage(
     // A turn finished (success, error, or interrupt). When no turns remain,
     // tell the frontend to clear the thinking indicator.
     if (msg.type === 'result') {
-      await interruptActiveToolCalls(session.projectId, session.folderPath, activeToolCalls);
+      await interruptActiveToolCalls(session.projectId, session.folderPath, activeToolCalls, undefined, tool =>
+        !tool.subagent && ![...session.subagentTasks.values()].some(task =>
+          task.parentToolUseId === tool.id && task.message?.subagentTask && isSubagentTaskActive(task.message.subagentTask)));
       if (session.pendingContextClear) {
         const pending = session.pendingContextClear;
         session.pendingContextClear = null;
@@ -182,6 +207,15 @@ async function handleStreamMessage(
       role: 'assistant',
       content: text,
       timestamp: Date.now(),
+      ...(message && typeof message === 'object' && typeof (message as Record<string, unknown>).parent_tool_use_id === 'string'
+        ? { subagent: {
+          parentToolUseId: (message as Record<string, string>).parent_tool_use_id,
+          type: typeof (message as Record<string, unknown>).subagent_type === 'string'
+            ? (message as Record<string, string>).subagent_type : undefined,
+          description: typeof (message as Record<string, unknown>).task_description === 'string'
+            ? (message as Record<string, string>).task_description : undefined,
+        } }
+        : {}),
     };
     messageHub.pushToFrontend(session.projectId, textMsg);
     await appendChatMessage(session.folderPath, textMsg);
@@ -244,6 +278,7 @@ async function pump(session: ProjectAgentSession): Promise<void> {
           // .claude/skills remain discoverable and are never modified.
           plugins: [createBuiltinPluginConfig(builtinPluginPath)],
           skills: 'all',
+          forwardSubagentText: true,
           // Resume existing session if available, otherwise start fresh
           ...(sessionId ? { resume: sessionId } : {}),
           mcpServers: {
@@ -256,7 +291,7 @@ async function pump(session: ProjectAgentSession): Promise<void> {
             preset: 'claude_code',
             append: buildSystemPromptAppend(folderPath),
           },
-          hooks: createToolTrackingHooks(projectId, folderPath, activeToolCalls),
+          hooks: createToolTrackingHooks(projectId, folderPath, activeToolCalls, session.subagentTasks, session.subagentInvocations),
         },
       });
       session.activeQuery = stream;
@@ -271,6 +306,7 @@ async function pump(session: ProjectAgentSession): Promise<void> {
         log.error('[Agent] Stream error:', err);
       }
       session.activeQuery = null;
+      await stopActiveSubagentTasks(session);
       await interruptActiveToolCalls(
         projectId,
         folderPath,
@@ -294,6 +330,7 @@ async function pump(session: ProjectAgentSession): Promise<void> {
   } finally {
     session.pumping = false;
     session.activeQuery = null;
+    await stopActiveSubagentTasks(session);
     if (session.pendingContextClear) {
       const pending = session.pendingContextClear;
       session.pendingContextClear = null;

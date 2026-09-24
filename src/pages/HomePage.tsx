@@ -1,7 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { CreateProjectDialog } from '../components/CreateProjectDialog';
 import { agentLabel } from '../shared/agent-config';
 import { useAppStore } from '../stores/app.store';
+import type { ProjectPage } from '../shared/ipc.types';
+
+const PAGE_SIZE = 18;
 
 function FolderIcon({ className = 'h-5 w-5' }: { className?: string }) {
   return (
@@ -19,18 +22,34 @@ export function HomePage() {
   const [creating, setCreating] = useState(false);
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState('newest');
+  const [page, setPage] = useState(1);
+  const [result, setResult] = useState<ProjectPage>({ projects: [], total: 0, page: 1, pageSize: PAGE_SIZE });
+  const [loading, setLoading] = useState(true);
+  const [queryError, setQueryError] = useState('');
   const [error, setError] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  const visibleProjects = useMemo(() => {
-    const query = search.trim().toLocaleLowerCase();
-    return projects.filter((project) =>
-      [project.name, project.folderPath, agentLabel(project.agent), project.agent?.model ?? '默认模型']
-        .some((value) => value.toLocaleLowerCase().includes(query)),
-    ).sort((a, b) => sort === 'name'
-      ? a.name.localeCompare(b.name, 'zh-CN', { numeric: true })
-      : b.createdAt - a.createdAt || a.name.localeCompare(b.name, 'zh-CN'));
-  }, [projects, search, sort]);
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    const timer = setTimeout(() => {
+      void window.electronAPI.searchProjects({ search, sort: sort === 'name' ? 'name' : 'newest', page, pageSize: PAGE_SIZE })
+        .then((next) => {
+          if (!active) return;
+          setResult(next);
+          setQueryError('');
+          if (next.page !== page) setPage(next.page);
+        })
+        .catch((cause) => {
+          if (active) setQueryError(cause instanceof Error ? cause.message : String(cause));
+        })
+        .finally(() => { if (active) setLoading(false); });
+    }, 150);
+    return () => { active = false; clearTimeout(timer); };
+  }, [search, sort, page, projects]);
+
+  const visibleProjects = result.projects;
+  const totalPages = Math.max(1, Math.ceil(result.total / PAGE_SIZE));
 
   const runProjectAction = async (id: string, action: (id: string) => Promise<void>) => {
     setBusyId(id);
@@ -103,7 +122,7 @@ export function HomePage() {
               <div className="mb-6 flex flex-wrap items-center justify-between gap-4 border-b border-white/[0.07] pb-5">
                 <p aria-live="polite" className="text-sm text-[#a5a2af]">
                   全部项目 <span className="ml-2 rounded-md bg-white/5 px-2 py-1 text-xs tabular-nums text-[#e8e6df]">{projects.length}</span>
-                  {search.trim() && <span className="ml-3 text-xs text-[#8a8794]">找到 {visibleProjects.length} 个</span>}
+                  {search.trim() && <span className="ml-3 text-xs text-[#8a8794]">找到 {result.total} 个</span>}
                 </p>
                 <div className="flex w-full flex-wrap gap-3 sm:w-auto">
                   <div className="relative min-w-0 flex-1 sm:w-72 sm:flex-none">
@@ -116,14 +135,14 @@ export function HomePage() {
                       aria-label="搜索项目"
                       placeholder="搜索项目、目录或模型…"
                       value={search}
-                      onChange={(event) => setSearch(event.target.value)}
+                      onChange={(event) => { setSearch(event.target.value); setPage(1); }}
                       className="h-10 w-full rounded-lg border border-white/10 bg-white/[0.025] pl-10 pr-3 text-sm text-[#e8e6df] outline-none placeholder:text-[#777482] focus:border-[#d4af37]/60"
                     />
                   </div>
                   <select
                     aria-label="项目排序"
                     value={sort}
-                    onChange={(event) => setSort(event.target.value)}
+                    onChange={(event) => { setSort(event.target.value); setPage(1); }}
                     className="h-10 rounded-lg border border-white/10 bg-[#121219] px-3 text-sm text-[#b9b6c2] outline-none focus:border-[#d4af37]/60"
                   >
                     <option value="newest">最新创建</option>
@@ -132,11 +151,14 @@ export function HomePage() {
                 </div>
               </div>
 
-              {visibleProjects.length === 0 ? (
+              {queryError && <p role="alert" className="mb-4 rounded-lg border border-rose-400/20 bg-rose-400/5 px-4 py-2 text-sm text-rose-300">项目搜索失败：{queryError}</p>}
+              {loading ? (
+                <p className="py-16 text-center text-sm text-[#8a8794]">正在加载项目…</p>
+              ) : visibleProjects.length === 0 ? (
                 <div className="py-20 text-center">
                   <p className="text-base text-[#e8e6df]">没有找到匹配的项目</p>
                   <p className="mt-2 text-sm text-[#8a8794]">试试其他名称、目录或模型关键词。</p>
-                  <button onClick={() => setSearch('')} className="mt-5 rounded-lg px-4 py-2 text-sm text-[#e8c766] hover:bg-[#d4af37]/10">清除搜索</button>
+                  <button onClick={() => { setSearch(''); setPage(1); }} className="mt-5 rounded-lg px-4 py-2 text-sm text-[#e8c766] hover:bg-[#d4af37]/10">清除搜索</button>
                 </div>
               ) : (
                 <div aria-label="项目列表" className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,280px),1fr))] gap-4">
@@ -173,6 +195,13 @@ export function HomePage() {
                     </article>
                   ))}
                 </div>
+              )}
+              {!loading && result.total > PAGE_SIZE && (
+                <nav aria-label="项目分页" className="mt-8 flex flex-wrap items-center justify-center gap-2 text-sm">
+                  <button type="button" disabled={result.page <= 1} onClick={() => setPage(result.page - 1)} className="rounded-lg border border-white/10 px-3 py-2 text-[#b9b6c2] hover:border-[#d4af37]/40 disabled:cursor-not-allowed disabled:opacity-35">上一页</button>
+                  <span className="px-3 text-[#8a8794]">第 {result.page} / {totalPages} 页</span>
+                  <button type="button" disabled={result.page >= totalPages} onClick={() => setPage(result.page + 1)} className="rounded-lg border border-white/10 px-3 py-2 text-[#b9b6c2] hover:border-[#d4af37]/40 disabled:cursor-not-allowed disabled:opacity-35">下一页</button>
+                </nav>
               )}
             </>
           )}

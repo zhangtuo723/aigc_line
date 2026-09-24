@@ -12,8 +12,9 @@ import { getNetworkCodexRuntime } from './codex-runtime';
 import { startCanvasMcpBridge, type CanvasMcpBridge } from './canvas-mcp';
 import { buildSystemPromptAppend, buildUserPrompt } from './prompts';
 import { scanAvailableSkills } from './skills';
+import { CodexSubagents } from './codex-subagents';
 
-/** The TypeScript SDK has no model-list method. Only discovery uses app-server. */
+/** The TypeScript SDK has no model-list method; discovery uses read-only app-server. */
 export async function listCodexModels(): Promise<AgentModelsResult> {
   let client: CodexClient | undefined;
   try {
@@ -47,6 +48,8 @@ class CodexSession {
   private lastStreamError = '';
   private priorityMessageId?: string;
   private preparingMessageId?: string;
+  private rootThreadId?: string;
+  private subagents: CodexSubagents;
   hasPendingMessage(folderPath: string, messageId: string): boolean {
     return path.resolve(folderPath) === path.resolve(this.options.folderPath)
       && (this.preparingMessageId === messageId || this.queue.some(message => message.id === messageId));
@@ -67,7 +70,11 @@ class CodexSession {
 
   activeToolIds(folderPath: string): string[] {
     if (!this.running || path.resolve(folderPath) !== path.resolve(this.options.folderPath)) return [];
-    return [...this.messages.values()].flatMap((message) => message.toolCall?.status === 'running' ? [message.toolCall.id] : []);
+    return [...this.subagents.activeToolIds(), ...[...this.messages.values()].flatMap((message) => message.toolCall?.status === 'running' ? [message.toolCall.id] : [])];
+  }
+
+  activeSubagentMessageIds(folderPath: string): string[] {
+    return path.resolve(folderPath) === path.resolve(this.options.folderPath) ? this.subagents.activeMessageIds() : [];
   }
 
   sendNow(messageId: string): void {
@@ -83,7 +90,7 @@ class CodexSession {
     } else void this.pump();
   }
 
-  constructor(private options: AgentOptions) {}
+  constructor(private options: AgentOptions) { this.subagents = new CodexSubagents(options.projectId, options.folderPath); }
 
   private async save(message: ChatMessage, persist = true): Promise<void> {
     this.messages.set(message.id, message);
@@ -96,6 +103,7 @@ class CodexSession {
 
   private async handleEvent(event: ThreadEvent): Promise<void> {
     if (event.type === 'thread.started') {
+      this.rootThreadId = event.thread_id;
       await writeSessionId(this.options.folderPath, event.thread_id, 'codex');
       return;
     }
@@ -108,6 +116,7 @@ class CodexSession {
       await this.save({ id: `codex-${this.turnKey}-connection`, role: 'system', content: event.message, timestamp: Date.now() });
       return;
     }
+    if (await this.subagents.handle(event, this.turnKey, this.rootThreadId)) return;
     if (event.type !== 'item.started' && event.type !== 'item.updated' && event.type !== 'item.completed') return;
     const item = event.item;
     // CLI item IDs can restart at item_0 each turn; app history IDs must not collide.
@@ -160,6 +169,7 @@ class CodexSession {
       sandboxMode: 'danger-full-access' as const,
     };
     const previous = await readSessionId(this.options.folderPath, 'codex');
+    this.rootThreadId = previous ?? undefined;
     this.thread = previous ? codex.resumeThread(previous, threadOptions) : codex.startThread(threadOptions);
   }
 
@@ -224,6 +234,7 @@ class CodexSession {
         if (isPriority) this.priorityMessageId = undefined;
         await this.setDelivery(message, 'sent');
         this.preparingMessageId = undefined;
+        this.subagents.begin();
         const { events } = await this.thread!.runStreamed(input, { signal: this.controller.signal });
         let completed = false;
         for await (const event of events) {
@@ -231,6 +242,7 @@ class CodexSession {
           if (event.type === 'turn.completed') completed = true;
         }
         if (!completed && !this.stopping) throw new Error(this.lastStreamError || 'Codex 流已结束，但没有收到回合完成事件');
+        await this.subagents.finish();
         await this.flushMessages();
       }
     } catch (error) {
@@ -241,8 +253,9 @@ class CodexSession {
       }
     } finally {
       this.preparingMessageId = undefined;
-      try { await this.flushMessages(); await this.disconnect(); }
+      try { await this.subagents.finish(); await this.flushMessages(); }
       catch (error) { messageHub.notifyError(this.options.projectId, `Codex 会话保存/关闭失败：${error}`); }
+      finally { await this.disconnect().catch(error => messageHub.notifyError(this.options.projectId, `Codex 连接关闭失败：${error}`)); }
       this.controller = undefined;
       this.running = false;
       if (this.queue.length) void this.pump();
@@ -263,13 +276,15 @@ class CodexSession {
     try {
       await this.disconnect();
       await writeSessionId(this.options.folderPath, '', 'codex');
+      this.rootThreadId = undefined;
+      this.subagents = new CodexSubagents(this.options.projectId, this.options.folderPath);
       const message: ChatMessage = { id: `context-cleared-${randomUUID()}`, role: 'system', content: 'Codex 上下文已清空。聊天历史和画布继续保留。', timestamp: Date.now(), event: 'context-cleared' };
       await appendChatMessage(this.options.folderPath, message);
       messageHub.pushToFrontend(this.options.projectId, message);
     } finally { this.clearing = false; }
   }
 
-  close(): void { void this.interrupt(); void this.disconnect().catch(() => undefined); }
+  close(): void { this.subagents.close(); void this.interrupt(); void this.disconnect().catch(() => undefined); }
 }
 
 const sessions = new Map<string, CodexSession>();
@@ -285,6 +300,9 @@ export function isCodexMessagePending(folderPath: string, messageId: string): bo
 }
 export function getActiveCodexToolIds(folderPath: string): string[] {
   return [...sessions.values()].flatMap((session) => session.activeToolIds(folderPath));
+}
+export function getActiveCodexSubagentMessageIds(folderPath: string): string[] {
+  return [...sessions.values()].flatMap(session => session.activeSubagentMessageIds(folderPath));
 }
 export function sendCodexQueuedNow(projectId: string, messageId: string): void {
   const session = sessions.get(projectId);

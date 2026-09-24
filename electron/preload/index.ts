@@ -8,6 +8,8 @@ import type {
   CloseReadyResult,
   GenerationTaskSummary,
   ProjectIndex,
+  ProjectPage,
+  ProjectPageQuery,
   ChatMessage,
   CodexQueueResult,
   Artifact,
@@ -52,6 +54,7 @@ export interface ElectronAPI {
   platform: NodeJS.Platform;
   createProject: (name: string, folderPath: string, agent?: ProjectAgentConfig) => Promise<Project>;
   listProjects: () => Promise<ProjectIndex>;
+  searchProjects: (query: ProjectPageQuery) => Promise<ProjectPage>;
   loadProject: (id: string) => Promise<Project | null>;
   closeProject: (id: string) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
@@ -124,6 +127,7 @@ const api: ElectronAPI = {
   createProject: (name, folderPath, agent) =>
     invoke(IPC_CHANNELS.project.create, name, folderPath, agent),
   listProjects: () => invoke(IPC_CHANNELS.project.list),
+  searchProjects: (query) => invoke(IPC_CHANNELS.project.search, query),
   loadProject: (id) => invoke(IPC_CHANNELS.project.load, id),
   closeProject: (id) => invoke(IPC_CHANNELS.project.close, id),
   deleteProject: (id) => invoke(IPC_CHANNELS.project.delete, id),

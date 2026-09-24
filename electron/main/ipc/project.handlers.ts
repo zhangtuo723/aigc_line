@@ -5,6 +5,7 @@ import { IPC_CHANNELS } from '../../../src/shared/ipc.channels';
 import {
   createProject,
   listProjects,
+  searchProjects,
   loadProject,
   closeProject,
   deleteProject,
@@ -12,6 +13,7 @@ import {
   readManifest,
 } from '../services/project.store';
 import { importProjectMediaFiles, listProjectMediaAssets } from '../services/project-media.service';
+import type { ProjectPageQuery } from '../../../src/shared/ipc.types';
 
 export function registerProjectHandlers(): void {
   ipcMain.handle(
@@ -24,6 +26,8 @@ export function registerProjectHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.project.list, async () => {
     return listProjects();
   });
+
+  ipcMain.handle(IPC_CHANNELS.project.search, async (_event, query: ProjectPageQuery) => searchProjects(query));
 
   ipcMain.handle(IPC_CHANNELS.project.load, async (_event, id: string) => {
     const project = await loadProject(id);

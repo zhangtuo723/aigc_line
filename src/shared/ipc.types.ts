@@ -16,6 +16,20 @@ export interface ProjectIndex {
   lastOpenedId?: string;
 }
 
+export interface ProjectPageQuery {
+  search?: string;
+  sort?: 'newest' | 'name';
+  page?: number;
+  pageSize?: number;
+}
+
+export interface ProjectPage {
+  projects: Project[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 /** Workspace manifest; legacy production arrays are preserved for older projects. */
 export interface ProjectManifest {
   projectId: string;
@@ -119,6 +133,13 @@ export interface Artifact {
   timestamp: number;
 }
 
+export interface SubagentTaskState {
+  taskId: string;
+  status: 'pending' | 'running' | 'paused' | 'completed' | 'failed' | 'stopped' | 'unknown';
+  summary?: string;
+  detailError?: string;
+}
+
 // Unified chat message type
 export interface ChatMessage {
   deliveryStatus?: 'queued' | 'sent' | 'cancelled';
@@ -126,6 +147,15 @@ export interface ChatMessage {
   role: MessageRole;
   content: string;
   timestamp: number;
+  /** Child ownership shared by Claude and Codex adapters. */
+  subagent?: {
+    parentToolUseId?: string;
+    agentId?: string;
+    type?: string;
+    description?: string;
+  };
+  /** Lifecycle record, rendered in the child panel header rather than as dialogue. */
+  subagentTask?: SubagentTaskState;
   attachments?: Attachment[];
   /** Canvas artifacts the user referenced (clicked) for this message */
   artifactRefs?: ArtifactRef[];

@@ -5,6 +5,7 @@ export const IPC_CHANNELS = {
   project: {
     create: 'project:create',
     list: 'project:list',
+    search: 'project:search',
     load: 'project:load',
     close: 'project:close',
     delete: 'project:delete',

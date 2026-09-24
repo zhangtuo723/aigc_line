@@ -5,7 +5,7 @@ import { IPC_CHANNELS } from '../src/shared/ipc.channels'
 const state = vi.hoisted(() => ({
   handlers: new Map<string, (...args: any[]) => any>(),
   read: vi.fn(), update: vi.fn(), load: vi.fn(), stage: vi.fn(), saveText: vi.fn(), enqueue: vi.fn(),
-  claudeIds: [] as string[], codexIds: [] as string[], pending: new Set<string>(),
+  claudeIds: [] as string[], codexIds: [] as string[], subagentIds: [] as string[], codexSubagentIds: [] as string[], pending: new Set<string>(),
 }))
 vi.mock('electron', () => ({ ipcMain: { handle: (channel: string, handler: (...args: any[]) => any) => state.handlers.set(channel, handler) }, nativeImage: {} }))
 vi.mock('electron-log/main', () => ({ default: { error: vi.fn() } }))
@@ -14,8 +14,12 @@ vi.mock('../electron/main/services/agent/codex-session', () => ({
   getCodexQueue: vi.fn(), sendCodexQueuedNow: vi.fn(),
   isCodexMessagePending: (_folder: string, id: string) => state.pending.has(id),
   getActiveCodexToolIds: () => state.codexIds,
+  getActiveCodexSubagentMessageIds: () => state.codexSubagentIds,
 }))
-vi.mock('../electron/main/services/agent/session-manager', () => ({ getActiveClaudeToolIds: () => state.claudeIds }))
+vi.mock('../electron/main/services/agent/session-manager', () => ({
+  getActiveClaudeToolIds: () => state.claudeIds,
+  getActiveClaudeSubagentMessageIds: () => state.subagentIds,
+}))
 vi.mock('../electron/main/services/agent', () => ({ clearAgentContext: vi.fn(), enqueueAgentMessage: state.enqueue, interruptAgentTurn: vi.fn(), listAvailableSkills: vi.fn() }))
 vi.mock('../electron/main/services/chat-attachment.service', () => ({ stageChatAttachments: state.stage, saveChatTextAttachment: state.saveText }))
 vi.mock('../electron/main/services/project.store', () => ({ loadProject: state.load, readChatHistory: state.read, updateChatMessage: state.update }))
@@ -27,10 +31,33 @@ const loadHistory = () => state.handlers.get(IPC_CHANNELS.chat.loadHistory)!(nul
 beforeEach(() => {
   vi.clearAllMocks()
   state.claudeIds = []; state.codexIds = []; state.pending.clear()
+  state.subagentIds = []
+  state.codexSubagentIds = []
   registerChatHandlers()
 })
 
 describe('chat history keeps runtime and persistence consistent', () => {
+  it('keeps live background subagents running and stops tasks orphaned by restart', async () => {
+    const records: ChatMessage[] = ['live', 'codex-live', 'orphan'].map(id => ({
+      id, role: 'system', content: '', timestamp: 1, subagentTask: { taskId: id, status: 'running' },
+    }))
+    state.read.mockResolvedValue(records)
+    state.subagentIds = ['live']
+    state.codexSubagentIds = ['codex-live']
+    state.update.mockImplementation(async (_folder, id, update) => update(records.find(message => message.id === id)))
+    expect((await loadHistory()).map(message => message.subagentTask?.status)).toEqual(['running', 'running', 'stopped'])
+  })
+
+  it('preserves task completion racing with history load', async () => {
+    const initial: ChatMessage = { id: 'task', role: 'system', content: '', timestamp: 1, subagentTask: { taskId: 'child', status: 'running' } }
+    const completed: ChatMessage = { ...initial, subagentTask: { taskId: 'child', status: 'completed' } }
+    state.read.mockResolvedValue([initial])
+    state.update.mockImplementation(async (_folder, _id, update) => {
+      expect(update(completed)).toBe(completed)
+    })
+    expect(await loadHistory()).toEqual([completed])
+  })
+
   it('saves text only in an existing project and reports disk errors', async () => {
     const save = state.handlers.get(IPC_CHANNELS.chat.saveTextAttachment)!
     state.load.mockResolvedValue(null)
